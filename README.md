@@ -25,12 +25,14 @@ Il nome **Commento** e' provvisorio.
 - rilevamento automatico del Keystep Pro, senza MIDI thru esterno;
 - interfaccia touch a quattro organismi MIDI e una fascia RESPIRO, con stati
   espliciti, meter del sax e controlli grandi;
+- un livello indipendente e anti-click per basso, MIDI 2/3/4 e sax, richiamato
+  selezionando la relativa card;
 - build macOS e Raspberry Pi OS 64 bit dallo stesso codice.
 
 Questa versione non salva ancora i loop su disco. Salva invece l'ultimo scenario
-selezionato, il livello di GRANA e l'ultima configurazione audio applicata. I
-parametri sonori sono scelti per il live e non espongono ancora un pannello di
-sintesi dettagliato.
+selezionato, il livello di GRANA, i cinque livelli di performance e l'ultima
+configurazione audio applicata. I parametri sonori sono scelti per il live e non
+espongono ancora un pannello di sintesi dettagliato.
 
 ## Flusso del sistema autonomo
 
@@ -114,8 +116,10 @@ durante il collegamento.
 - usare **GRANA** per scegliere `PULITA`, `LEGGERA`, `MEDIA` o `PIENA`; il valore
   iniziale e' PULITA e viene ricordato al riavvio;
 - toccare una card per selezionare BASSO LIVE, MAREA, RADICE, SCINTILLA o RESPIRO;
-- su BASSO LIVE, usare **ATTIVA BASSO** / **SPEGNI BASSO**; questa parte non
-  viene mai registrata nel looper;
+- regolare il grande controllo **LIVELLO** della card selezionata; i cinque
+  valori sono indipendenti, partono da -6 dB e vengono ricordati al riavvio;
+- su BASSO LIVE, usare **MUTA BASSO LIVE** / **RIATTIVA BASSO LIVE**; e' solo
+  un mute rapido, perche' il MIDI 5 resta sempre live e non viene mai registrato;
 - premere **SEMINA** per iniziare a registrare;
 - premere **CHIUDI IL CICLO** per stabilire la durata libera;
 - tenere premuto **TIENI PER DISSOLVERE** per 1,1 secondi per cancellare;

@@ -5,9 +5,32 @@
 
 namespace
 {
+float calibratedBassLevel(OscillatorModel model) noexcept
+{
+    // The live bass is folded from a constant-power stereo voice to one mono
+    // Model 12 channel. Oscillator families do not have the same peak/RMS
+    // energy, so a single level made pulse/sub scenes noticeably hotter. These
+    // values keep maximum-velocity, maximum-expression factory patches within
+    // roughly one decibel of one another while retaining about 11 dBFS of
+    // performance headroom before the user's per-sound attenuation.
+    switch (model)
+    {
+        case OscillatorModel::sub:   return 0.205f;
+        case OscillatorModel::warm:  return 0.240f;
+        case OscillatorModel::pluck: return 0.215f;
+        case OscillatorModel::pulse: return 0.192f;
+        case OscillatorModel::glass:
+        case OscillatorModel::reed:
+        case OscillatorModel::cloud:
+        case OscillatorModel::bell:
+        case OscillatorModel::air:   return 0.215f;
+    }
+    return 0.215f;
+}
+
 SynthPatch makeBass(const char* name, OscillatorModel model, int transpose,
                     float cutoff, float attack, float release, float drive,
-                    float level = 0.24f)
+                    float calibratedLevel = 0.0f)
 {
     SynthPatch patch;
     patch.name = name;
@@ -24,7 +47,8 @@ SynthPatch makeBass(const char* name, OscillatorModel model, int transpose,
     patch.harmonicMix = 0.24f;
     patch.lfoRateHz = 0.05f;
     patch.lfoDepth = 0.025f;
-    patch.level = level;
+    patch.level = calibratedLevel > 0.0f
+        ? calibratedLevel : calibratedBassLevel(model);
     patch.reverbSize = 0.35f;
     patch.reverbDamping = 0.72f;
     patch.reverbWet = 0.0f;
@@ -218,7 +242,8 @@ const std::array<SoundScenario, CommentoScenarios::count> scenarios {{
     {
         "POLVERE", "fragile, opaco, granuloso",
         {{
-            makeBass("BASSO ROTTO", OscillatorModel::pulse, -12, 980.0f, 0.014f, 0.36f, 1.62f),
+            makeBass("BASSO ROTTO", OscillatorModel::pulse, -12, 980.0f,
+                     0.014f, 0.36f, 1.62f, 0.213f),
             makePluck("TASTO SECCO", OscillatorModel::reed, 3300.0f, 620.0f, 0.52f, -0.27f, 0.45f),
             makeAir("GRANA", 0.12f, 5.2f, 2600.0f, 0.22f, 0.64f),
             makePad("FANTASMA", OscillatorModel::cloud, 2.8f, 12.0f, 1900.0f, 0.36f, 0.88f)

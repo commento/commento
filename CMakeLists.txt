@@ -33,6 +33,7 @@ target_sources(Commento PRIVATE
     Source/MainComponent.cpp
     Source/Engine/AmbientSynth.cpp
     Source/Engine/EcosystemEngine.cpp
+    Source/Engine/PerformanceLevels.cpp
     Source/Engine/SaxProcessor.cpp
     Source/Engine/Scenarios.cpp
     Source/Hardware/Model12AudioRouter.cpp
@@ -75,6 +76,7 @@ if (BUILD_TESTING)
         Tests/EcosystemEngineTests.cpp
         Source/Engine/AmbientSynth.cpp
         Source/Engine/EcosystemEngine.cpp
+        Source/Engine/PerformanceLevels.cpp
         Source/Engine/SaxProcessor.cpp
         Source/Engine/Scenarios.cpp
         Source/Hardware/Model12AudioRouter.cpp

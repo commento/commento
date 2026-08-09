@@ -225,6 +225,17 @@ bool EcosystemEngine::isBassEnabled() const
     return bassEnabled.load();
 }
 
+void EcosystemEngine::setPerformanceLevel(int memoryIndex,
+                                          float linearGain) noexcept
+{
+    performanceLevels.setTargetGain(memoryIndex, linearGain);
+}
+
+float EcosystemEngine::getPerformanceLevel(int memoryIndex) const noexcept
+{
+    return performanceLevels.getTargetGain(memoryIndex);
+}
+
 int EcosystemEngine::memoryIndexForMidiChannel(int midiChannel)
 {
     for (int index = 0; index < midiMemoryCount; ++index)
@@ -315,7 +326,12 @@ void EcosystemEngine::prepare(double newSampleRate, int maximumBlockSize)
     const auto renderCapacity = juce::jmax(8192, maximumBlockSize);
     ambientSynthBuffer.setSize(2, renderCapacity, false, true, false);
     bassSynthBuffer.setSize(2, renderCapacity, false, true, false);
+    layerSynthBuffer.setSize(2, renderCapacity, false, true, false);
     saxRenderBuffer.setSize(2, renderCapacity, false, true, false);
+    performanceLevels.prepare(sampleRate);
+    bassMuteGain.reset(sampleRate, 0.006);
+    bassMuteGain.setCurrentAndTargetValue(bassEnabled.load() ? 1.0f : 0.0f);
+    bassWasEnabled = bassEnabled.load();
     blockMidiOutput.ensureSize(128 * 1024);
     for (auto& midi : layerMidiBuffers)
         midi.ensureSize(64 * 1024);
@@ -392,6 +408,7 @@ void EcosystemEngine::audioDeviceIOCallbackWithContext(
     float* const* outputChannelData, int numOutputChannels, int numSamples,
     const juce::AudioIODeviceCallbackContext&)
 {
+    juce::ScopedNoDenormals noDenormals;
     callbackInputChannels.store(numInputChannels);
     callbackOutputChannels.store(numOutputChannels);
 
@@ -488,8 +505,13 @@ void EcosystemEngine::audioDeviceIOCallbackWithContext(
         for (int sample = 0; sample < numSamples; ++sample)
         {
             auto& value = outputChannelData[bassBus][sample];
-            value = protectPeak(value);
-            bassPeak = juce::jmax(bassPeak, std::abs(value));
+            // Keep the meter honest about the level entering protection: if a
+            // future patch overloads, the UI can show it even though the
+            // physical Model 12 return remains safely below full scale. The
+            // calibrated factory bass stays far below this transparent knee.
+            bassPeak = juce::jmax(bassPeak,
+                                  std::isfinite(value) ? std::abs(value) : 1.0f);
+            value = protectPeak(value, 0.78f, 0.89f); // about -1 dBFS ceiling
         }
     }
     bassOutputLevel.store(juce::jmax(
@@ -687,7 +709,8 @@ void EcosystemEngine::renderInternalSynths(float* const* outputs, int outputChan
         return;
 
     if (ambientSynthBuffer.getNumSamples() < numSamples
-        || bassSynthBuffer.getNumSamples() < numSamples)
+        || bassSynthBuffer.getNumSamples() < numSamples
+        || layerSynthBuffer.getNumSamples() < numSamples)
         return;
     ambientSynthBuffer.clear(0, numSamples);
     bassSynthBuffer.clear(0, numSamples);
@@ -714,10 +737,30 @@ void EcosystemEngine::renderInternalSynths(float* const* outputs, int outputChan
             bassWasEnabled = enabled;
         }
 
+        layerSynthBuffer.clear(0, numSamples);
+        internalSynths[static_cast<size_t>(layer)]->render(
+            layerSynthBuffer, layerMidi, 0, numSamples);
+        performanceLevels.process(layer, layerSynthBuffer, numSamples);
+        if (layer == bassLayerIndex)
+        {
+            const auto muteTarget = bassWasEnabled ? 1.0f : 0.0f;
+            if (std::abs(bassMuteGain.getTargetValue() - muteTarget) > 0.001f)
+                bassMuteGain.setTargetValue(muteTarget);
+            auto* left = layerSynthBuffer.getWritePointer(0);
+            auto* right = layerSynthBuffer.getWritePointer(1);
+            for (int sample = 0; sample < numSamples; ++sample)
+            {
+                const auto gain = bassMuteGain.getNextValue();
+                left[sample] *= gain;
+                right[sample] *= gain;
+            }
+        }
+
         auto& destination = layer == bassLayerIndex
             ? bassSynthBuffer : ambientSynthBuffer;
-        internalSynths[static_cast<size_t>(layer)]->render(
-            destination, layerMidi, 0, numSamples);
+        for (int channel = 0; channel < destination.getNumChannels(); ++channel)
+            destination.addFrom(channel, 0, layerSynthBuffer, channel, 0,
+                                numSamples);
     }
 
     for (int channel = ambientLeftBus;
@@ -878,6 +921,7 @@ void EcosystemEngine::renderAudioMemory(
 
     if (pathMode == SaxPathMode::sceneEffects)
         saxProcessor.process(saxRenderBuffer, numSamples);
+    performanceLevels.process(midiMemoryCount, saxRenderBuffer, numSamples);
     const auto safetyTarget = saxSafetyMuted.load()
             || pathMode == SaxPathMode::muted ? 0.0f : 1.0f;
     const auto safetyTime = safetyTarget < saxSafetyGain ? 0.006 : 0.25;

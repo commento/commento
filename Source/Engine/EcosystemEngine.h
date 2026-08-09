@@ -2,6 +2,7 @@
 
 #include <JuceHeader.h>
 #include "AmbientSynth.h"
+#include "PerformanceLevels.h"
 #include "SaxProcessor.h"
 #include "Scenarios.h"
 #include <array>
@@ -37,6 +38,7 @@ public:
     static constexpr int saxLeftBus = 3;
     static constexpr int saxRightBus = 4;
     static constexpr int logicalOutputBusCount = 5;
+    static_assert(PerformanceLevels::count == memoryCount);
 
     EcosystemEngine();
 
@@ -67,6 +69,8 @@ public:
     [[nodiscard]] float getTextureAmount() const;
     void setBassEnabled(bool shouldBeEnabled);
     [[nodiscard]] bool isBassEnabled() const;
+    void setPerformanceLevel(int memoryIndex, float linearGain) noexcept;
+    [[nodiscard]] float getPerformanceLevel(int memoryIndex) const noexcept;
 
     void setAudioDecay(float newDecay);
     [[nodiscard]] float getAudioDecay() const;
@@ -159,7 +163,10 @@ private:
     std::array<juce::MidiBuffer, midiMemoryCount> layerMidiBuffers;
     juce::AudioBuffer<float> ambientSynthBuffer;
     juce::AudioBuffer<float> bassSynthBuffer;
+    juce::AudioBuffer<float> layerSynthBuffer;
     juce::AudioBuffer<float> saxRenderBuffer;
+    PerformanceLevels performanceLevels;
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> bassMuteGain;
     std::atomic<float> audioDecay { 0.985f };
     std::atomic<bool> saxStereoInput { false };
     std::atomic<int> saxPathMode { static_cast<int>(SaxPathMode::sceneEffects) };

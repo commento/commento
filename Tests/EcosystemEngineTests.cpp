@@ -1,10 +1,12 @@
 #include <JuceHeader.h>
+#include "Engine/AmbientSynth.h"
 #include "Engine/EcosystemEngine.h"
 #include "Engine/Scenarios.h"
 #include "Hardware/Model12AudioRouter.h"
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cmath>
 #include <iostream>
 #include <set>
@@ -100,6 +102,8 @@ int main()
             EcosystemEngine::logicalOutputBusCount, blockSize);
     passed &= expect(bassOutput.peak(EcosystemEngine::bassBus, blockSize) > 0.0001f,
                      "MIDI 5 deve suonare sul bus audio basso");
+    passed &= expect(bassEngine.getBassOutputLevel() > 0.0001f,
+                     "il meter basso deve seguire il segnale live");
     passed &= expect(bassOutput.silent(EcosystemEngine::ambientLeftBus, blockSize)
                          && bassOutput.silent(EcosystemEngine::ambientRightBus, blockSize),
                      "il basso non deve contaminare il bus ambiente");
@@ -110,14 +114,161 @@ int main()
     bassEngine.enqueueMidiMessage(juce::MidiMessage::noteOff(5, 48));
     process(bassEngine, nullptr, 0, bassOutput.pointers.data(),
             EcosystemEngine::logicalOutputBusCount, blockSize);
-    passed &= expect(! bassEngine.hasMaterial(EcosystemEngine::bassLayerIndex),
+    passed &= expect(! bassEngine.isRecording(EcosystemEngine::bassLayerIndex)
+                         && ! bassEngine.hasMaterial(EcosystemEngine::bassLayerIndex)
+                         && bassEngine.getEventCount(
+                             EcosystemEngine::bassLayerIndex) == 0,
                      "il basso MIDI 5 deve restare live e non essere registrato");
+    const auto bassSampleBeforeMute = bassOutput.storage[
+        EcosystemEngine::bassBus].back();
     bassEngine.setBassEnabled(false);
     bassOutput.clear();
     process(bassEngine, nullptr, 0, bassOutput.pointers.data(),
             EcosystemEngine::logicalOutputBusCount, blockSize);
     passed &= expect(! bassEngine.isBassEnabled(),
                      "il basso live deve poter essere disattivato");
+    passed &= expect(std::abs(bassOutput.storage[
+                                 EcosystemEngine::bassBus].front()
+                             - bassSampleBeforeMute) < 0.015f,
+                     "MUTA BASSO LIVE deve usare un raccordo anti-click");
+    bassOutput.clear();
+    process(bassEngine, nullptr, 0, bassOutput.pointers.data(),
+            EcosystemEngine::logicalOutputBusCount, blockSize);
+    passed &= expect(bassOutput.silent(EcosystemEngine::bassBus, blockSize),
+                     "MUTA BASSO LIVE deve silenziare la coda dopo il raccordo");
+
+    // Stress every live-bass patch at maximum MIDI expression. The bass is a
+    // dedicated performance voice rather than a looper, so its factory scene
+    // levels must retain useful headroom before the user output trim.
+    float quietestBassScenarioPeak = 1.0f;
+    float loudestBassScenarioPeak = 0.0f;
+    for (int scenario = 0; scenario < CommentoScenarios::count; ++scenario)
+    {
+        EcosystemEngine scenarioBassEngine;
+        scenarioBassEngine.prepare(sampleRate, blockSize);
+        scenarioBassEngine.setScenarioIndex(scenario);
+        scenarioBassEngine.setTextureAmount(1.0f);
+        OutputBlock<EcosystemEngine::logicalOutputBusCount> scenarioBassOutput(
+            blockSize);
+        float scenarioPeak = 0.0f;
+
+        for (const auto note : { 36, 48, 60 })
+        {
+            scenarioBassEngine.enqueueMidiMessage(
+                juce::MidiMessage::channelPressureChange(5, 127));
+            scenarioBassEngine.enqueueMidiMessage(
+                juce::MidiMessage::controllerEvent(5, 74, 127));
+            scenarioBassEngine.enqueueMidiMessage(
+                juce::MidiMessage::noteOn(5, note, 1.0f));
+            for (int block = 0; block < 24; ++block)
+            {
+                scenarioBassOutput.clear();
+                process(scenarioBassEngine, nullptr, 0,
+                        scenarioBassOutput.pointers.data(),
+                        EcosystemEngine::logicalOutputBusCount, blockSize);
+                scenarioPeak = std::max(scenarioPeak,
+                    scenarioBassOutput.peak(EcosystemEngine::bassBus,
+                                            blockSize));
+            }
+            scenarioBassEngine.enqueueMidiMessage(
+                juce::MidiMessage::noteOff(5, note));
+            scenarioBassOutput.clear();
+            process(scenarioBassEngine, nullptr, 0,
+                    scenarioBassOutput.pointers.data(),
+                    EcosystemEngine::logicalOutputBusCount, blockSize);
+        }
+
+        quietestBassScenarioPeak = std::min(quietestBassScenarioPeak,
+                                            scenarioPeak);
+        loudestBassScenarioPeak = std::max(loudestBassScenarioPeak,
+                                           scenarioPeak);
+    }
+    passed &= expect(quietestBassScenarioPeak >= 0.24f
+                         && loudestBassScenarioPeak <= 0.32f,
+                     "ogni scena basso deve restare espressiva con headroom");
+    passed &= expect(loudestBassScenarioPeak
+                         <= quietestBassScenarioPeak * 1.08f,
+                     "i livelli di fabbrica del basso devono essere coerenti");
+
+    EcosystemEngine legatoBassEngine;
+    legatoBassEngine.prepare(sampleRate, blockSize);
+    OutputBlock<EcosystemEngine::logicalOutputBusCount> legatoBassOutput(
+        blockSize);
+    float previousBassSample = 0.0f;
+    float maximumBassBoundaryStep = 0.0f;
+    for (int block = 0; block < 64; ++block)
+    {
+        legatoBassEngine.enqueueMidiMessage(juce::MidiMessage::noteOn(
+            5, block % 2 == 0 ? 48 : 55, 1.0f));
+        legatoBassOutput.clear();
+        process(legatoBassEngine, nullptr, 0,
+                legatoBassOutput.pointers.data(),
+                EcosystemEngine::logicalOutputBusCount, blockSize);
+        const auto& bass = legatoBassOutput.storage[
+            EcosystemEngine::bassBus];
+        maximumBassBoundaryStep = std::max(maximumBassBoundaryStep,
+            std::abs(bass.front() - previousBassSample));
+        previousBassSample = bass.back();
+    }
+    passed &= expect(maximumBassBoundaryStep < 0.015f,
+                     "il basso mono legato non deve creare click al note-stealing");
+
+    // When eight long-release notes occupy a polyphonic layer, the next chord
+    // must steal every voice. The first new sample is crossfaded from each
+    // voice's exact previous stereo contribution; without the residual ramp
+    // this deterministic boundary jumps by about 0.08 in the left channel.
+    AmbientSynth voiceStealSynth(1);
+    SynthPatch voiceStealPatch;
+    voiceStealPatch.model = OscillatorModel::glass;
+    voiceStealPatch.attackSeconds = 0.001f;
+    voiceStealPatch.decaySeconds = 1.0f;
+    voiceStealPatch.sustain = 1.0f;
+    voiceStealPatch.releaseSeconds = 10.0f;
+    voiceStealPatch.cutoffHz = 18000.0f;
+    voiceStealPatch.keyTrack = 0.0f;
+    voiceStealPatch.harmonicMix = 0.0f;
+    voiceStealPatch.lfoDepth = 0.0f;
+    voiceStealPatch.level = 0.12f;
+    voiceStealPatch.delayMix = 0.0f;
+    voiceStealPatch.reverbWet = 0.0f;
+    voiceStealSynth.setPatch(voiceStealPatch);
+    voiceStealSynth.prepare(sampleRate, blockSize);
+    juce::AudioBuffer<float> voiceStealOutput(2, blockSize);
+    juce::MidiBuffer voiceStealMidi;
+    for (int note = 0; note < 8; ++note)
+        voiceStealMidi.addEvent(juce::MidiMessage::noteOn(
+            2, 48 + note * 3, 0.9f), 0);
+    voiceStealOutput.clear();
+    voiceStealSynth.render(voiceStealOutput, voiceStealMidi, 0, blockSize);
+    for (int block = 0; block < 32; ++block)
+    {
+        voiceStealOutput.clear();
+        voiceStealMidi.clear();
+        voiceStealSynth.render(voiceStealOutput, voiceStealMidi, 0, blockSize);
+    }
+    voiceStealMidi.clear();
+    for (int note = 0; note < 8; ++note)
+        voiceStealMidi.addEvent(juce::MidiMessage::noteOff(
+            2, 48 + note * 3), 0);
+    voiceStealOutput.clear();
+    voiceStealSynth.render(voiceStealOutput, voiceStealMidi, 0, blockSize);
+    const std::array<float, 2> previousVoiceStealSamples {
+        voiceStealOutput.getSample(0, blockSize - 1),
+        voiceStealOutput.getSample(1, blockSize - 1)
+    };
+    voiceStealMidi.clear();
+    for (int note = 0; note < 8; ++note)
+        voiceStealMidi.addEvent(juce::MidiMessage::noteOn(
+            2, 48 + note * 3, 0.9f), 0);
+    voiceStealOutput.clear();
+    voiceStealSynth.render(voiceStealOutput, voiceStealMidi, 0, blockSize);
+    const auto voiceStealBoundaryStep = std::max(
+        std::abs(voiceStealOutput.getSample(0, 0)
+                 - previousVoiceStealSamples[0]),
+        std::abs(voiceStealOutput.getSample(1, 0)
+                 - previousVoiceStealSamples[1]));
+    passed &= expect(voiceStealBoundaryStep < 0.005f,
+                     "il voice-stealing ambient deve avere un raccordo anti-crackle");
 
     EcosystemEngine loopEngine;
     loopEngine.prepare(sampleRate, blockSize);
@@ -149,6 +300,96 @@ int main()
                          && loopEngine.getEventCount(1) == 2
                          && std::abs(loopEngine.getLengthSeconds(1) - loopLength) < 0.0001,
                      "cambiare scenario non deve cancellare o alterare i loop MIDI");
+
+    // Fill all eight voices on each of the three loopable MIDI layers. This
+    // reproduces the worst useful polyphony (24 ambient voices) without a
+    // timing assertion that would depend on the build machine. The rendered
+    // signal must remain finite, retain headroom and cross asynchronous loop
+    // wraps without full-scale discontinuities.
+    EcosystemEngine multiLoopEngine;
+    constexpr auto factoryPerformanceGain = 0.5011872f; // -6 dB
+    for (int layer = 1; layer < EcosystemEngine::midiMemoryCount; ++layer)
+        multiLoopEngine.setPerformanceLevel(layer, factoryPerformanceGain);
+    multiLoopEngine.prepare(sampleRate, blockSize);
+    multiLoopEngine.setScenarioIndex(2); // NASTRO: hottest stress-probe scene
+    OutputBlock<EcosystemEngine::logicalOutputBusCount> multiLoopOutput(
+        blockSize);
+    const auto recordChordLoop = [&multiLoopEngine, &multiLoopOutput](
+                                     int memory, int channel, int baseNote,
+                                     int lengthInBlocks)
+    {
+        multiLoopEngine.toggleRecording(memory);
+        multiLoopOutput.clear();
+        process(multiLoopEngine, nullptr, 0, multiLoopOutput.pointers.data(),
+                EcosystemEngine::logicalOutputBusCount, blockSize);
+
+        for (int block = 0; block < lengthInBlocks; ++block)
+        {
+            if (block == 0)
+                for (int note = 0; note < 8; ++note)
+                    multiLoopEngine.enqueueMidiMessage(
+                        juce::MidiMessage::noteOn(
+                            channel, baseNote + note * 4, 0.88f));
+            if (block == lengthInBlocks / 2)
+                for (int note = 0; note < 8; ++note)
+                    multiLoopEngine.enqueueMidiMessage(
+                        juce::MidiMessage::noteOff(
+                            channel, baseNote + note * 4));
+            multiLoopOutput.clear();
+            process(multiLoopEngine, nullptr, 0,
+                    multiLoopOutput.pointers.data(),
+                    EcosystemEngine::logicalOutputBusCount, blockSize);
+        }
+
+        multiLoopEngine.toggleRecording(memory);
+        multiLoopOutput.clear();
+        process(multiLoopEngine, nullptr, 0, multiLoopOutput.pointers.data(),
+                EcosystemEngine::logicalOutputBusCount, blockSize);
+    };
+
+    recordChordLoop(1, 2, 48, 79);
+    recordChordLoop(2, 3, 55, 103);
+    recordChordLoop(3, 4, 60, 127);
+    passed &= expect(multiLoopEngine.getEventCount(1) == 16
+                         && multiLoopEngine.getEventCount(2) == 16
+                         && multiLoopEngine.getEventCount(3) == 16,
+                     "i tre loop di stress devono conservare tutte le note");
+
+    float multiLoopPeak = 0.0f;
+    float multiLoopMaximumStep = 0.0f;
+    float previousMultiLoopSample = 0.0f;
+    bool multiLoopStayedFinite = true;
+    int multiLoopProtectedSamples = 0;
+    for (int block = 0; block < 400; ++block)
+    {
+        multiLoopOutput.clear();
+        process(multiLoopEngine, nullptr, 0, multiLoopOutput.pointers.data(),
+                EcosystemEngine::logicalOutputBusCount, blockSize);
+        multiLoopStayedFinite &= multiLoopOutput.finite(blockSize);
+        for (int channel = EcosystemEngine::ambientLeftBus;
+             channel <= EcosystemEngine::ambientRightBus; ++channel)
+        {
+            for (const auto sample : multiLoopOutput.storage[
+                     static_cast<std::size_t>(channel)])
+            {
+                multiLoopPeak = std::max(multiLoopPeak, std::abs(sample));
+                if (std::abs(sample) > 0.900001f)
+                    ++multiLoopProtectedSamples;
+                if (channel == EcosystemEngine::ambientLeftBus)
+                {
+                    multiLoopMaximumStep = std::max(multiLoopMaximumStep,
+                        std::abs(sample - previousMultiLoopSample));
+                    previousMultiLoopSample = sample;
+                }
+            }
+        }
+    }
+    passed &= expect(multiLoopStayedFinite && multiLoopPeak < 0.60f,
+                     "tre loop polifonici devono restare finiti e con headroom");
+    passed &= expect(multiLoopProtectedSamples == 0,
+                     "tre loop polifonici non devono tenere attiva la protezione");
+    passed &= expect(multiLoopMaximumStep < 0.08f,
+                     "i wrap asincroni dei tre loop non devono creare crackle");
 
     EcosystemEngine ambientEngine;
     ambientEngine.prepare(sampleRate, blockSize);
@@ -448,6 +689,104 @@ int main()
                                      > 0.001f) == saxActive,
                          "il tono diagnostico deve raggiungere soltanto il bus scelto");
     }
+
+    // Performance trims are independent targets, and zero must really mute
+    // each synth before the shared ambient mix. Raising a muted trim again is
+    // deliberately smoothed but must become audible without restarting DSP.
+    EcosystemEngine storedLevelEngine;
+    constexpr std::array<float, EcosystemEngine::memoryCount> storedLevels {
+        0.0f, 0.2f, 0.4f, 0.6f, 0.8f
+    };
+    bool independentTargets = true;
+    for (int index = 0; index < EcosystemEngine::memoryCount; ++index)
+    {
+        storedLevelEngine.setPerformanceLevel(
+            index, storedLevels[static_cast<size_t>(index)]);
+        independentTargets &= std::abs(storedLevelEngine.getPerformanceLevel(index)
+            - storedLevels[static_cast<size_t>(index)]) < 0.000001f;
+    }
+    passed &= expect(independentTargets,
+                     "i cinque livelli devono conservare target indipendenti");
+
+    PerformanceLevels smoothingProbe;
+    smoothingProbe.setTargetGain(0, 0.0f);
+    smoothingProbe.prepare(sampleRate);
+    smoothingProbe.setTargetGain(0, 1.0f);
+    juce::AudioBuffer<float> smoothingBuffer(2, blockSize);
+    for (int channel = 0; channel < smoothingBuffer.getNumChannels(); ++channel)
+        for (int sample = 0; sample < blockSize; ++sample)
+            smoothingBuffer.setSample(channel, sample, 1.0f);
+    smoothingProbe.process(0, smoothingBuffer, blockSize);
+    passed &= expect(smoothingBuffer.getSample(0, 0) < 0.01f
+                         && smoothingBuffer.getSample(0, blockSize - 1) > 0.20f
+                         && smoothingBuffer.getSample(0, blockSize - 1) < 0.50f,
+                     "i cambi di livello devono usare una rampa anti-click");
+
+    for (int layer = 0; layer < EcosystemEngine::midiMemoryCount; ++layer)
+    {
+        EcosystemEngine levelEngine;
+        levelEngine.setPerformanceLevel(layer, 0.0f);
+        levelEngine.prepare(sampleRate, blockSize);
+        OutputBlock<EcosystemEngine::logicalOutputBusCount> levelOutput(blockSize);
+        levelEngine.enqueueMidiMessage(juce::MidiMessage::noteOn(
+            levelEngine.getMidiChannelForMemory(layer), 60, 0.85f));
+        process(levelEngine, nullptr, 0, levelOutput.pointers.data(),
+                EcosystemEngine::logicalOutputBusCount, blockSize);
+
+        const auto mutedPeak = layer == EcosystemEngine::bassLayerIndex
+            ? levelOutput.peak(EcosystemEngine::bassBus, blockSize)
+            : std::max(levelOutput.peak(EcosystemEngine::ambientLeftBus, blockSize),
+                       levelOutput.peak(EcosystemEngine::ambientRightBus, blockSize));
+        passed &= expect(mutedPeak < 0.000001f,
+                         "un livello MIDI a zero deve silenziare solo il suo synth");
+
+        levelEngine.setPerformanceLevel(layer, 1.0f);
+        float restoredPeak = 0.0f;
+        for (int block = 0; block < 16; ++block)
+        {
+            levelOutput.clear();
+            process(levelEngine, nullptr, 0, levelOutput.pointers.data(),
+                    EcosystemEngine::logicalOutputBusCount, blockSize);
+            restoredPeak = std::max(restoredPeak,
+                layer == EcosystemEngine::bassLayerIndex
+                    ? levelOutput.peak(EcosystemEngine::bassBus, blockSize)
+                    : std::max(levelOutput.peak(EcosystemEngine::ambientLeftBus,
+                                                blockSize),
+                               levelOutput.peak(EcosystemEngine::ambientRightBus,
+                                                blockSize)));
+        }
+        passed &= expect(restoredPeak > 0.00001f,
+                         "rialzare un livello MIDI deve ripristinare il synth");
+    }
+
+    EcosystemEngine saxLevelEngine;
+    saxLevelEngine.setPerformanceLevel(EcosystemEngine::midiMemoryCount, 0.0f);
+    saxLevelEngine.prepare(sampleRate, blockSize);
+    saxLevelEngine.setSaxPathMode(EcosystemEngine::SaxPathMode::direct);
+    saxLevelEngine.setSaxStereoInput(true);
+    OutputBlock<EcosystemEngine::logicalOutputBusCount> saxLevelOutput(blockSize);
+    process(saxLevelEngine, diagnosticInputs.data(), 2,
+            saxLevelOutput.pointers.data(),
+            EcosystemEngine::logicalOutputBusCount, blockSize);
+    passed &= expect(saxLevelOutput.silent(EcosystemEngine::saxLeftBus, blockSize)
+                         && saxLevelOutput.silent(EcosystemEngine::saxRightBus,
+                                                  blockSize),
+                     "il livello SAX a zero deve silenziare monitor e loop");
+
+    saxLevelEngine.setPerformanceLevel(EcosystemEngine::midiMemoryCount, 1.0f);
+    float restoredSaxPeak = 0.0f;
+    for (int block = 0; block < 6; ++block)
+    {
+        saxLevelOutput.clear();
+        process(saxLevelEngine, diagnosticInputs.data(), 2,
+                saxLevelOutput.pointers.data(),
+                EcosystemEngine::logicalOutputBusCount, blockSize);
+        restoredSaxPeak = std::max(restoredSaxPeak,
+            std::max(saxLevelOutput.peak(EcosystemEngine::saxLeftBus, blockSize),
+                     saxLevelOutput.peak(EcosystemEngine::saxRightBus, blockSize)));
+    }
+    passed &= expect(restoredSaxPeak > 0.001f,
+                     "rialzare il livello SAX deve ripristinare il monitor");
 
     EcosystemEngine feedbackSafetyEngine;
     feedbackSafetyEngine.prepare(sampleRate, blockSize);

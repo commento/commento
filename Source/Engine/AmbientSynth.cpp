@@ -97,21 +97,47 @@ public:
     void startNote(int midiNoteNumber, float velocity,
                    juce::SynthesiserSound*, int pitchWheelPosition) override
     {
-        const auto wasActive = envelope.isActive();
+        // JUCE momentarily stops a voice before reusing it. This happens both
+        // for mono-bass legato and when an ambient loop with long releases
+        // fills its eight voices. Preserve bass state or bridge the ambient
+        // output across that immediate restart instead of creating a reset
+        // click.
+        const auto continuingRestart = pendingVoiceRestart
+            && envelope.isActive();
+        pendingVoiceRestart = false;
         currentMidiNote = midiNoteNumber;
         pitchBend = (static_cast<float>(pitchWheelPosition) - 8192.0f) / 8192.0f;
         targetFrequency = noteFrequency(midiNoteNumber);
-        if (! wasActive || ! glides || currentFrequency <= 0.0)
+        const auto continuingLegato = continuingRestart && glides;
+        if (! continuingLegato || currentFrequency <= 0.0)
         {
+            if (continuingRestart && ! glides)
+            {
+                // The old voice cannot keep rendering after JUCE reuses it,
+                // but dropping its last non-zero sample creates a click. Carry
+                // just that boundary value into a short residual ramp while
+                // the new oscillator and envelope restart normally from zero.
+                declickOffsetLeft = lastOutputLeft;
+                declickOffsetRight = lastOutputRight;
+                declickSamplesTotal = juce::jmax(32, static_cast<int>(
+                    std::round(getSampleRate() * 0.001)));
+                declickSamplesRemaining = declickSamplesTotal;
+                envelope.reset();
+            }
+            else
+            {
+                declickOffsetLeft = declickOffsetRight = 0.0f;
+                declickSamplesRemaining = declickSamplesTotal = 0;
+            }
             currentFrequency = targetFrequency;
             phaseA = 0.0;
             phaseB = 0.0;
             phaseC = 0.0;
             triangleState = -1.0f;
+            lfoPhase = 0.0;
+            filterStateA = filterStateB = 0.0f;
         }
 
-        lfoPhase = 0.0;
-        filterStateA = filterStateB = 0.0f;
         velocityLevel = velocity * patch.level;
         noiseState ^= static_cast<uint32_t>(midiNoteNumber) * 2654435761u;
         updateEnvelope();
@@ -124,10 +150,31 @@ public:
             envelope.noteOff();
         else
         {
-            envelope.reset();
+            // Synthesiser::startVoice stops a voice with allowTailOff=false
+            // immediately before reusing it. Keep its DSP state until the end
+            // of this render call so startNote can perform a click-free
+            // transition. A genuine all-notes-off is finalised by
+            // finishRenderBlock below.
+            pendingVoiceRestart = envelope.isActive();
+            if (! pendingVoiceRestart)
+                envelope.reset();
             currentMidiNote = -1;
             clearCurrentNote();
         }
+    }
+
+    void finishRenderBlock()
+    {
+        if (! pendingVoiceRestart)
+            return;
+
+        pendingVoiceRestart = false;
+        envelope.reset();
+        currentFrequency = 0.0;
+        currentMidiNote = -1;
+        lastOutputLeft = lastOutputRight = 0.0f;
+        declickOffsetLeft = declickOffsetRight = 0.0f;
+        declickSamplesRemaining = declickSamplesTotal = 0;
     }
 
     void pitchWheelMoved(int value) override
@@ -174,12 +221,39 @@ public:
         const auto glideCoefficient = glides
             ? 1.0 - std::exp(-1.0 / (0.055 * getSampleRate())) : 1.0;
 
+        // A Synthesiser voice is rendered in segments separated by MIDI
+        // events, so note, pressure, brightness and pitch-bend are constant
+        // for this whole call.  Keeping the tracked filter pole outside the
+        // sample loop removes one pow and one exp per active voice/sample --
+        // a material saving when three ambient loops occupy all 24 voices on
+        // Raspberry Pi.
+        const auto trackedCutoff = patch.cutoffHz
+            * std::pow(2.0f, (static_cast<float>(currentMidiNote - 60)
+                              * patch.keyTrack) / 12.0f)
+            * (1.0f + brightness * 2.4f + pressure * 0.75f);
+        const auto cutoff = juce::jlimit(45.0f,
+            static_cast<float>(getSampleRate() * 0.44), trackedCutoff);
+        const auto pole = std::exp(-juce::MathConstants<float>::twoPi
+                                   * cutoff / static_cast<float>(getSampleRate()));
+        const auto fixedBendRatio = std::exp2(
+            static_cast<double>(pitchBend) / 6.0);
+        constexpr auto semitoneToNaturalExponent = 0.057762265046662105;
+        const auto vibratoExponentScale = static_cast<double>(modulation)
+            * 0.16 * semitoneToNaturalExponent;
+
         for (int offset = 0; offset < numSamples; ++offset)
         {
             currentFrequency += (targetFrequency - currentFrequency) * glideCoefficient;
             const auto lfo = static_cast<float>(std::sin(lfoPhase));
-            const auto bendSemitones = pitchBend * 2.0f + lfo * modulation * 0.16f;
-            const auto bendRatio = std::pow(2.0, static_cast<double>(bendSemitones) / 12.0);
+            // Vibrato spans at most +/-0.16 semitone.  A third-order exp
+            // polynomial over this tiny interval has sub-ppb error and avoids
+            // an expensive transcendental call for every generated sample.
+            const auto vibratoExponent = static_cast<double>(lfo)
+                                       * vibratoExponentScale;
+            const auto vibratoRatio = 1.0 + vibratoExponent
+                * (1.0 + vibratoExponent
+                   * (0.5 + vibratoExponent / 6.0));
+            const auto bendRatio = fixedBendRatio * vibratoRatio;
             const auto baseFrequency = currentFrequency * bendRatio;
             const auto deltaA = twoPi * baseFrequency / getSampleRate();
 
@@ -190,14 +264,6 @@ public:
                       + b * patch.harmonicMix + noise * patch.noiseMix;
             tone = applyDrive(tone, patch.drive);
 
-            const auto trackedCutoff = patch.cutoffHz
-                * std::pow(2.0f, (static_cast<float>(currentMidiNote - 60)
-                                  * patch.keyTrack) / 12.0f)
-                * (1.0f + brightness * 2.4f + pressure * 0.75f);
-            const auto cutoff = juce::jlimit(45.0f,
-                static_cast<float>(getSampleRate() * 0.44), trackedCutoff);
-            const auto pole = std::exp(-juce::MathConstants<float>::twoPi
-                                       * cutoff / static_cast<float>(getSampleRate()));
             filterStateA = (1.0f - pole) * tone + pole * filterStateA;
             filterStateB = (1.0f - pole) * filterStateA + pole * filterStateB;
 
@@ -206,10 +272,27 @@ public:
             const auto expression = 0.84f + pressure * 0.28f;
             const auto sample = filterStateB * velocityLevel * movement
                               * expression * envelope.getNextSample();
+            auto outputLeft = sample * leftGain;
+            auto outputRight = sample * rightGain;
+            if (declickSamplesRemaining > 0 && declickSamplesTotal > 0)
+            {
+                const auto residualGain = static_cast<float>(
+                    declickSamplesRemaining)
+                    / static_cast<float>(declickSamplesTotal);
+                outputLeft = outputLeft * (1.0f - residualGain)
+                           + declickOffsetLeft * residualGain;
+                outputRight = outputRight * (1.0f - residualGain)
+                            + declickOffsetRight * residualGain;
+                --declickSamplesRemaining;
+                if (declickSamplesRemaining == 0)
+                    declickOffsetLeft = declickOffsetRight = 0.0f;
+            }
             if (output.getNumChannels() > 0)
-                output.addSample(0, startSample + offset, sample * leftGain);
+                output.addSample(0, startSample + offset, outputLeft);
             if (output.getNumChannels() > 1)
-                output.addSample(1, startSample + offset, sample * rightGain);
+                output.addSample(1, startSample + offset, outputRight);
+            lastOutputLeft = outputLeft;
+            lastOutputRight = outputRight;
 
             advancePhase(phaseA, deltaA);
             advancePhase(phaseB, deltaA * secondaryDetuneRatio * secondaryRatioA);
@@ -371,6 +454,13 @@ private:
     float brightness = 0.0f;
     float pressure = 0.0f;
     float triangleState = -1.0f;
+    bool pendingVoiceRestart = false;
+    float lastOutputLeft = 0.0f;
+    float lastOutputRight = 0.0f;
+    float declickOffsetLeft = 0.0f;
+    float declickOffsetRight = 0.0f;
+    int declickSamplesRemaining = 0;
+    int declickSamplesTotal = 0;
     double secondaryDetuneRatio = 1.0;
     double secondaryRatioA = 1.5;
     double secondaryRatioB = 0.0;
@@ -505,6 +595,10 @@ void AmbientSynth::render(juce::AudioBuffer<float>& output,
 
     renderBuffer.clear(0, numSamples);
     synthesiser.renderNextBlock(renderBuffer, midi, 0, numSamples);
+    for (int index = 0; index < synthesiser.getNumVoices(); ++index)
+        if (auto* voice = dynamic_cast<AmbientVoice*>(
+                synthesiser.getVoice(index)))
+            voice->finishRenderBlock();
     processEffects(numSamples);
 
     const auto channels = juce::jmin(2, output.getNumChannels());

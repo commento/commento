@@ -41,6 +41,24 @@ const std::array<juce::Colour, EcosystemEngine::memoryCount> memoryColours {
     juce::Colour(0xffe0e4cc), juce::Colour(0xfff38630),
     juce::Colour(0xffff4e50)
 };
+
+constexpr std::array<const char*, EcosystemEngine::memoryCount>
+    performanceLevelSettingKeys {
+        "levelBassMidi5", "levelPartMidi2", "levelPartMidi3",
+        "levelPartMidi4", "levelSax"
+    };
+
+constexpr auto minimumPerformanceLevelDb = -48.0;
+constexpr auto defaultPerformanceLevelDb = -6.0;
+
+juce::String performanceLevelText(float gain)
+{
+    const auto db = juce::Decibels::gainToDecibels(
+        static_cast<double>(gain), minimumPerformanceLevelDb);
+    return db <= minimumPerformanceLevelDb + 0.05
+        ? juce::String("MUTO")
+        : juce::String(db, 1) + " dB";
+}
 }
 
 class MemoryOrb final : public juce::Component
@@ -125,7 +143,7 @@ public:
         if (isBass)
             detail = engine.isBassEnabled()
                 ? "ATTIVO / MIDI 5 -> USCITA CONFIGURATA"
-                : "MUTO / TOCCA ATTIVA BASSO";
+                : "MUTO / TOCCA RIATTIVA BASSO LIVE";
         else if (recording && material)
             detail = "NUTRE  /  " + juce::String(engine.getLengthSeconds(index), 1) + " s";
         else if (recording)
@@ -145,9 +163,11 @@ public:
                                 : juce::Justification::centred, false);
 
         const auto& scenario = CommentoScenarios::get(engine.getScenarioIndex());
-        const auto timbre = isSax
+        auto timbre = isSax
             ? juce::String("SAX: ") + scenario.sax.name
             : juce::String(scenario.layers[static_cast<size_t>(index)].name);
+        timbre += "  ·  " + performanceLevelText(
+            engine.getPerformanceLevel(index));
         graphics.setColour(colour.withAlpha(0.76f));
         graphics.setFont(juce::FontOptions(isSax ? 18.0f : 16.0f,
                                            juce::Font::bold));
@@ -353,6 +373,7 @@ MainComponent::MainComponent()
     styleButton(rescanAudioButton, juce::Colour(0xff7895b8));
     styleButton(keyStepRoutingButton, juce::Colour(0xff8aa6d6));
     styleButton(saxModeButton, memoryColours[4]);
+    styleButton(resetPerformanceLevelButton, juce::Colour(0xff8299bd));
     styleButton(previousScenarioButton, juce::Colour(0xff8299bd));
     styleButton(nextScenarioButton, juce::Colour(0xff8299bd));
     addAndMakeVisible(recordButton);
@@ -363,6 +384,7 @@ MainComponent::MainComponent()
     addChildComponent(rescanAudioButton);
     addChildComponent(keyStepRoutingButton);
     addChildComponent(saxModeButton);
+    addAndMakeVisible(resetPerformanceLevelButton);
 
     connectionStatusLabel.setJustificationType(juce::Justification::centred);
     connectionStatusLabel.setFont(juce::FontOptions(21.0f));
@@ -589,7 +611,60 @@ MainComponent::MainComponent()
     addAndMakeVisible(decaySlider);
     addAndMakeVisible(decayLabel);
 
+    performanceLevelSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+    performanceLevelSlider.setTextBoxStyle(juce::Slider::TextBoxRight,
+                                           true, 112, 44);
+    performanceLevelSlider.setRange(minimumPerformanceLevelDb, 0.0, 0.1);
+    performanceLevelSlider.setDoubleClickReturnValue(true, 0.0);
+    performanceLevelSlider.textFromValueFunction = [](double db)
+    {
+        return db <= minimumPerformanceLevelDb + 0.05
+            ? juce::String("MUTO") : juce::String(db, 1) + " dB";
+    };
+    performanceLevelSlider.setColour(juce::Slider::backgroundColourId,
+                                     juce::Colour(0xff202c36));
+    performanceLevelSlider.setColour(juce::Slider::thumbColourId,
+                                     juce::Colours::white);
+    performanceLevelSlider.onValueChange = [this]
+    {
+        const auto gain = static_cast<float>(juce::Decibels::decibelsToGain(
+            performanceLevelSlider.getValue(), minimumPerformanceLevelDb));
+        engine.setPerformanceLevel(selectedMemory, gain);
+        if (orbs[static_cast<size_t>(selectedMemory)] != nullptr)
+            orbs[static_cast<size_t>(selectedMemory)]->repaint();
+    };
+    performanceLevelSlider.onDragEnd = [this]
+    {
+        savePerformanceLevels(true);
+    };
+    performanceLevelLabel.setFont(juce::FontOptions(18.0f, juce::Font::bold));
+    performanceLevelLabel.setColour(juce::Label::textColourId,
+                                    juce::Colour(paleText));
+    performanceLevelLabel.setColour(juce::Label::backgroundColourId,
+                                    juce::Colour(panel));
+    performanceLevelLabel.setJustificationType(juce::Justification::centred);
+    performanceLevelLabel.setMinimumHorizontalScale(0.70f);
+    addAndMakeVisible(performanceLevelSlider);
+    addAndMakeVisible(performanceLevelLabel);
+    resetPerformanceLevelButton.onClick = [this]
+    {
+        performanceLevelSlider.setValue(0.0, juce::sendNotificationSync);
+        savePerformanceLevels(true);
+    };
+
     const auto* savedSettings = properties.getUserSettings();
+    for (int index = 0; index < EcosystemEngine::memoryCount; ++index)
+    {
+        const auto savedDb = savedSettings != nullptr
+            ? savedSettings->getDoubleValue(
+                performanceLevelSettingKeys[static_cast<size_t>(index)],
+                defaultPerformanceLevelDb)
+            : defaultPerformanceLevelDb;
+        engine.setPerformanceLevel(index,
+            static_cast<float>(juce::Decibels::decibelsToGain(
+                juce::jlimit(minimumPerformanceLevelDb, 0.0, savedDb),
+                minimumPerformanceLevelDb)));
+    }
     const auto savedScenario = savedSettings != nullptr
         ? savedSettings->getIntValue("scenario", 0) : 0;
     engine.setTextureAmount(static_cast<float>(savedSettings != nullptr
@@ -605,6 +680,7 @@ MainComponent::MainComponent()
 MainComponent::~MainComponent()
 {
     juce::Timer::stopTimer();
+    savePerformanceLevels(false);
     properties.saveIfNeeded();
     deviceManager.removeMidiInputDeviceCallback({}, this);
     deviceManager.removeAudioCallback(&audioRouter);
@@ -673,6 +749,49 @@ void MainComponent::updateTextureButton()
                     : amount < 0.8f ? "MEDIA" : "PIENA";
     textureButton.setButtonText("GRANA: " + juce::String(name));
     textureButton.setToggleState(amount > 0.01f, juce::dontSendNotification);
+}
+
+void MainComponent::updatePerformanceLevelControl()
+{
+    const auto channel = selectedMemory < EcosystemEngine::midiMemoryCount
+        ? engine.getMidiChannelForMemory(selectedMemory) : 0;
+    const auto name = selectedMemory == EcosystemEngine::bassLayerIndex
+        ? juce::String("BASSO LIVE · MIDI 5")
+        : (selectedMemory < EcosystemEngine::midiMemoryCount
+            ? juce::String("PARTE · MIDI ") + juce::String(channel)
+            : juce::String("SAX · INGRESSO AUDIO"));
+    performanceLevelLabel.setText("LIVELLO  " + name,
+                                  juce::dontSendNotification);
+    performanceLevelLabel.setColour(
+        juce::Label::outlineColourId,
+        memoryColours[static_cast<size_t>(selectedMemory)].withAlpha(0.70f));
+    performanceLevelSlider.setColour(
+        juce::Slider::trackColourId,
+        memoryColours[static_cast<size_t>(selectedMemory)]);
+
+    const auto gain = engine.getPerformanceLevel(selectedMemory);
+    performanceLevelSlider.setValue(
+        juce::Decibels::gainToDecibels(
+            static_cast<double>(gain), minimumPerformanceLevelDb),
+        juce::dontSendNotification);
+}
+
+void MainComponent::savePerformanceLevels(bool flushToDisk)
+{
+    auto* settings = properties.getUserSettings();
+    if (settings == nullptr)
+        return;
+
+    for (int index = 0; index < EcosystemEngine::memoryCount; ++index)
+    {
+        const auto db = juce::Decibels::gainToDecibels(
+            static_cast<double>(engine.getPerformanceLevel(index)),
+            minimumPerformanceLevelDb);
+        settings->setValue(
+            performanceLevelSettingKeys[static_cast<size_t>(index)], db);
+    }
+    if (flushToDisk)
+        settings->saveIfNeeded();
 }
 
 void MainComponent::initialiseAudio()
@@ -1740,7 +1859,8 @@ void MainComponent::updateControls()
     const auto material = engine.hasMaterial(selectedMemory);
     if (isBass)
         recordButton.setButtonText(engine.isBassEnabled()
-                                       ? "SPEGNI BASSO" : "ATTIVA BASSO");
+                                       ? "MUTA BASSO LIVE"
+                                       : "RIATTIVA BASSO LIVE");
     else if (recording)
         recordButton.setButtonText(material ? "FERMA NUTRIMENTO" : "CHIUDI IL CICLO");
     else if (material)
@@ -1751,15 +1871,16 @@ void MainComponent::updateControls()
     recordButton.setToggleState(isBass ? engine.isBassEnabled() : recording,
                                 juce::dontSendNotification);
     clearButton.setEnabled(! isBass && (recording || material));
+    clearButton.setVisible(! settingsVisible && ! isBass);
     if (! clearButton.isDown())
-        clearButton.setButtonText(isBass ? "NESSUN LOOP SUL BASSO"
-                                         : "TIENI PER DISSOLVERE");
+        clearButton.setButtonText("TIENI PER DISSOLVERE");
 
     saxModeButton.setButtonText(engine.isSaxStereoInput()
                                    ? "STEREO DALLA COPPIA"
                                    : "MONO DAL CANALE SINISTRO");
 
     decaySlider.setValue(engine.getAudioDecay(), juce::dontSendNotification);
+    updatePerformanceLevelControl();
     updateTextureButton();
 
     const auto type = isBass
@@ -1803,13 +1924,17 @@ void MainComponent::toggleSettings()
     for (auto& orb : orbs)
         orb->setVisible(! settingsVisible);
     recordButton.setVisible(! settingsVisible);
-    clearButton.setVisible(! settingsVisible);
+    clearButton.setVisible(! settingsVisible
+        && ! EcosystemEngine::isLiveBassLayer(selectedMemory));
     textureButton.setVisible(! settingsVisible);
     decaySlider.setVisible(! settingsVisible
         && selectedMemory == EcosystemEngine::midiMemoryCount);
     decayLabel.setVisible(decaySlider.isVisible());
     saxModeButton.setVisible(! settingsVisible
         && selectedMemory == EcosystemEngine::midiMemoryCount);
+    performanceLevelSlider.setVisible(! settingsVisible);
+    performanceLevelLabel.setVisible(! settingsVisible);
+    resetPerformanceLevelButton.setVisible(! settingsVisible);
     settingsButton.setButtonText(settingsVisible ? "TORNA ALLE MEMORIE" : "CONNESSIONI");
     resized();
 }
@@ -1897,6 +2022,13 @@ void MainComponent::resized()
 
     auto performanceArea = bounds.reduced(4, 6);
     constexpr int gap = 16;
+    auto levelArea = performanceArea.removeFromBottom(72).reduced(5, 7);
+    performanceArea.removeFromBottom(8);
+    performanceLevelLabel.setBounds(levelArea.removeFromLeft(270));
+    levelArea.removeFromLeft(14);
+    resetPerformanceLevelButton.setBounds(
+        levelArea.removeFromRight(105).reduced(3, 2));
+    performanceLevelSlider.setBounds(levelArea.reduced(2, 0));
     const auto saxHeight = juce::jlimit(170, 270,
         static_cast<int>(static_cast<float>(performanceArea.getHeight()) * 0.28f));
     auto saxArea = performanceArea.removeFromBottom(saxHeight);

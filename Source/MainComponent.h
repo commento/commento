@@ -68,6 +68,8 @@ private:
     void updateScenarioLabels();
     void cycleTexture();
     void updateTextureButton();
+    void updatePerformanceLevelControl();
+    void savePerformanceLevels(bool flushToDisk);
 
     EcosystemEngine engine;
     Model12AudioRouter audioRouter { engine };
@@ -95,6 +97,9 @@ private:
     juce::TextButton saxModeButton { "MONO DA INGRESSO 7" };
     juce::Slider decaySlider;
     juce::Label decayLabel;
+    juce::Slider performanceLevelSlider;
+    juce::Label performanceLevelLabel;
+    juce::TextButton resetPerformanceLevelButton { "0 dB" };
     juce::ApplicationProperties properties;
 
     std::unique_ptr<ConnectionChoice> profileChoice;
