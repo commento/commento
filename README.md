@@ -232,6 +232,30 @@ La prima configurazione scarica JUCE 8.0.13 da GitHub e puo' richiedere diversi
 minuti. Se la compilazione viene terminata per memoria insufficiente, ripetere
 con `--parallel 2` oppure `--parallel 1`.
 
+Su Linux e' attivo per default il workaround
+`COMMENTO_ALSA_BYPASS_PCM_LINK`: evita che JUCE avvii insieme capture e
+playback prima di avere riempito il buffer di uscita. Nel journal, quando viene
+aperta una configurazione full-duplex, deve comparire:
+
+```text
+Commento ALSA: snd_pcm_link bypass attivo; capture e playback partono indipendenti
+```
+
+Per una prova A/B, ricompilare la versione JUCE originale in una cartella
+separata disabilitando il workaround:
+
+```sh
+cmake -S . -B build-pi-linked \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DBUILD_TESTING=OFF \
+  -DCOMMENTO_ALSA_BYPASS_PCM_LINK=OFF
+cmake --build build-pi-linked --parallel 3
+```
+
+La build normale (`build-pi`) mantiene invece il workaround attivo. Le due
+versioni permettono di ripetere lo stesso test con capture attiva, percorso
+MUTO e tono 997 Hz senza cambiare routing o livelli del mixer.
+
 Prima di avviare Commento, verificare che l'hardware USB sia visibile:
 
 ```sh

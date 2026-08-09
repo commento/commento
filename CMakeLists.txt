@@ -4,6 +4,9 @@ project(Commento VERSION 0.1.0 LANGUAGES C CXX)
 
 set(COMMENTO_JUCE_SOURCE_DIR "" CACHE PATH "Optional path to an existing JUCE checkout")
 option(COMMENTO_ALSA_DIAGNOSTICS "Log detailed ALSA setup on Linux" ON)
+option(COMMENTO_ALSA_BYPASS_PCM_LINK
+    "Keep ALSA capture/playback streams independent to avoid an unprimed linked start"
+    ON)
 
 if (COMMENTO_JUCE_SOURCE_DIR)
     add_subdirectory("${COMMENTO_JUCE_SOURCE_DIR}" JUCE)
@@ -45,6 +48,13 @@ target_compile_definitions(Commento PRIVATE
 
 if (CMAKE_SYSTEM_NAME STREQUAL "Linux" AND COMMENTO_ALSA_DIAGNOSTICS)
     target_compile_definitions(Commento PRIVATE JUCE_ALSA_LOGGING=1)
+endif()
+
+if (CMAKE_SYSTEM_NAME STREQUAL "Linux" AND COMMENTO_ALSA_BYPASS_PCM_LINK)
+    target_sources(Commento PRIVATE
+        Source/Hardware/AlsaPcmLinkBypass.cpp
+    )
+    target_link_options(Commento PRIVATE "LINKER:--wrap=snd_pcm_link")
 endif()
 
 target_link_libraries(Commento PRIVATE
