@@ -100,6 +100,9 @@ private:
     juce::Slider performanceLevelSlider;
     juce::Label performanceLevelLabel;
     juce::TextButton resetPerformanceLevelButton { "0 dB" };
+    juce::Slider delayLevelSlider;
+    juce::Label delayLevelLabel;
+    juce::TextButton toggleDelayDryButton { "ASCIUTTO" };
     juce::ApplicationProperties properties;
 
     std::unique_ptr<ConnectionChoice> profileChoice;

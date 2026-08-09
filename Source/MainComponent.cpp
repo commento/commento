@@ -48,6 +48,16 @@ constexpr std::array<const char*, EcosystemEngine::memoryCount>
         "levelPartMidi4", "levelSax"
     };
 
+constexpr std::array<const char*, EcosystemEngine::memoryCount>
+    delayLevelSettingKeys {
+        "delayBassMidi5", "delayPartMidi2", "delayPartMidi3",
+        "delayPartMidi4", "delaySax"
+    };
+
+constexpr std::array<float, EcosystemEngine::memoryCount> defaultDelayLevels {
+    0.0f, 0.48f, 0.42f, 0.52f, 0.40f
+};
+
 constexpr auto minimumPerformanceLevelDb = -48.0;
 constexpr auto defaultPerformanceLevelDb = -6.0;
 
@@ -58,6 +68,14 @@ juce::String performanceLevelText(float gain)
     return db <= minimumPerformanceLevelDb + 0.05
         ? juce::String("MUTO")
         : juce::String(db, 1) + " dB";
+}
+
+juce::String delayLevelText(float amount)
+{
+    return amount <= 0.005f
+        ? juce::String("SENZA ECO")
+        : juce::String("ECO ")
+            + juce::String(static_cast<int>(std::round(amount * 100.0f))) + "%";
 }
 }
 
@@ -168,6 +186,8 @@ public:
             : juce::String(scenario.layers[static_cast<size_t>(index)].name);
         timbre += "  ·  " + performanceLevelText(
             engine.getPerformanceLevel(index));
+        if (! isBass)
+            timbre += "  ·  " + delayLevelText(engine.getDelayLevel(index));
         graphics.setColour(colour.withAlpha(0.76f));
         graphics.setFont(juce::FontOptions(isSax ? 18.0f : 16.0f,
                                            juce::Font::bold));
@@ -374,6 +394,7 @@ MainComponent::MainComponent()
     styleButton(keyStepRoutingButton, juce::Colour(0xff8aa6d6));
     styleButton(saxModeButton, memoryColours[4]);
     styleButton(resetPerformanceLevelButton, juce::Colour(0xff8299bd));
+    styleButton(toggleDelayDryButton, juce::Colour(0xff8299bd));
     styleButton(previousScenarioButton, juce::Colour(0xff8299bd));
     styleButton(nextScenarioButton, juce::Colour(0xff8299bd));
     addAndMakeVisible(recordButton);
@@ -385,6 +406,7 @@ MainComponent::MainComponent()
     addChildComponent(keyStepRoutingButton);
     addChildComponent(saxModeButton);
     addAndMakeVisible(resetPerformanceLevelButton);
+    addAndMakeVisible(toggleDelayDryButton);
 
     connectionStatusLabel.setJustificationType(juce::Justification::centred);
     connectionStatusLabel.setFont(juce::FontOptions(21.0f));
@@ -652,6 +674,51 @@ MainComponent::MainComponent()
         savePerformanceLevels(true);
     };
 
+    delayLevelSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+    delayLevelSlider.setTextBoxStyle(juce::Slider::TextBoxRight,
+                                     true, 112, 44);
+    delayLevelSlider.setRange(0.0, 100.0, 1.0);
+    delayLevelSlider.textFromValueFunction = [](double percent)
+    {
+        return percent <= 0.5 ? juce::String("SENZA ECO")
+                              : juce::String(static_cast<int>(percent)) + "%";
+    };
+    delayLevelSlider.setColour(juce::Slider::backgroundColourId,
+                               juce::Colour(0xff202c36));
+    delayLevelSlider.setColour(juce::Slider::thumbColourId,
+                               juce::Colours::white);
+    delayLevelSlider.onValueChange = [this]
+    {
+        engine.setDelayLevel(selectedMemory,
+            static_cast<float>(delayLevelSlider.getValue() * 0.01));
+        if (orbs[static_cast<size_t>(selectedMemory)] != nullptr)
+            orbs[static_cast<size_t>(selectedMemory)]->repaint();
+        toggleDelayDryButton.setButtonText(
+            delayLevelSlider.getValue() > 0.5 ? "SENZA ECO" : "RIPRISTINA");
+    };
+    delayLevelSlider.onDragEnd = [this]
+    {
+        savePerformanceLevels(true);
+    };
+    delayLevelLabel.setFont(juce::FontOptions(18.0f, juce::Font::bold));
+    delayLevelLabel.setColour(juce::Label::textColourId,
+                              juce::Colour(paleText));
+    delayLevelLabel.setColour(juce::Label::backgroundColourId,
+                              juce::Colour(panel));
+    delayLevelLabel.setJustificationType(juce::Justification::centred);
+    delayLevelLabel.setMinimumHorizontalScale(0.70f);
+    addAndMakeVisible(delayLevelSlider);
+    addAndMakeVisible(delayLevelLabel);
+    toggleDelayDryButton.onClick = [this]
+    {
+        const auto replacement = delayLevelSlider.getValue() > 0.5
+            ? 0.0
+            : static_cast<double>(defaultDelayLevels[
+                  static_cast<size_t>(selectedMemory)] * 100.0f);
+        delayLevelSlider.setValue(replacement, juce::sendNotificationSync);
+        savePerformanceLevels(true);
+    };
+
     const auto* savedSettings = properties.getUserSettings();
     for (int index = 0; index < EcosystemEngine::memoryCount; ++index)
     {
@@ -664,6 +731,13 @@ MainComponent::MainComponent()
             static_cast<float>(juce::Decibels::decibelsToGain(
                 juce::jlimit(minimumPerformanceLevelDb, 0.0, savedDb),
                 minimumPerformanceLevelDb)));
+        const auto savedDelay = savedSettings != nullptr
+            ? savedSettings->getDoubleValue(
+                delayLevelSettingKeys[static_cast<size_t>(index)],
+                defaultDelayLevels[static_cast<size_t>(index)])
+            : defaultDelayLevels[static_cast<size_t>(index)];
+        engine.setDelayLevel(index,
+            static_cast<float>(juce::jlimit(0.0, 1.0, savedDelay)));
     }
     const auto savedScenario = savedSettings != nullptr
         ? savedSettings->getIntValue("scenario", 0) : 0;
@@ -774,6 +848,22 @@ void MainComponent::updatePerformanceLevelControl()
         juce::Decibels::gainToDecibels(
             static_cast<double>(gain), minimumPerformanceLevelDb),
         juce::dontSendNotification);
+
+    delayLevelLabel.setText("DELAY  " + name, juce::dontSendNotification);
+    delayLevelLabel.setColour(
+        juce::Label::outlineColourId,
+        memoryColours[static_cast<size_t>(selectedMemory)].withAlpha(0.70f));
+    delayLevelSlider.setColour(
+        juce::Slider::trackColourId,
+        memoryColours[static_cast<size_t>(selectedMemory)]);
+    const auto delayAmount = engine.getDelayLevel(selectedMemory);
+    delayLevelSlider.setValue(delayAmount * 100.0f,
+                              juce::dontSendNotification);
+    delayLevelSlider.setEnabled(selectedMemory != EcosystemEngine::bassLayerIndex);
+    toggleDelayDryButton.setEnabled(
+        selectedMemory != EcosystemEngine::bassLayerIndex);
+    toggleDelayDryButton.setButtonText(
+        delayAmount > 0.005f ? "SENZA ECO" : "RIPRISTINA");
 }
 
 void MainComponent::savePerformanceLevels(bool flushToDisk)
@@ -789,6 +879,9 @@ void MainComponent::savePerformanceLevels(bool flushToDisk)
             minimumPerformanceLevelDb);
         settings->setValue(
             performanceLevelSettingKeys[static_cast<size_t>(index)], db);
+        settings->setValue(
+            delayLevelSettingKeys[static_cast<size_t>(index)],
+            engine.getDelayLevel(index));
     }
     if (flushToDisk)
         settings->saveIfNeeded();
@@ -1935,6 +2028,9 @@ void MainComponent::toggleSettings()
     performanceLevelSlider.setVisible(! settingsVisible);
     performanceLevelLabel.setVisible(! settingsVisible);
     resetPerformanceLevelButton.setVisible(! settingsVisible);
+    delayLevelSlider.setVisible(! settingsVisible);
+    delayLevelLabel.setVisible(! settingsVisible);
+    toggleDelayDryButton.setVisible(! settingsVisible);
     settingsButton.setButtonText(settingsVisible ? "TORNA ALLE MEMORIE" : "CONNESSIONI");
     resized();
 }
@@ -2022,13 +2118,20 @@ void MainComponent::resized()
 
     auto performanceArea = bounds.reduced(4, 6);
     constexpr int gap = 16;
-    auto levelArea = performanceArea.removeFromBottom(72).reduced(5, 7);
+    auto controlsArea = performanceArea.removeFromBottom(136);
+    auto levelArea = controlsArea.removeFromTop(64).reduced(5, 3);
+    auto delayArea = controlsArea.removeFromBottom(64).reduced(5, 3);
     performanceArea.removeFromBottom(8);
     performanceLevelLabel.setBounds(levelArea.removeFromLeft(270));
     levelArea.removeFromLeft(14);
     resetPerformanceLevelButton.setBounds(
         levelArea.removeFromRight(105).reduced(3, 2));
     performanceLevelSlider.setBounds(levelArea.reduced(2, 0));
+    delayLevelLabel.setBounds(delayArea.removeFromLeft(270));
+    delayArea.removeFromLeft(14);
+    toggleDelayDryButton.setBounds(
+        delayArea.removeFromRight(105).reduced(3, 2));
+    delayLevelSlider.setBounds(delayArea.reduced(2, 0));
     const auto saxHeight = juce::jlimit(170, 270,
         static_cast<int>(static_cast<float>(performanceArea.getHeight()) * 0.28f));
     auto saxArea = performanceArea.removeFromBottom(saxHeight);

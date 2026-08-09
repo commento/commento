@@ -39,6 +39,9 @@ namespace
 
 EcosystemEngine::EcosystemEngine()
 {
+    for (auto& delayLevel : delayLevels)
+        delayLevel.store(1.0f, std::memory_order_relaxed);
+
     const auto& initialScenario = CommentoScenarios::get(0);
     for (int index = 0; index < midiMemoryCount; ++index)
     {
@@ -236,6 +239,24 @@ float EcosystemEngine::getPerformanceLevel(int memoryIndex) const noexcept
     return performanceLevels.getTargetGain(memoryIndex);
 }
 
+void EcosystemEngine::setDelayLevel(int memoryIndex, float amount) noexcept
+{
+    if (! juce::isPositiveAndBelow(memoryIndex, memoryCount))
+        return;
+
+    const auto safeAmount = std::isfinite(amount) ? amount : 0.0f;
+    delayLevels[static_cast<std::size_t>(memoryIndex)].store(
+        juce::jlimit(0.0f, 1.0f, safeAmount), std::memory_order_relaxed);
+}
+
+float EcosystemEngine::getDelayLevel(int memoryIndex) const noexcept
+{
+    return juce::isPositiveAndBelow(memoryIndex, memoryCount)
+        ? delayLevels[static_cast<std::size_t>(memoryIndex)].load(
+              std::memory_order_relaxed)
+        : 0.0f;
+}
+
 int EcosystemEngine::memoryIndexForMidiChannel(int midiChannel)
 {
     for (int index = 0; index < midiMemoryCount; ++index)
@@ -335,8 +356,13 @@ void EcosystemEngine::prepare(double newSampleRate, int maximumBlockSize)
     blockMidiOutput.ensureSize(128 * 1024);
     for (auto& midi : layerMidiBuffers)
         midi.ensureSize(64 * 1024);
-    for (auto& synth : internalSynths)
+    for (int index = 0; index < midiMemoryCount; ++index)
+    {
+        auto& synth = internalSynths[static_cast<std::size_t>(index)];
+        synth->setDelayLevel(getDelayLevel(index));
         synth->prepare(sampleRate, maximumBlockSize);
+    }
+    saxProcessor.setDelayLevel(getDelayLevel(midiMemoryCount));
     saxProcessor.prepare(sampleRate, maximumBlockSize);
 
     // Force the requested scene and texture back onto freshly prepared DSP;
@@ -738,6 +764,8 @@ void EcosystemEngine::renderInternalSynths(float* const* outputs, int outputChan
         }
 
         layerSynthBuffer.clear(0, numSamples);
+        internalSynths[static_cast<size_t>(layer)]->setDelayLevel(
+            getDelayLevel(layer));
         internalSynths[static_cast<size_t>(layer)]->render(
             layerSynthBuffer, layerMidi, 0, numSamples);
         performanceLevels.process(layer, layerSynthBuffer, numSamples);
@@ -920,7 +948,10 @@ void EcosystemEngine::renderAudioMemory(
     }
 
     if (pathMode == SaxPathMode::sceneEffects)
+    {
+        saxProcessor.setDelayLevel(getDelayLevel(midiMemoryCount));
         saxProcessor.process(saxRenderBuffer, numSamples);
+    }
     performanceLevels.process(midiMemoryCount, saxRenderBuffer, numSamples);
     const auto safetyTarget = saxSafetyMuted.load()
             || pathMode == SaxPathMode::muted ? 0.0f : 1.0f;

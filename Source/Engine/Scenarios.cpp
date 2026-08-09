@@ -75,10 +75,13 @@ SynthPatch makePad(const char* name, OscillatorModel model, float attack,
     patch.lfoDepth = 0.08f + space * 0.10f;
     patch.pan = pan;
     patch.level = 0.115f;
-    patch.delayMilliseconds = 1100.0f + space * 1700.0f;
-    patch.delaySpread = 1.23f;
-    patch.delayFeedback = 0.30f + space * 0.22f;
-    patch.delayMix = 0.14f + space * 0.20f;
+    // Pads keep a broad halo, but no longer share the same multi-second wash.
+    // The per-layer DELAY control scales this send down to a truly dry path.
+    const auto sideTiming = pan < 0.0f ? 0.82f : 1.08f;
+    patch.delayMilliseconds = (380.0f + space * 1250.0f) * sideTiming;
+    patch.delaySpread = 1.11f + space * 0.18f;
+    patch.delayFeedback = 0.22f + space * 0.16f;
+    patch.delayMix = 0.10f + space * 0.12f;
     patch.reverbSize = 0.72f + space * 0.23f;
     patch.reverbDamping = 0.52f;
     patch.reverbWet = 0.20f + space * 0.20f;
@@ -105,10 +108,10 @@ SynthPatch makePluck(const char* name, OscillatorModel model, float cutoff,
     patch.lfoDepth = 0.045f;
     patch.pan = pan;
     patch.level = 0.14f;
-    patch.delayMilliseconds = delayMs;
-    patch.delaySpread = 1.41f;
-    patch.delayFeedback = feedback;
-    patch.delayMix = 0.43f;
+    patch.delayMilliseconds = delayMs * 0.62f;
+    patch.delaySpread = pan < 0.0f ? 1.27f : 1.43f;
+    patch.delayFeedback = feedback * 0.72f;
+    patch.delayMix = 0.28f;
     patch.reverbSize = 0.88f;
     patch.reverbDamping = 0.32f;
     patch.reverbWet = 0.34f;
@@ -125,6 +128,9 @@ SynthPatch makeBell(const char* name, float cutoff, float delayMs,
     patch.releaseSeconds = 4.8f;
     patch.sustain = 0.12f;
     patch.level = 0.105f;
+    patch.delayMilliseconds *= 0.72f;
+    patch.delayFeedback *= 0.82f;
+    patch.delayMix = 0.24f;
     return patch;
 }
 
@@ -136,6 +142,10 @@ SynthPatch makeAir(const char* name, float attack, float release,
     patch.noiseMix = 0.16f;
     patch.harmonicMix = 0.18f;
     patch.level = 0.085f;
+    patch.delayMilliseconds *= 0.52f;
+    patch.delayFeedback *= 0.78f;
+    patch.delayMix = 0.14f;
+    patch.delaySpread = 1.53f;
     return patch;
 }
 
@@ -145,7 +155,10 @@ SaxPatch makeSax(const char* name, float tone, float drive, float delay,
                  float reverb, float tremoloRate, float tremoloDepth,
                  float gain, float decay)
 {
-    return { name, tone, drive, delay, spread, feedback, cross, delayMix,
+    // Preserve the identity of the ten recipes while preventing every sax
+    // treatment from becoming the same long feedback cloud.
+    return { name, tone, drive, 280.0f + delay * 0.52f, spread,
+             feedback * 0.72f, cross * 0.72f, delayMix * 0.62f,
              modRate, modDepth, room, damping, reverb, tremoloRate,
              tremoloDepth, gain, decay };
 }

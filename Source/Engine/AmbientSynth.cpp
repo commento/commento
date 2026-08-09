@@ -505,6 +505,8 @@ void AmbientSynth::prepare(double sampleRate, int maximumBlockSize)
                         false, true, false);
     delayBuffer.clear();
     delayWritePosition = 0;
+    delayLevel.reset(currentSampleRate, 0.045);
+    delayLevel.setCurrentAndTargetValue(requestedDelayLevel);
     reverb.setSampleRate(currentSampleRate);
     reverb.reset();
     prepared = true;
@@ -518,6 +520,13 @@ void AmbientSynth::setPatch(const SynthPatch& newPatch)
         if (auto* voice = dynamic_cast<AmbientVoice*>(synthesiser.getVoice(index)))
             voice->setPatch(patch);
     updateEffectTargets(! prepared);
+}
+
+void AmbientSynth::setDelayLevel(float newLevel) noexcept
+{
+    requestedDelayLevel = juce::jlimit(0.0f, 1.0f, newLevel);
+    if (std::abs(delayLevel.getTargetValue() - requestedDelayLevel) > 0.0001f)
+        delayLevel.setTargetValue(requestedDelayLevel);
 }
 
 void AmbientSynth::updateEffectTargets(bool immediately)
@@ -572,8 +581,9 @@ void AmbientSynth::processEffects(int numSamples)
                                              delayLeft);
         const auto wetRight = readDelaySample(delayBuffer, 1, delayWritePosition,
                                               delayRight);
-        const auto feedback = delayFeedback.getNextValue();
-        const auto mix = delayMix.getNextValue();
+        const auto amount = delayLevel.getNextValue();
+        const auto feedback = delayFeedback.getNextValue() * amount;
+        const auto mix = delayMix.getNextValue() * amount;
         delayBuffer.setSample(0, delayWritePosition, softProtect(
             dryLeft + wetLeft * feedback + wetRight * feedback * 0.12f));
         delayBuffer.setSample(1, delayWritePosition, softProtect(

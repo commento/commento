@@ -10,6 +10,7 @@ public:
 
     void prepare(double sampleRate, int maximumBlockSize);
     void setPatch(const SynthPatch& newPatch);
+    void setDelayLevel(float newLevel) noexcept;
     void render(juce::AudioBuffer<float>& output, const juce::MidiBuffer& midi,
                 int startSample, int numSamples);
 
@@ -26,6 +27,8 @@ private:
     juce::SmoothedValue<float> delaySamplesRight;
     juce::SmoothedValue<float> delayFeedback;
     juce::SmoothedValue<float> delayMix;
+    juce::SmoothedValue<float> delayLevel;
+    float requestedDelayLevel = 1.0f;
     int delayWritePosition = 0;
     double currentSampleRate = 48000.0;
     bool prepared = false;

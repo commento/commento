@@ -71,6 +71,8 @@ public:
     [[nodiscard]] bool isBassEnabled() const;
     void setPerformanceLevel(int memoryIndex, float linearGain) noexcept;
     [[nodiscard]] float getPerformanceLevel(int memoryIndex) const noexcept;
+    void setDelayLevel(int memoryIndex, float amount) noexcept;
+    [[nodiscard]] float getDelayLevel(int memoryIndex) const noexcept;
 
     void setAudioDecay(float newDecay);
     [[nodiscard]] float getAudioDecay() const;
@@ -166,6 +168,7 @@ private:
     juce::AudioBuffer<float> layerSynthBuffer;
     juce::AudioBuffer<float> saxRenderBuffer;
     PerformanceLevels performanceLevels;
+    std::array<std::atomic<float>, memoryCount> delayLevels;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> bassMuteGain;
     std::atomic<float> audioDecay { 0.985f };
     std::atomic<bool> saxStereoInput { false };

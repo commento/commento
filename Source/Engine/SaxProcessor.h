@@ -8,6 +8,7 @@ class SaxProcessor final
 public:
     void prepare(double sampleRate, int maximumBlockSize);
     void setPatch(const SaxPatch& newPatch);
+    void setDelayLevel(float newLevel) noexcept;
     void process(juce::AudioBuffer<float>& buffer, int numSamples);
     void resetTails();
 
@@ -25,6 +26,7 @@ private:
     juce::SmoothedValue<float> feedback;
     juce::SmoothedValue<float> crossFeedback;
     juce::SmoothedValue<float> delayMix;
+    juce::SmoothedValue<float> delayLevel;
     juce::SmoothedValue<float> modulationDepthSamples;
     juce::SmoothedValue<float> tremoloDepth;
     juce::SmoothedValue<float> outputGain;
@@ -35,6 +37,6 @@ private:
     double modulationPhase = 0.0;
     double tremoloPhase = 0.0;
     int writePosition = 0;
+    float requestedDelayLevel = 1.0f;
     bool prepared = false;
 };
-

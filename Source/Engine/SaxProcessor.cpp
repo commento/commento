@@ -47,6 +47,8 @@ void SaxProcessor::prepare(double newSampleRate, int maximumBlockSize)
     sampleRate = newSampleRate > 0.0 ? newSampleRate : 48000.0;
     delayBuffer.setSize(2, static_cast<int>(std::ceil(sampleRate * 8.0)) + 2,
                         false, true, false);
+    delayLevel.reset(sampleRate, 0.045);
+    delayLevel.setCurrentAndTargetValue(requestedDelayLevel);
     reverb.setSampleRate(sampleRate);
     prepared = true;
     resetTails();
@@ -57,6 +59,13 @@ void SaxProcessor::setPatch(const SaxPatch& newPatch)
 {
     patch = newPatch;
     updateTargets(! prepared);
+}
+
+void SaxProcessor::setDelayLevel(float newLevel) noexcept
+{
+    requestedDelayLevel = juce::jlimit(0.0f, 1.0f, newLevel);
+    if (std::abs(delayLevel.getTargetValue() - requestedDelayLevel) > 0.0001f)
+        delayLevel.setTargetValue(requestedDelayLevel);
 }
 
 void SaxProcessor::updateTargets(bool immediately)
@@ -159,7 +168,8 @@ void SaxProcessor::process(juce::AudioBuffer<float>& buffer, int numSamples)
             delaySamplesRight.getNextValue() - modulation);
         const auto echoLeft = readDelay(0, leftDelay);
         const auto echoRight = readDelay(1, rightDelay);
-        const auto feedbackAmount = feedback.getNextValue();
+        const auto amount = delayLevel.getNextValue();
+        const auto feedbackAmount = feedback.getNextValue() * amount;
         const auto crossAmount = crossFeedback.getNextValue();
         const auto delayInputLeft = filtered[0] + feedbackAmount
             * (echoLeft * (1.0f - crossAmount) + echoRight * crossAmount);
@@ -170,7 +180,7 @@ void SaxProcessor::process(juce::AudioBuffer<float>& buffer, int numSamples)
         delayBuffer.setSample(1, writePosition,
             applyConditionalCeiling(delayInputRight, 0.92f, 0.995f));
 
-        const auto wet = delayMix.getNextValue();
+        const auto wet = delayMix.getNextValue() * amount;
         const auto tremolo = tremoloDepth.getNextValue();
         const auto leftMovement = 1.0f - tremolo
             + tremolo * (0.5f + 0.5f * static_cast<float>(std::sin(tremoloPhase)));

@@ -84,12 +84,32 @@ int main()
     constexpr auto blockSize = 512;
 
     std::set<std::string> scenarioNames;
+    std::set<int> ambientDelayBuckets;
+    float longestAmbientDelay = 0.0f;
+    float longestSaxDelay = 0.0f;
     for (int index = 0; index < CommentoScenarios::count; ++index)
+    {
         scenarioNames.insert(CommentoScenarios::get(index).name);
+        const auto& scenario = CommentoScenarios::get(index);
+        for (int layer = 1; layer < EcosystemEngine::midiMemoryCount; ++layer)
+        {
+            const auto delay = scenario.layers[
+                static_cast<std::size_t>(layer)].delayMilliseconds;
+            longestAmbientDelay = std::max(longestAmbientDelay, delay);
+            ambientDelayBuckets.insert(static_cast<int>(std::round(delay / 25.0f)));
+        }
+        longestSaxDelay = std::max(longestSaxDelay,
+                                   scenario.sax.delayMilliseconds);
+    }
     passed &= expect(CommentoScenarios::count >= 10,
                      "devono esistere almeno dieci scenari");
     passed &= expect(scenarioNames.size() == CommentoScenarios::count,
                      "ogni scenario deve avere un nome distinto");
+    passed &= expect(ambientDelayBuckets.size() >= 20,
+                     "i delay ambient devono avere tempi realmente differenti");
+    passed &= expect(longestAmbientDelay < 2300.0f
+                         && longestSaxDelay < 2500.0f,
+                     "i preset non devono imporre code eccessivamente lunghe");
     passed &= expect(CommentoScenarios::wrapIndex(-1) == 9
                          && CommentoScenarios::wrapIndex(10) == 0,
                      "la selezione scenario deve essere circolare");
@@ -698,15 +718,22 @@ int main()
         0.0f, 0.2f, 0.4f, 0.6f, 0.8f
     };
     bool independentTargets = true;
+    bool independentDelayTargets = true;
     for (int index = 0; index < EcosystemEngine::memoryCount; ++index)
     {
         storedLevelEngine.setPerformanceLevel(
             index, storedLevels[static_cast<size_t>(index)]);
         independentTargets &= std::abs(storedLevelEngine.getPerformanceLevel(index)
             - storedLevels[static_cast<size_t>(index)]) < 0.000001f;
+        const auto delayAmount = static_cast<float>(index) * 0.2f;
+        storedLevelEngine.setDelayLevel(index, delayAmount);
+        independentDelayTargets &= std::abs(
+            storedLevelEngine.getDelayLevel(index) - delayAmount) < 0.000001f;
     }
     passed &= expect(independentTargets,
                      "i cinque livelli devono conservare target indipendenti");
+    passed &= expect(independentDelayTargets,
+                     "i cinque controlli delay devono restare indipendenti");
 
     PerformanceLevels smoothingProbe;
     smoothingProbe.setTargetGain(0, 0.0f);
