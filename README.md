@@ -81,7 +81,8 @@ JUCE fissata dal progetto.
 
 ## Build Raspberry Pi OS 64 bit
 
-Per il primo test usare Raspberry Pi OS 64 bit con Desktop. Sul Raspberry:
+Su Raspberry Pi OS 64 bit, Lite o Desktop, installare prima le dipendenze di
+compilazione:
 
 ```sh
 sudo apt update
@@ -101,7 +102,6 @@ cmake -S . -B build-pi \
   -DCMAKE_BUILD_TYPE=Release \
   -DBUILD_TESTING=OFF
 cmake --build build-pi --parallel 3
-./build-pi/Commento_artefacts/Release/Commento --windowed
 ```
 
 La prima configurazione scarica JUCE 8.0.13 da GitHub e puo' richiedere diversi
@@ -121,8 +121,42 @@ Nella pagina CONNESSIONI scegliere Model 12, 48000 Hz, buffer 256, ingresso sax
 e uscite 1-2. Scegliere Keystep Pro tra gli ingressi MIDI e lasciare MIDI Output
 su `none`.
 
-La modalita kiosk e il multitouch Linux diretto di Mela verranno portati dopo
-la prima prova reale con display, Model 12 e Keystep Pro.
+Su Raspberry Pi OS Desktop si puo' avviare manualmente con:
+
+```sh
+./build-pi/Commento_artefacts/Release/Commento --windowed
+```
+
+Su Raspberry Pi OS Lite seguire invece la sezione kiosk qui sotto.
+
+### Raspberry Pi OS Lite: avvio kiosk senza desktop
+
+Commento non richiede un desktop environment. Dopo la build Release, installare
+il server X minimale e il servizio kiosk con:
+
+```sh
+cd ~/commento
+sudo ./deploy/raspberry-pi/install-kiosk-service.sh
+sudo systemctl reboot
+```
+
+Al riavvio Xorg viene avviato direttamente su `tty1` e Commento occupa il
+touchscreen a 1920x1200. Da SSH:
+
+```sh
+sudo systemctl start commento-kiosk.service
+sudo systemctl stop commento-kiosk.service
+sudo systemctl restart commento-kiosk.service
+systemctl status commento-kiosk.service
+journalctl -u commento-kiosk.service -f
+```
+
+Per rimuovere il kiosk e ripristinare il login testuale su `tty1`:
+
+```sh
+sudo ./deploy/raspberry-pi/remove-kiosk-service.sh
+sudo systemctl reboot
+```
 
 ## Architettura
 
