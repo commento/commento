@@ -5,6 +5,65 @@
 
 namespace
 {
+float polyBlep(float phase, float phaseIncrement)
+{
+    const auto increment = juce::jlimit(1.0e-6f, 0.49f,
+                                        std::abs(phaseIncrement));
+    if (phase < increment)
+    {
+        const auto position = phase / increment;
+        return position + position - position * position - 1.0f;
+    }
+
+    if (phase > 1.0f - increment)
+    {
+        const auto position = (phase - 1.0f) / increment;
+        return position * position + position + position + 1.0f;
+    }
+
+    return 0.0f;
+}
+
+float softProtect(float sample)
+{
+    constexpr auto threshold = 0.94f;
+    constexpr auto headroom = 1.0f - threshold;
+    const auto magnitude = std::abs(sample);
+    if (magnitude <= threshold)
+        return sample;
+
+    const auto protectedMagnitude = threshold
+        + headroom * std::tanh((magnitude - threshold) / headroom);
+    return std::copysign(protectedMagnitude, sample);
+}
+
+float applyDrive(float sample, float drive)
+{
+    // A drive value of one is a true, bit-for-bit linear bypass. Above one,
+    // only peaks enter a soft knee; quiet material is not continually passed
+    // through a waveshaper.
+    const auto amount = juce::jlimit(0.0f, 1.0f, (drive - 1.0f) / 0.75f);
+    constexpr auto threshold = 0.72f;
+    constexpr auto headroom = 1.0f - threshold;
+    const auto magnitude = std::abs(sample);
+    if (amount <= 0.0f || magnitude <= threshold)
+        return sample;
+
+    const auto knee = 1.0f + amount * 3.0f;
+    const auto excess = (magnitude - threshold) / headroom;
+    const auto shapedMagnitude = threshold
+        + headroom * std::tanh(excess * knee) / knee;
+    const auto shaped = std::copysign(shapedMagnitude, sample);
+    return sample + amount * (shaped - sample);
+}
+
+void advancePhase(double& phase, double increment)
+{
+    const auto twoPi = juce::MathConstants<double>::twoPi;
+    phase += increment;
+    phase -= twoPi * std::floor(phase / twoPi);
+}
+
 class AmbientSound final : public juce::SynthesiserSound
 {
 public:
@@ -25,6 +84,11 @@ public:
     void setPatch(const SynthPatch& newPatch)
     {
         patch = newPatch;
+        secondaryDetuneRatio = std::pow(2.0,
+                                        static_cast<double>(patch.detuneCents) / 1200.0);
+        const auto ratios = secondaryRatios(patch.model);
+        secondaryRatioA = ratios[0];
+        secondaryRatioB = ratios[1];
         updateEnvelope();
         if (currentMidiNote >= 0)
             targetFrequency = noteFrequency(currentMidiNote);
@@ -42,6 +106,8 @@ public:
             currentFrequency = targetFrequency;
             phaseA = 0.0;
             phaseB = 0.0;
+            phaseC = 0.0;
+            triangleState = -1.0f;
         }
 
         lfoPhase = 0.0;
@@ -114,17 +180,15 @@ public:
             const auto lfo = static_cast<float>(std::sin(lfoPhase));
             const auto bendSemitones = pitchBend * 2.0f + lfo * modulation * 0.16f;
             const auto bendRatio = std::pow(2.0, static_cast<double>(bendSemitones) / 12.0);
-            const auto deltaA = twoPi * currentFrequency * bendRatio / getSampleRate();
-            const auto detuneRatio = std::pow(2.0, patch.detuneCents / 1200.0);
-            const auto deltaB = deltaA * detuneRatio;
+            const auto baseFrequency = currentFrequency * bendRatio;
+            const auto deltaA = twoPi * baseFrequency / getSampleRate();
 
-            const auto a = oscillator(phaseA, patch.model);
-            const auto b = secondaryOscillator(phaseB, patch.model);
+            const auto a = oscillator(phaseA, deltaA, patch.model);
+            const auto b = secondaryOscillator(baseFrequency, patch.model);
             const auto noise = nextNoise();
             auto tone = a * (1.0f - patch.harmonicMix)
                       + b * patch.harmonicMix + noise * patch.noiseMix;
-            const auto drive = juce::jmax(0.25f, patch.drive);
-            tone = std::tanh(tone * drive) / std::tanh(drive);
+            tone = applyDrive(tone, patch.drive);
 
             const auto trackedCutoff = patch.cutoffHz
                 * std::pow(2.0f, (static_cast<float>(currentMidiNote - 60)
@@ -147,12 +211,10 @@ public:
             if (output.getNumChannels() > 1)
                 output.addSample(1, startSample + offset, sample * rightGain);
 
-            phaseA += deltaA;
-            phaseB += deltaB;
-            if (phaseA >= twoPi)
-                phaseA -= twoPi;
-            if (phaseB >= twoPi)
-                phaseB -= twoPi;
+            advancePhase(phaseA, deltaA);
+            advancePhase(phaseB, deltaA * secondaryDetuneRatio * secondaryRatioA);
+            if (secondaryRatioB > 0.0)
+                advancePhase(phaseC, deltaA * secondaryDetuneRatio * secondaryRatioB);
             lfoPhase += twoPi * patch.lfoRateHz / getSampleRate();
             if (lfoPhase >= twoPi)
                 lfoPhase -= twoPi;
@@ -192,43 +254,104 @@ private:
                / static_cast<float>(0x7fffffff);
     }
 
-    float oscillator(double phase, OscillatorModel model)
+    float bandLimitedPulse(double phase, double phaseIncrement,
+                           float pulseWidth) const
+    {
+        const auto normalisedPhase = static_cast<float>(
+            phase / juce::MathConstants<double>::twoPi);
+        const auto normalisedIncrement = static_cast<float>(
+            phaseIncrement / juce::MathConstants<double>::twoPi);
+        const auto width = juce::jlimit(0.08f, 0.92f, pulseWidth);
+        auto pulse = normalisedPhase < width ? 1.0f : -1.0f;
+        pulse += polyBlep(normalisedPhase, normalisedIncrement);
+        auto fallingPhase = normalisedPhase - width;
+        if (fallingPhase < 0.0f)
+            fallingPhase += 1.0f;
+        pulse -= polyBlep(fallingPhase, normalisedIncrement);
+        return pulse;
+    }
+
+    float bandLimitedTriangle(double phase, double phaseIncrement)
+    {
+        const auto normalisedIncrement = static_cast<float>(
+            phaseIncrement / juce::MathConstants<double>::twoPi);
+        const auto square = bandLimitedPulse(phase, phaseIncrement, 0.5f);
+        triangleState += square * 4.0f * normalisedIncrement;
+        triangleState = juce::jlimit(-1.02f, 1.02f, triangleState);
+        return juce::jlimit(-1.0f, 1.0f, triangleState);
+    }
+
+    float oscillator(double phase, double phaseIncrement, OscillatorModel model)
     {
         const auto sine = static_cast<float>(std::sin(phase));
-        const auto triangle = static_cast<float>(2.0 / juce::MathConstants<double>::pi
-                                                  * std::asin(std::sin(phase)));
+        const auto triangle = [&]
+        {
+            return bandLimitedTriangle(phase, phaseIncrement);
+        };
         switch (model)
         {
-            case OscillatorModel::sub:   return sine * 0.88f + triangle * 0.12f;
-            case OscillatorModel::warm:  return sine * 0.62f + triangle * 0.38f;
-            case OscillatorModel::pluck: return triangle * 0.82f + nextNoise() * 0.08f;
+            case OscillatorModel::sub:   return sine * 0.88f + triangle() * 0.12f;
+            case OscillatorModel::warm:  return sine * 0.62f + triangle() * 0.38f;
+            case OscillatorModel::pluck: return triangle() * 0.82f + nextNoise() * 0.08f;
             case OscillatorModel::glass: return sine;
-            case OscillatorModel::reed:  return std::tanh(sine * 2.4f);
+            case OscillatorModel::reed:
+                return sine * 0.78f
+                     + bandLimitedPulse(phase, phaseIncrement, 0.46f) * 0.22f;
             case OscillatorModel::cloud: return sine * 0.72f + nextNoise() * 0.16f;
             case OscillatorModel::pulse:
-                return std::tanh((sine - (patch.pulseWidth - 0.5f)) * 5.0f);
+                return bandLimitedPulse(phase, phaseIncrement, patch.pulseWidth);
             case OscillatorModel::bell:  return sine;
             case OscillatorModel::air:   return sine * 0.52f + nextNoise() * 0.30f;
         }
         return sine;
     }
 
-    float secondaryOscillator(double phase, OscillatorModel model) const
+    static std::array<double, 2> secondaryRatios(OscillatorModel model)
     {
         switch (model)
         {
-            case OscillatorModel::sub:   return static_cast<float>(std::sin(phase * 0.5));
-            case OscillatorModel::glass: return static_cast<float>(std::sin(phase * 3.01));
-            case OscillatorModel::bell:  return static_cast<float>(
-                std::sin(phase * 2.01) * 0.62 + std::sin(phase * 3.99) * 0.38);
-            case OscillatorModel::reed:  return static_cast<float>(std::sin(phase * 2.0));
-            case OscillatorModel::pulse: return static_cast<float>(std::sin(phase * 2.0));
+            case OscillatorModel::sub:   return { 0.5, 0.0 };
+            case OscillatorModel::glass: return { 3.01, 0.0 };
+            case OscillatorModel::bell:  return { 2.01, 3.99 };
+            case OscillatorModel::reed:  return { 2.0, 0.0 };
+            case OscillatorModel::pulse: return { 2.0, 0.0 };
             case OscillatorModel::warm:
             case OscillatorModel::pluck:
             case OscillatorModel::cloud:
-            case OscillatorModel::air:   return static_cast<float>(std::sin(phase * 1.5));
+            case OscillatorModel::air:   return { 1.5, 0.0 };
         }
-        return 0.0f;
+        return { 1.0, 0.0 };
+    }
+
+    float partialGain(double frequency) const
+    {
+        const auto fadeStart = getSampleRate() * 0.40;
+        const auto fadeEnd = getSampleRate() * 0.48;
+        const auto absoluteFrequency = std::abs(frequency);
+        if (absoluteFrequency <= fadeStart)
+            return 1.0f;
+        if (absoluteFrequency >= fadeEnd)
+            return 0.0f;
+
+        const auto position = static_cast<float>(
+            (absoluteFrequency - fadeStart) / (fadeEnd - fadeStart));
+        const auto smoothStep = position * position * (3.0f - 2.0f * position);
+        return 1.0f - smoothStep;
+    }
+
+    float secondaryOscillator(double baseFrequency, OscillatorModel model) const
+    {
+        const auto firstGain = partialGain(
+            baseFrequency * secondaryDetuneRatio * secondaryRatioA);
+        if (model == OscillatorModel::bell)
+        {
+            const auto secondGain = partialGain(
+                baseFrequency * secondaryDetuneRatio * secondaryRatioB);
+            return static_cast<float>(std::sin(phaseB)) * 0.62f * firstGain
+                 + static_cast<float>(std::sin(phaseC)) * 0.38f * secondGain;
+        }
+
+        return static_cast<float>(std::sin(phaseB)) * firstGain;
     }
 
     SynthPatch patch;
@@ -236,6 +359,7 @@ private:
     int currentMidiNote = -1;
     double phaseA = 0.0;
     double phaseB = 0.0;
+    double phaseC = 0.0;
     double lfoPhase = 0.0;
     double currentFrequency = 0.0;
     double targetFrequency = 0.0;
@@ -246,6 +370,10 @@ private:
     float modulation = 0.0f;
     float brightness = 0.0f;
     float pressure = 0.0f;
+    float triangleState = -1.0f;
+    double secondaryDetuneRatio = 1.0;
+    double secondaryRatioA = 1.5;
+    double secondaryRatioB = 0.0;
     uint32_t noiseState = 0x9e3779b9u;
     juce::ADSR envelope;
 };
@@ -356,10 +484,10 @@ void AmbientSynth::processEffects(int numSamples)
                                               delayRight);
         const auto feedback = delayFeedback.getNextValue();
         const auto mix = delayMix.getNextValue();
-        delayBuffer.setSample(0, delayWritePosition,
-            std::tanh(dryLeft + wetLeft * feedback + wetRight * feedback * 0.12f));
-        delayBuffer.setSample(1, delayWritePosition,
-            std::tanh(dryRight + wetRight * feedback + wetLeft * feedback * 0.12f));
+        delayBuffer.setSample(0, delayWritePosition, softProtect(
+            dryLeft + wetLeft * feedback + wetRight * feedback * 0.12f));
+        delayBuffer.setSample(1, delayWritePosition, softProtect(
+            dryRight + wetRight * feedback + wetLeft * feedback * 0.12f));
         left[sample] = dryLeft * (1.0f - mix * 0.35f) + wetLeft * mix;
         right[sample] = dryRight * (1.0f - mix * 0.35f) + wetRight * mix;
         delayWritePosition = (delayWritePosition + 1) % delayBuffer.getNumSamples();

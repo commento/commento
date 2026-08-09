@@ -28,8 +28,8 @@ Il nome **Commento** e' provvisorio.
 - build macOS e Raspberry Pi OS 64 bit dallo stesso codice.
 
 Questa versione non salva ancora i loop su disco. Salva invece l'ultimo scenario
-selezionato. I parametri sonori sono scelti per il live e non espongono ancora
-un pannello di sintesi dettagliato.
+selezionato e il livello di GRANA. I parametri sonori sono scelti per il live e
+non espongono ancora un pannello di sintesi dettagliato.
 
 ## Flusso del sistema autonomo
 
@@ -70,7 +70,8 @@ ricontrollare queste due impostazioni.
 Poiche' 7/8 e' su `PC`, Commento rimanda anche il sax live sul proprio bus
 dedicato. A 48 kHz, 512 campioni equivalgono a 10,67 ms per periodo; il monitor
 software avra' quindi una latenza maggiore del monitor diretto, ma offre piu'
-margine contro gli xrun e i disturbi digitali.
+margine contro gli xrun. Il buffer non modifica la saturazione o l'aliasing
+generati dal DSP.
 
 La Model 12 lavora via USB 2.0 fino a 24 bit / 48 kHz. Commento usa 48 kHz e
 un buffer di 512 campioni. E' alimentata dal proprio adattatore,
@@ -84,6 +85,8 @@ durante il collegamento.
 ## Uso
 
 - usare le frecce grandi in alto per scegliere uno dei dieci scenari;
+- usare **GRANA** per scegliere `PULITA`, `LEGGERA`, `MEDIA` o `PIENA`; il valore
+  iniziale e' PULITA e viene ricordato al riavvio;
 - toccare una card per selezionare BASSO LIVE, MAREA, RADICE, SCINTILLA o RESPIRO;
 - su BASSO LIVE, usare **ATTIVA BASSO** / **SPEGNI BASSO**; questa parte non
   viene mai registrata nel looper;
@@ -95,6 +98,29 @@ durante il collegamento.
   **STEREO 7/8** per una sorgente stereo;
 - **PERSISTENZA DEL RESPIRO** decide quanto materiale precedente sopravvive a ogni
   overdub (`1.000` conserva tutto, valori inferiori dissolvono il passato).
+
+Il percorso PULITA e' lineare ai livelli normali. Le protezioni intervengono solo
+vicino al fondo scala; GRANA reintroduce gradualmente la saturazione prevista
+dallo scenario. Dopo un aggiornamento da una versione precedente, cancellare un
+loop RESPIRO gia' distorto: la distorsione era memorizzata nel buffer e non puo'
+essere rimossa retroattivamente.
+
+### Se il sax diventa digitale o cresce da solo
+
+1. cancellare RESPIRO e riavviare Commento;
+2. verificare `MTR/USB SEND POINT: PRE COMP`, non `POST COMP` o `POST EQ`;
+3. scegliere `GRANA: PULITA` e non attivare NUTRI;
+4. regolare il preamplificatore per leggere circa -18/-12 dB sul sax;
+5. controllare nella pagina CONNESSIONI che `xrun` resti a zero.
+
+Se il problema sparisce disabilitando gli ingressi, ma ritorna appena 7/8 e'
+attivo, controllare per prima cosa il feedback USB. Con 7/8 su `PC`, soltanto
+`PRE COMP` garantisce che al Raspberry arrivino gli ingressi analogici invece
+del ritorno proveniente dal computer. Partire sempre con il fader 7/8 basso.
+Se l'ingresso resta quasi a fondo scala per circa 180 ms, Commento interrompe
+automaticamente il ritorno e mostra `FEEDBACK SAX`; torna gradualmente attivo
+dopo un secondo di silenzio. Questa protezione evita il picco, ma non sostituisce
+la configurazione PRE COMP corretta.
 
 ## I dieci scenari
 

@@ -3,6 +3,40 @@
 #include <algorithm>
 #include <cmath>
 
+namespace
+{
+// Ordinary levels remain exactly linear. Only exceptional peaks enter this
+// smooth, unit-slope knee before reaching the physical output.
+[[nodiscard]] float protectPeak(float sample, float knee = 0.90f,
+                                float ceiling = 0.98f) noexcept
+{
+    if (! std::isfinite(sample))
+        return 0.0f;
+
+    const auto magnitude = std::abs(sample);
+    if (magnitude <= knee)
+        return sample;
+
+    const auto headroom = ceiling - knee;
+    const auto excess = magnitude - knee;
+    const auto protectedMagnitude = knee
+        + headroom * excess / (headroom + excess);
+    return std::copysign(protectedMagnitude, sample);
+}
+
+[[nodiscard]] SynthPatch applyTexture(SynthPatch patch, float amount) noexcept
+{
+    patch.drive = 1.0f + juce::jmax(0.0f, patch.drive - 1.0f) * amount;
+    return patch;
+}
+
+[[nodiscard]] SaxPatch applyTexture(SaxPatch patch, float amount) noexcept
+{
+    patch.drive = 1.0f + juce::jmax(0.0f, patch.drive - 1.0f) * amount;
+    return patch;
+}
+}
+
 EcosystemEngine::EcosystemEngine()
 {
     const auto& initialScenario = CommentoScenarios::get(0);
@@ -146,6 +180,11 @@ float EcosystemEngine::getSaxOutputLevel() const
     return saxOutputLevel.load();
 }
 
+bool EcosystemEngine::isSaxSafetyMuted() const
+{
+    return saxSafetyMuted.load();
+}
+
 int EcosystemEngine::getDroppedMidiMessageCount() const
 {
     return droppedMidiMessages.load();
@@ -164,6 +203,16 @@ void EcosystemEngine::setScenarioIndex(int index)
 int EcosystemEngine::getScenarioIndex() const
 {
     return requestedScenario.load();
+}
+
+void EcosystemEngine::setTextureAmount(float amount)
+{
+    requestedTexture.store(juce::jlimit(0.0f, 1.0f, amount));
+}
+
+float EcosystemEngine::getTextureAmount() const
+{
+    return requestedTexture.load();
 }
 
 void EcosystemEngine::setBassEnabled(bool shouldBeEnabled)
@@ -248,15 +297,11 @@ void EcosystemEngine::prepare(double newSampleRate, int maximumBlockSize)
         synth->prepare(sampleRate, maximumBlockSize);
     saxProcessor.prepare(sampleRate, maximumBlockSize);
 
-    const auto scenarioIndex = activeScenario.load();
-    if (scenarioIndex >= 0)
-    {
-        const auto& scenario = CommentoScenarios::get(scenarioIndex);
-        for (int index = 0; index < midiMemoryCount; ++index)
-            internalSynths[static_cast<size_t>(index)]->setPatch(
-                scenario.layers[static_cast<size_t>(index)]);
-        saxProcessor.setPatch(scenario.sax);
-    }
+    // Force the requested scene and texture back onto freshly prepared DSP;
+    // prepare may run again after reconnecting the Model 12.
+    activeScenario.store(-1);
+    activeTexture = -1.0f;
+    applyScenarioIfNeeded();
 }
 
 void EcosystemEngine::audioDeviceStopped()
@@ -268,6 +313,10 @@ void EcosystemEngine::audioDeviceStopped()
     stereoOutputLevel.store(0.0f);
     bassOutputLevel.store(0.0f);
     saxOutputLevel.store(0.0f);
+    saxSafetyMuted.store(false);
+    saxDangerSamples = 0;
+    saxRecoverySamples = 0;
+    saxSafetyGain = 1.0f;
     for (int index = 0; index < midiMemoryCount; ++index)
     {
         auto& memory = midiMemories[static_cast<size_t>(index)];
@@ -360,6 +409,35 @@ void EcosystemEngine::audioDeviceIOCallbackWithContext(
     }
     saxInputLevel.store(juce::jmax(inputPeak, saxInputLevel.load() * 0.86f));
 
+    // A sustained near-full-scale input is much more likely to be a USB
+    // feedback loop or clipped preamp than a usable sax signal. Break the
+    // return automatically, then recover only after one second of quiet.
+    if (saxSafetyMuted.load())
+    {
+        saxRecoverySamples = inputPeak < 0.08f
+            ? saxRecoverySamples + numSamples : 0;
+        if (saxRecoverySamples >= static_cast<int64_t>(sampleRate))
+        {
+            saxSafetyMuted.store(false);
+            saxRecoverySamples = 0;
+            saxDangerSamples = 0;
+        }
+    }
+    else
+    {
+        if (inputPeak > 0.94f)
+            saxDangerSamples += numSamples;
+        else
+            saxDangerSamples = juce::jmax<int64_t>(
+                0, saxDangerSamples - static_cast<int64_t>(numSamples) * 2);
+
+        if (saxDangerSamples >= static_cast<int64_t>(sampleRate * 0.18))
+        {
+            saxSafetyMuted.store(true);
+            saxRecoverySamples = 0;
+        }
+    }
+
     float ambientPeak = 0.0f;
     for (int channel = ambientLeftBus;
          channel <= ambientRightBus && channel < numOutputChannels; ++channel)
@@ -370,7 +448,7 @@ void EcosystemEngine::audioDeviceIOCallbackWithContext(
         for (int sample = 0; sample < numSamples; ++sample)
         {
             auto& value = outputChannelData[channel][sample];
-            value = std::tanh(value * 0.82f) * 0.92f;
+            value = protectPeak(value);
             ambientPeak = juce::jmax(ambientPeak, std::abs(value));
         }
     }
@@ -383,7 +461,7 @@ void EcosystemEngine::audioDeviceIOCallbackWithContext(
         for (int sample = 0; sample < numSamples; ++sample)
         {
             auto& value = outputChannelData[bassBus][sample];
-            value = std::tanh(value * 0.88f) * 0.9f;
+            value = protectPeak(value);
             bassPeak = juce::jmax(bassPeak, std::abs(value));
         }
     }
@@ -404,16 +482,21 @@ void EcosystemEngine::audioDeviceIOCallbackWithContext(
 void EcosystemEngine::applyScenarioIfNeeded()
 {
     const auto desired = CommentoScenarios::wrapIndex(requestedScenario.load());
-    if (desired == activeScenario.load())
+    const auto texture = juce::jlimit(0.0f, 1.0f, requestedTexture.load());
+    const auto scenarioChanged = desired != activeScenario.load();
+    if (desired == activeScenario.load()
+        && std::abs(texture - activeTexture) < 0.0001f)
         return;
 
     const auto& scenario = CommentoScenarios::get(desired);
     for (int index = 0; index < midiMemoryCount; ++index)
         internalSynths[static_cast<size_t>(index)]->setPatch(
-            scenario.layers[static_cast<size_t>(index)]);
-    saxProcessor.setPatch(scenario.sax);
-    audioDecay.store(scenario.sax.loopDecay);
+            applyTexture(scenario.layers[static_cast<size_t>(index)], texture));
+    saxProcessor.setPatch(applyTexture(scenario.sax, texture));
+    if (scenarioChanged)
+        audioDecay.store(scenario.sax.loopDecay);
     activeScenario.store(desired);
+    activeTexture = texture;
 }
 
 void EcosystemEngine::applyMidiCommands(MidiMemory& memory, int channel,
@@ -690,11 +773,12 @@ void EcosystemEngine::renderAudioMemory(
     const auto decay = audioDecay.load();
     const auto rightInputChannel = juce::jmin(1, inputChannels - 1);
     const auto useStereoInput = saxStereoInput.load();
+    const auto inputAllowed = ! saxSafetyMuted.load();
 
     const auto readInput = [inputs, inputChannels, rightInputChannel,
-                            useStereoInput](int channel, int sample)
+                            useStereoInput, inputAllowed](int channel, int sample)
     {
-        if (inputs == nullptr || inputChannels <= 0)
+        if (! inputAllowed || inputs == nullptr || inputChannels <= 0)
             return 0.0f;
         const auto sourceChannel = useStereoInput && channel > 0
             ? rightInputChannel : 0;
@@ -740,8 +824,12 @@ void EcosystemEngine::renderAudioMemory(
             if (audioMemory.recordingActive)
             {
                 const auto input = readInput(memoryChannel, sample);
-                const auto overdub = loopSample * decay + input * 0.32f;
-                loopSample = std::tanh(overdub * 0.82f) / std::tanh(0.82f);
+                // The former normalised tanh amplified the stored loop on
+                // every silent pass. Retention is now strictly below unity;
+                // protection only starts near full scale.
+                const auto overdub = loopSample * juce::jmin(decay, 0.995f)
+                                   + input * 0.22f;
+                loopSample = protectPeak(overdub, 0.88f, 0.98f);
                 audioMemory.buffer.setSample(memoryChannel, bufferPosition,
                                              loopSample);
             }
@@ -753,6 +841,18 @@ void EcosystemEngine::renderAudioMemory(
     }
 
     saxProcessor.process(saxRenderBuffer, numSamples);
+    const auto safetyTarget = saxSafetyMuted.load() ? 0.0f : 1.0f;
+    const auto safetyTime = safetyTarget < saxSafetyGain ? 0.006 : 0.25;
+    const auto safetyCoefficient = static_cast<float>(
+        1.0 - std::exp(-1.0 / (safetyTime * sampleRate)));
+    for (int sample = 0; sample < numSamples; ++sample)
+    {
+        saxSafetyGain += (safetyTarget - saxSafetyGain) * safetyCoefficient;
+        saxRenderBuffer.setSample(0, sample,
+            saxRenderBuffer.getSample(0, sample) * saxSafetyGain);
+        saxRenderBuffer.setSample(1, sample,
+            saxRenderBuffer.getSample(1, sample) * saxSafetyGain);
+    }
     if (outputChannels > saxRightBus)
     {
         if (outputs[saxLeftBus] != nullptr)

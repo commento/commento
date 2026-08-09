@@ -180,6 +180,47 @@ int main()
                          && physicalBass.silent(7, blockSize),
                      "il basso dedicato non deve entrare nell'audio sax 7/8");
 
+    EcosystemEngine noInputEngine;
+    noInputEngine.prepare(sampleRate, blockSize);
+    Model12AudioRouter noInputRouter(noInputEngine);
+    OutputBlock<10> physicalNoInput(blockSize, 0.75f);
+    process(noInputRouter, nullptr, 0, physicalNoInput.pointers.data(), 10,
+            blockSize);
+    passed &= expect(physicalNoInput.silent(6, blockSize)
+                         && physicalNoInput.silent(7, blockSize),
+                     "input None/null deve produrre silenzio sui bus sax 7/8");
+    passed &= expect(physicalNoInput.finite(blockSize),
+                     "input None/null deve produrre soltanto campioni finiti");
+
+    EcosystemEngine feedbackSafetyEngine;
+    feedbackSafetyEngine.prepare(sampleRate, blockSize);
+    std::array<std::vector<float>, 2> feedbackInputStorage;
+    std::array<const float*, 2> feedbackInputs {};
+    for (size_t channel = 0; channel < feedbackInputStorage.size(); ++channel)
+    {
+        feedbackInputStorage[channel].assign(blockSize, 0.97f);
+        feedbackInputs[channel] = feedbackInputStorage[channel].data();
+    }
+    OutputBlock<EcosystemEngine::logicalOutputBusCount> feedbackOutput(blockSize);
+    for (int block = 0; block < 20; ++block)
+    {
+        feedbackOutput.clear();
+        process(feedbackSafetyEngine, feedbackInputs.data(), 2,
+                feedbackOutput.pointers.data(),
+                EcosystemEngine::logicalOutputBusCount, blockSize);
+    }
+    passed &= expect(feedbackSafetyEngine.isSaxSafetyMuted(),
+                     "un ingresso sax quasi a fondo scala deve attivare la sicurezza");
+    for (int block = 0; block < 100; ++block)
+    {
+        feedbackOutput.clear();
+        process(feedbackSafetyEngine, nullptr, 0,
+                feedbackOutput.pointers.data(),
+                EcosystemEngine::logicalOutputBusCount, blockSize);
+    }
+    passed &= expect(! feedbackSafetyEngine.isSaxSafetyMuted(),
+                     "la sicurezza sax deve recuperare dopo un secondo di silenzio");
+
     EcosystemEngine saxEngine;
     saxEngine.prepare(sampleRate, blockSize);
     Model12AudioRouter saxRouter(saxEngine);
@@ -225,6 +266,83 @@ int main()
     passed &= expect(saxEngine.hasMaterial(EcosystemEngine::midiMemoryCount),
                      "un riavvio a 48 kHz deve conservare il loop sax");
 
+    // A low-level sax loop must not grow merely because overdub remains active
+    // while no physical input is connected.  The loop length is intentionally
+    // greater than 50 ms so it is accepted as usable material by the engine.
+    constexpr auto regressionLoopSamples = 4096;
+    constexpr auto silentOverdubPasses = 48;
+    EcosystemEngine overdubEngine;
+    overdubEngine.prepare(sampleRate, blockSize);
+    overdubEngine.setScenarioIndex(6);
+    OutputBlock<EcosystemEngine::logicalOutputBusCount> overdubOutput(
+        regressionLoopSamples);
+
+    // Let all smoothed scenario parameters reach their targets before taking
+    // amplitude measurements.  Silence also verifies the DSP state stays
+    // finite while its parameters move.
+    for (int block = 0; block < 100; ++block)
+    {
+        overdubOutput.clear();
+        process(overdubEngine, nullptr, 0, overdubOutput.pointers.data(),
+                EcosystemEngine::logicalOutputBusCount, blockSize);
+        passed &= expect(overdubOutput.finite(blockSize),
+                         "il DSP sax deve restare finito durante il cambio scenario");
+    }
+
+    std::array<std::vector<float>, 2> quietSaxInputStorage;
+    std::array<const float*, 2> quietSaxInputs {};
+    for (size_t channel = 0; channel < quietSaxInputStorage.size(); ++channel)
+    {
+        quietSaxInputStorage[channel].assign(regressionLoopSamples, 0.02f);
+        quietSaxInputs[channel] = quietSaxInputStorage[channel].data();
+    }
+
+    overdubEngine.toggleRecording(EcosystemEngine::midiMemoryCount);
+    overdubOutput.clear();
+    process(overdubEngine, quietSaxInputs.data(), 2,
+            overdubOutput.pointers.data(),
+            EcosystemEngine::logicalOutputBusCount, regressionLoopSamples);
+    overdubEngine.toggleRecording(EcosystemEngine::midiMemoryCount);
+    overdubOutput.clear();
+    process(overdubEngine, nullptr, 0, overdubOutput.pointers.data(),
+            EcosystemEngine::logicalOutputBusCount, regressionLoopSamples);
+    const auto referenceLoopPeak = std::max(
+        overdubOutput.peak(EcosystemEngine::saxLeftBus, regressionLoopSamples),
+        overdubOutput.peak(EcosystemEngine::saxRightBus, regressionLoopSamples));
+    passed &= expect(referenceLoopPeak > 0.0001f,
+                     "il loop sax di regressione deve essere udibile");
+
+    overdubEngine.toggleRecording(EcosystemEngine::midiMemoryCount);
+    float maximumSilentOverdubPeak = 0.0f;
+    bool silentOverdubStayedFinite = true;
+    for (int pass = 0; pass < silentOverdubPasses; ++pass)
+    {
+        overdubOutput.clear();
+        process(overdubEngine, nullptr, 0, overdubOutput.pointers.data(),
+                EcosystemEngine::logicalOutputBusCount, regressionLoopSamples);
+        silentOverdubStayedFinite &= overdubOutput.finite(regressionLoopSamples);
+        maximumSilentOverdubPeak = std::max(maximumSilentOverdubPeak,
+            std::max(overdubOutput.peak(EcosystemEngine::saxLeftBus,
+                                        regressionLoopSamples),
+                     overdubOutput.peak(EcosystemEngine::saxRightBus,
+                                        regressionLoopSamples)));
+    }
+    overdubEngine.toggleRecording(EcosystemEngine::midiMemoryCount);
+    overdubOutput.clear();
+    process(overdubEngine, nullptr, 0, overdubOutput.pointers.data(),
+            EcosystemEngine::logicalOutputBusCount, regressionLoopSamples);
+    const auto finalLoopPeak = std::max(
+        overdubOutput.peak(EcosystemEngine::saxLeftBus, regressionLoopSamples),
+        overdubOutput.peak(EcosystemEngine::saxRightBus, regressionLoopSamples));
+
+    passed &= expect(silentOverdubStayedFinite && overdubOutput.finite(
+                         regressionLoopSamples),
+                     "molti giri di overdub silenzioso devono restare finiti");
+    passed &= expect(finalLoopPeak <= referenceLoopPeak * 4.0f + 0.02f,
+                     "l'overdub senza input non deve auto-amplificare il loop sax");
+    passed &= expect(maximumSilentOverdubPeak < 0.25f,
+                     "un loop sax a basso livello non deve avvicinarsi al clipping");
+
     EcosystemEngine scenarioEngine;
     scenarioEngine.prepare(sampleRate, blockSize);
     OutputBlock<EcosystemEngine::logicalOutputBusCount> scenarioOutput(blockSize);
@@ -245,6 +363,9 @@ int main()
     passed &= expect(saxRouter.getPhysicalInputChannelCount() == 0
                          && saxRouter.getPhysicalOutputChannelCount() == 10,
                      "il router deve esporre il conteggio del callback fisico");
+    passed &= expect(noInputRouter.getPhysicalInputChannelCount() == 0
+                         && noInputRouter.getPhysicalOutputChannelCount() == 10,
+                     "il routing None deve conservare dieci uscite fisiche");
 
     if (passed)
         std::cout << "Commento engine tests passed\n";

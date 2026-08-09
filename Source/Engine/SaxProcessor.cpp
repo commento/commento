@@ -1,6 +1,45 @@
 #include "SaxProcessor.h"
 
+#include <cstddef>
 #include <cmath>
+
+namespace
+{
+// Exactly transparent below the knee.  The rational curve has unit slope at
+// the knee and approaches the ceiling asymptotically, so it only intervenes
+// when a feedback or reverb peak is genuinely close to full scale.
+[[nodiscard]] float applyConditionalCeiling(float sample, float knee,
+                                            float ceiling) noexcept
+{
+    if (! std::isfinite(sample))
+        return 0.0f;
+
+    const auto magnitude = std::abs(sample);
+    if (magnitude <= knee)
+        return sample;
+
+    const auto headroom = ceiling - knee;
+    const auto excess = magnitude - knee;
+    const auto limitedMagnitude = knee
+        + headroom * excess / (headroom + excess);
+    return std::copysign(limitedMagnitude, sample);
+}
+
+// Drive values up to unity deliberately keep a completely linear signal path.
+// Above unity, the saturated signal is gain-compensated and progressively
+// crossfaded in.  This makes distortion a scenario colour rather than a
+// permanent part of the sax path.
+[[nodiscard]] float applyIntentionalDrive(float sample,
+                                          float driveAmount) noexcept
+{
+    if (driveAmount <= 1.0f)
+        return sample;
+
+    const auto blend = juce::jlimit(0.0f, 1.0f, driveAmount - 1.0f);
+    const auto saturated = std::tanh(sample * driveAmount) / driveAmount;
+    return sample + blend * (saturated - sample);
+}
+}
 
 void SaxProcessor::prepare(double newSampleRate, int maximumBlockSize)
 {
@@ -100,16 +139,16 @@ void SaxProcessor::process(juce::AudioBuffer<float>& buffer, int numSamples)
         const auto saturation = drive.getNextValue();
         for (int channel = 0; channel < 2; ++channel)
         {
-            highPassState[static_cast<size_t>(channel)] = highPassPole
-                * (highPassState[static_cast<size_t>(channel)]
-                   + source[channel] - previousInput[static_cast<size_t>(channel)]);
-            previousInput[static_cast<size_t>(channel)] = source[channel];
-            lowPassState[static_cast<size_t>(channel)] = (1.0f - pole)
-                * highPassState[static_cast<size_t>(channel)]
-                + pole * lowPassState[static_cast<size_t>(channel)];
-            filtered[channel] = std::tanh(
-                lowPassState[static_cast<size_t>(channel)] * saturation)
-                / std::tanh(saturation);
+            highPassState[static_cast<std::size_t>(channel)] = highPassPole
+                * (highPassState[static_cast<std::size_t>(channel)]
+                   + source[channel]
+                   - previousInput[static_cast<std::size_t>(channel)]);
+            previousInput[static_cast<std::size_t>(channel)] = source[channel];
+            lowPassState[static_cast<std::size_t>(channel)] = (1.0f - pole)
+                * highPassState[static_cast<std::size_t>(channel)]
+                + pole * lowPassState[static_cast<std::size_t>(channel)];
+            filtered[channel] = applyIntentionalDrive(
+                lowPassState[static_cast<std::size_t>(channel)], saturation);
         }
 
         const auto modulation = static_cast<float>(std::sin(modulationPhase))
@@ -122,12 +161,14 @@ void SaxProcessor::process(juce::AudioBuffer<float>& buffer, int numSamples)
         const auto echoRight = readDelay(1, rightDelay);
         const auto feedbackAmount = feedback.getNextValue();
         const auto crossAmount = crossFeedback.getNextValue();
-        delayBuffer.setSample(0, writePosition, std::tanh(
-            filtered[0] + feedbackAmount
-                * (echoLeft * (1.0f - crossAmount) + echoRight * crossAmount)));
-        delayBuffer.setSample(1, writePosition, std::tanh(
-            filtered[1] + feedbackAmount
-                * (echoRight * (1.0f - crossAmount) + echoLeft * crossAmount)));
+        const auto delayInputLeft = filtered[0] + feedbackAmount
+            * (echoLeft * (1.0f - crossAmount) + echoRight * crossAmount);
+        const auto delayInputRight = filtered[1] + feedbackAmount
+            * (echoRight * (1.0f - crossAmount) + echoLeft * crossAmount);
+        delayBuffer.setSample(0, writePosition,
+            applyConditionalCeiling(delayInputLeft, 0.92f, 0.995f));
+        delayBuffer.setSample(1, writePosition,
+            applyConditionalCeiling(delayInputRight, 0.92f, 0.995f));
 
         const auto wet = delayMix.getNextValue();
         const auto tremolo = tremoloDepth.getNextValue();
@@ -154,13 +195,14 @@ void SaxProcessor::process(juce::AudioBuffer<float>& buffer, int numSamples)
 
     reverb.processStereo(left, right, numSamples);
 
-    // A dedicated soft ceiling leaves headroom on the Model 12 return and
-    // avoids the hard digital clipping previously caused by overdub buildup.
+    // Samples below the knee are copied bit-for-bit.  Only exceptional reverb
+    // peaks are caught, replacing the old always-on tanh coloration.
     for (int channel = 0; channel < 2; ++channel)
     {
         auto* samples = buffer.getWritePointer(channel);
         for (int sample = 0; sample < numSamples; ++sample)
-            samples[sample] = std::tanh(samples[sample] * 0.92f) * 0.89f;
+            samples[sample] = applyConditionalCeiling(samples[sample],
+                                                       0.90f, 0.98f);
     }
 }
 

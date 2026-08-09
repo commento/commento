@@ -41,11 +41,14 @@ public:
     [[nodiscard]] float getStereoOutputLevel() const;
     [[nodiscard]] float getBassOutputLevel() const;
     [[nodiscard]] float getSaxOutputLevel() const;
+    [[nodiscard]] bool isSaxSafetyMuted() const;
     [[nodiscard]] int getDroppedMidiMessageCount() const;
     [[nodiscard]] static bool isLiveBassLayer(int memoryIndex);
 
     void setScenarioIndex(int index);
     [[nodiscard]] int getScenarioIndex() const;
+    void setTextureAmount(float amount);
+    [[nodiscard]] float getTextureAmount() const;
     void setBassEnabled(bool shouldBeEnabled);
     [[nodiscard]] bool isBassEnabled() const;
 
@@ -144,12 +147,18 @@ private:
     std::atomic<float> stereoOutputLevel { 0.0f };
     std::atomic<float> bassOutputLevel { 0.0f };
     std::atomic<float> saxOutputLevel { 0.0f };
+    std::atomic<bool> saxSafetyMuted { false };
     std::atomic<bool> midiOverflowed { false };
     std::atomic<int> droppedMidiMessages { 0 };
     std::atomic<int> requestedScenario { 0 };
     std::atomic<int> activeScenario { -1 };
+    std::atomic<float> requestedTexture { 0.0f };
     std::atomic<bool> bassEnabled { true };
+    float activeTexture = -1.0f;
     bool bassWasEnabled = true;
+    int64_t saxDangerSamples = 0;
+    int64_t saxRecoverySamples = 0;
+    float saxSafetyGain = 1.0f;
     double sampleRate = 48000.0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(EcosystemEngine)

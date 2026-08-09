@@ -230,6 +230,7 @@ MainComponent::MainComponent()
     styleButton(recordButton, memoryColours[0]);
     styleButton(clearButton, juce::Colour(0xffad496a));
     styleButton(settingsButton, juce::Colour(0xff6a7c91));
+    styleButton(textureButton, juce::Colour(0xffc18a55));
     styleButton(model12RoutingButton, juce::Colour(0xff5da8a1));
     styleButton(keyStepRoutingButton, juce::Colour(0xff8aa6d6));
     styleButton(saxModeButton, memoryColours[4]);
@@ -238,6 +239,7 @@ MainComponent::MainComponent()
     addAndMakeVisible(recordButton);
     addAndMakeVisible(clearButton);
     addAndMakeVisible(settingsButton);
+    addAndMakeVisible(textureButton);
     addChildComponent(model12RoutingButton);
     addChildComponent(keyStepRoutingButton);
     addChildComponent(saxModeButton);
@@ -294,6 +296,7 @@ MainComponent::MainComponent()
         }
     };
     settingsButton.onClick = [this] { toggleSettings(); };
+    textureButton.onClick = [this] { cycleTexture(); };
     previousScenarioButton.onClick = [this] { changeScenario(-1); };
     nextScenarioButton.onClick = [this] { changeScenario(1); };
     model12RoutingButton.onClick = [this] { configureModel12Routing(); };
@@ -319,8 +322,12 @@ MainComponent::MainComponent()
     addAndMakeVisible(decaySlider);
     addAndMakeVisible(decayLabel);
 
-    const auto savedScenario = properties.getUserSettings() != nullptr
-        ? properties.getUserSettings()->getIntValue("scenario", 0) : 0;
+    const auto* savedSettings = properties.getUserSettings();
+    const auto savedScenario = savedSettings != nullptr
+        ? savedSettings->getIntValue("scenario", 0) : 0;
+    engine.setTextureAmount(static_cast<float>(savedSettings != nullptr
+        ? savedSettings->getDoubleValue("texture", 0.0) : 0.0));
+    updateTextureButton();
     applyScenario(savedScenario);
     selectMemory(0);
     setSize(1280, 800);
@@ -368,6 +375,37 @@ void MainComponent::updateScenarioLabels()
             + juce::String(CommentoScenarios::count) + "  " + scenario.name
             + "\n" + scenario.character,
         juce::dontSendNotification);
+}
+
+void MainComponent::cycleTexture()
+{
+    constexpr std::array<float, 4> levels { 0.0f, 0.25f, 0.55f, 1.0f };
+    const auto current = engine.getTextureAmount();
+    auto next = levels.front();
+    for (const auto level : levels)
+        if (level > current + 0.01f)
+        {
+            next = level;
+            break;
+        }
+
+    engine.setTextureAmount(next);
+    if (auto* settings = properties.getUserSettings())
+    {
+        settings->setValue("texture", next);
+        settings->saveIfNeeded();
+    }
+    updateTextureButton();
+}
+
+void MainComponent::updateTextureButton()
+{
+    const auto amount = engine.getTextureAmount();
+    const auto name = amount < 0.1f ? "PULITA"
+                    : amount < 0.4f ? "LEGGERA"
+                    : amount < 0.8f ? "MEDIA" : "PIENA";
+    textureButton.setButtonText("GRANA: " + juce::String(name));
+    textureButton.setToggleState(amount > 0.01f, juce::dontSendNotification);
 }
 
 void MainComponent::initialiseAudio()
@@ -630,11 +668,17 @@ void MainComponent::updateHardwareIndicators()
     }
 
     const auto audioOk = model12Ready && engine.isAudioRunning();
-    audioStatusLabel.setText(audioOk ? "OK  MODEL 12" : "--  MODEL 12",
+    const auto saxInputHot = engine.getSaxInputLevel() > 0.7079f;
+    const auto saxSafetyMuted = engine.isSaxSafetyMuted();
+    audioStatusLabel.setText(audioOk
+        ? (saxSafetyMuted ? "!  FEEDBACK SAX"
+                         : (saxInputHot ? "!  GAIN SAX" : "OK  MODEL 12"))
+        : "--  MODEL 12",
                              juce::dontSendNotification);
     audioStatusLabel.setColour(
         juce::Label::backgroundColourId,
-        audioOk ? juce::Colour(0xff17463e) : juce::Colour(0xff482b34));
+        audioOk && ! saxInputHot && ! saxSafetyMuted
+            ? juce::Colour(0xff17463e) : juce::Colour(0xff482b34));
 
     auto keyStepPresent = false;
     for (const auto& device : juce::MidiInput::getAvailableDevices())
@@ -664,7 +708,7 @@ void MainComponent::updateHardwareIndicators()
         const auto saxDb = juce::Decibels::gainToDecibels(
             engine.getSaxOutputLevel(), -60.0f);
         connectionStatusLabel.setText(
-            "ATTIVA / " + juce::String(device != nullptr
+            "ATTIVA / PRE COMP / " + juce::String(device != nullptr
                                            ? device->getCurrentSampleRate() / 1000.0 : 0.0, 1)
                 + " kHz / "
                 + juce::String(device != nullptr
@@ -722,6 +766,7 @@ void MainComponent::updateControls()
                                    ? "STEREO 7/8" : "MONO DA INGRESSO 7");
 
     decaySlider.setValue(engine.getAudioDecay(), juce::dontSendNotification);
+    updateTextureButton();
 
     const auto type = isBass
         ? "BASSO LIVE / MIDI 5 -> AUDIO CH 5"
@@ -747,6 +792,7 @@ void MainComponent::toggleSettings()
         orb->setVisible(! settingsVisible);
     recordButton.setVisible(! settingsVisible);
     clearButton.setVisible(! settingsVisible);
+    textureButton.setVisible(! settingsVisible);
     decaySlider.setVisible(! settingsVisible
         && selectedMemory == EcosystemEngine::midiMemoryCount);
     decayLabel.setVisible(decaySlider.isVisible());
@@ -795,6 +841,7 @@ void MainComponent::resized()
 
     auto footer = bounds.removeFromBottom(108);
     settingsButton.setBounds(footer.removeFromLeft(230).reduced(4, 14));
+    textureButton.setBounds(footer.removeFromLeft(215).reduced(4, 14));
     clearButton.setBounds(footer.removeFromRight(255).reduced(4, 14));
     recordButton.setBounds(footer.withSizeKeepingCentre(390, 78));
 

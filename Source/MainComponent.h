@@ -34,6 +34,8 @@ private:
     void changeScenario(int delta);
     void applyScenario(int index);
     void updateScenarioLabels();
+    void cycleTexture();
+    void updateTextureButton();
 
     EcosystemEngine engine;
     Model12AudioRouter audioRouter { engine };
@@ -51,6 +53,7 @@ private:
     juce::TextButton recordButton { "SEMINA" };
     juce::TextButton clearButton { "DIMENTICA" };
     juce::TextButton settingsButton { "CONNESSIONI" };
+    juce::TextButton textureButton { "GRANA: PULITA" };
     juce::TextButton model12RoutingButton { "RIPROVA MODEL 12" };
     juce::TextButton keyStepRoutingButton { "RIPROVA KEYSTEP PRO" };
     juce::Label connectionStatusLabel;
