@@ -32,13 +32,17 @@ Commento stereo out USB 1-2 -> canali 1-2 Model 12 -> casse / impianto
 
 In CONNESSIONI:
 
-1. scegliere Tascam Model 12 come dispositivo audio;
-2. abilitare la coppia USB `7+8`: selezionandola, l'eventuale coppia predefinita
-   `1+2` viene disattivata automaticamente; il sax sull'ingresso 7 viene trattato
-   come mono e duplicato al centro;
-3. abilitare le uscite USB 1 e 2 per il ritorno stereo di Commento;
+1. Commento cerca automaticamente la Model 12 e applica insieme 48 kHz,
+   buffer 256, ingresso 7+8 e uscita 1+2;
+2. se il mixer viene collegato dopo l'avvio, premere **CONFIGURA MODEL 12 |
+   SAX 7+8 | USCITA 1+2** per ripetere la configurazione;
+3. il sax sull'ingresso 7 viene trattato come mono e duplicato al centro;
 4. scegliere il Keystep Pro come ingresso MIDI;
 5. lasciare MIDI Output su `none`, salvo uso volontario di hardware esterno.
+
+Le liste audio generiche di JUCE non sono mostrate: sulla Model 12 modificare
+input e output separatamente puo' produrre una configurazione ALSA intermedia
+non valida e chiudere entrambe le direzioni audio.
 
 Sulla Model 12, impostare i canali 1 e 2 su `PC` per ricevere il ritorno di
 Commento e lasciare il canale del sax su `LIVE`. Nel menu USB AUDIO usare

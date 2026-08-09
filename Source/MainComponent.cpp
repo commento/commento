@@ -196,9 +196,20 @@ MainComponent::MainComponent()
     styleButton(recordButton, memoryColours[0]);
     styleButton(clearButton, juce::Colour(0xffad496a));
     styleButton(settingsButton, juce::Colour(0xff6a7c91));
+    styleButton(model12RoutingButton, juce::Colour(0xff5da8a1));
     addAndMakeVisible(recordButton);
     addAndMakeVisible(clearButton);
     addAndMakeVisible(settingsButton);
+    addChildComponent(model12RoutingButton);
+
+    connectionStatusLabel.setJustificationType(juce::Justification::centred);
+    connectionStatusLabel.setFont(juce::FontOptions(21.0f));
+    connectionStatusLabel.setColour(juce::Label::textColourId,
+                                    juce::Colour(paleText));
+    connectionStatusLabel.setText(
+        "Premi il pulsante per applicare il routing completo in una sola volta",
+        juce::dontSendNotification);
+    addChildComponent(connectionStatusLabel);
 
     recordButton.onClick = [this]
     {
@@ -211,6 +222,7 @@ MainComponent::MainComponent()
         updateControls();
     };
     settingsButton.onClick = [this] { toggleSettings(); };
+    model12RoutingButton.onClick = [this] { configureModel12Routing(); };
 
     decaySlider.setSliderStyle(juce::Slider::LinearHorizontal);
     decaySlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 80, 34);
@@ -252,10 +264,10 @@ void MainComponent::initialiseAudio()
     // an unwanted loop before the sax pair has been selected.
     const auto error = deviceManager.initialise(0, 2, nullptr, true);
     deviceSelector = std::make_unique<juce::AudioDeviceSelectorComponent>(
-        // Commento needs one input pair and one output pair only. Limiting each
-        // side to two channels makes selecting 7+8 replace 1+2 instead of
-        // leaving both pairs active; ALSA then exposes channel 7 as inputs[0].
-        deviceManager, 0, 2, 2, 2, true, true, true, false);
+        // Audio routing is deliberately handled by configureModel12Routing().
+        // The generic JUCE channel lists are omitted because applying one side
+        // at a time can leave a multichannel ALSA device closed.
+        deviceManager, 0, 0, 0, 0, true, true, false, false);
     deviceSelector->setItemHeight(70);
     deviceSelector->setLookAndFeel(&connectionLookAndFeel);
     connectionViewport.setViewedComponent(deviceSelector.get(), false);
@@ -272,6 +284,83 @@ void MainComponent::initialiseAudio()
 
     statusLabel.setText(error.isEmpty() ? "audio pronto" : error,
                         juce::dontSendNotification);
+    configureModel12Routing();
+}
+
+void MainComponent::configureModel12Routing()
+{
+    const auto findModel12 = [](const juce::StringArray& names)
+    {
+        for (const auto& name : names)
+            if (name.containsIgnoreCase("model 12")
+                || name.containsIgnoreCase("model12"))
+                return name;
+        for (const auto& name : names)
+            if (name.containsIgnoreCase("tascam"))
+                return name;
+        return juce::String {};
+    };
+
+    juce::AudioIODeviceType* model12Type = nullptr;
+    juce::String inputDeviceName;
+    juce::String outputDeviceName;
+
+    for (auto* type : deviceManager.getAvailableDeviceTypes())
+    {
+        type->scanForDevices();
+        const auto outputName = findModel12(type->getDeviceNames(false));
+        const auto inputName = type->hasSeparateInputsAndOutputs()
+            ? findModel12(type->getDeviceNames(true)) : outputName;
+
+        if (outputName.isNotEmpty() && inputName.isNotEmpty())
+        {
+            model12Type = type;
+            inputDeviceName = inputName;
+            outputDeviceName = outputName;
+            break;
+        }
+    }
+
+    if (model12Type == nullptr)
+    {
+        connectionStatusLabel.setColour(juce::Label::textColourId,
+                                        juce::Colour(0xffff9f8e));
+        connectionStatusLabel.setText(
+            "MODEL 12 non trovata: controlla USB e alimentazione del mixer",
+            juce::dontSendNotification);
+        return;
+    }
+
+    deviceManager.setCurrentAudioDeviceType(model12Type->getTypeName(), true);
+    auto setup = deviceManager.getAudioDeviceSetup();
+    setup.inputDeviceName = inputDeviceName;
+    setup.outputDeviceName = outputDeviceName;
+    setup.sampleRate = 48000.0;
+    setup.bufferSize = 256;
+    setup.useDefaultInputChannels = false;
+    setup.useDefaultOutputChannels = false;
+    setup.inputChannels.clear();
+    setup.inputChannels.setBit(6);  // Model 12 USB input 7
+    setup.inputChannels.setBit(7);  // Model 12 USB input 8
+    setup.outputChannels.clear();
+    setup.outputChannels.setBit(0); // Model 12 USB output 1
+    setup.outputChannels.setBit(1); // Model 12 USB output 2
+
+    const auto error = deviceManager.setAudioDeviceSetup(setup, true);
+    if (error.isNotEmpty())
+    {
+        connectionStatusLabel.setColour(juce::Label::textColourId,
+                                        juce::Colour(0xffff9f8e));
+        connectionStatusLabel.setText("Errore ALSA: " + error,
+                                      juce::dontSendNotification);
+        return;
+    }
+
+    connectionStatusLabel.setColour(juce::Label::textColourId,
+                                    juce::Colour(0xff91e5c4));
+    connectionStatusLabel.setText(
+        "MODEL 12 pronta: 48 kHz / 256  |  SAX 7+8  |  USCITA 1+2",
+        juce::dontSendNotification);
 }
 
 void MainComponent::handleIncomingMidiMessage(juce::MidiInput*,
@@ -349,6 +438,8 @@ void MainComponent::toggleSettings()
 {
     settingsVisible = ! settingsVisible;
     connectionViewport.setVisible(settingsVisible);
+    model12RoutingButton.setVisible(settingsVisible);
+    connectionStatusLabel.setVisible(settingsVisible);
     for (auto& orb : orbs)
         orb->setVisible(! settingsVisible);
     recordButton.setVisible(! settingsVisible);
@@ -396,6 +487,10 @@ void MainComponent::resized()
     if (settingsVisible)
     {
         auto connectionArea = bounds.reduced(24, 10);
+        model12RoutingButton.setBounds(
+            connectionArea.removeFromTop(82).reduced(4, 5));
+        connectionStatusLabel.setBounds(connectionArea.removeFromTop(48));
+        connectionArea.removeFromTop(8);
         connectionViewport.setBounds(connectionArea);
         if (deviceSelector != nullptr)
         {

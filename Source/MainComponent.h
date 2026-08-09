@@ -43,6 +43,7 @@ private:
     void updateControls();
     void toggleSettings();
     void enlargeConnectionTargets();
+    void configureModel12Routing();
 
     EcosystemEngine engine;
     juce::AudioDeviceManager deviceManager;
@@ -57,6 +58,10 @@ private:
     juce::TextButton recordButton { "SEMINA" };
     juce::TextButton clearButton { "DIMENTICA" };
     juce::TextButton settingsButton { "CONNESSIONI" };
+    juce::TextButton model12RoutingButton {
+        "CONFIGURA MODEL 12  |  SAX 7+8  |  USCITA 1+2"
+    };
+    juce::Label connectionStatusLabel;
     juce::Slider decaySlider;
     juce::Label decayLabel;
 
