@@ -12,6 +12,22 @@
 class EcosystemEngine final : public juce::AudioIODeviceCallback
 {
 public:
+    enum class SaxPathMode : int
+    {
+        muted = 0,
+        direct,
+        cleanLooper,
+        sceneEffects
+    };
+
+    enum class DiagnosticToneBus : int
+    {
+        off = -1,
+        ambient = 0,
+        bass,
+        sax
+    };
+
     static constexpr int midiMemoryCount = 4;
     static constexpr int memoryCount = 5;
     static constexpr int bassLayerIndex = 0;
@@ -56,6 +72,10 @@ public:
     [[nodiscard]] float getAudioDecay() const;
     void setSaxStereoInput(bool shouldUseStereo);
     [[nodiscard]] bool isSaxStereoInput() const;
+    void setSaxPathMode(SaxPathMode mode);
+    [[nodiscard]] SaxPathMode getSaxPathMode() const;
+    void setDiagnosticToneBus(DiagnosticToneBus bus);
+    [[nodiscard]] DiagnosticToneBus getDiagnosticToneBus() const;
     void prepare(double newSampleRate, int maximumBlockSize = 4096);
 
     void audioDeviceIOCallbackWithContext(const float* const* inputChannelData,
@@ -125,6 +145,8 @@ private:
                            float* const* outputs, int outputChannels, int numSamples);
     void renderInternalSynths(float* const* outputs, int outputChannels,
                               int numSamples, const juce::MidiBuffer& midi);
+    void renderDiagnosticTone(float* const* outputs, int outputChannels,
+                              int numSamples);
 
     std::array<MidiMemory, midiMemoryCount> midiMemories;
     std::array<std::unique_ptr<AmbientSynth>, midiMemoryCount> internalSynths;
@@ -140,6 +162,10 @@ private:
     juce::AudioBuffer<float> saxRenderBuffer;
     std::atomic<float> audioDecay { 0.985f };
     std::atomic<bool> saxStereoInput { false };
+    std::atomic<int> saxPathMode { static_cast<int>(SaxPathMode::sceneEffects) };
+    std::atomic<int> diagnosticToneBus {
+        static_cast<int>(DiagnosticToneBus::off)
+    };
     std::atomic<bool> audioRunning { false };
     std::atomic<int> callbackInputChannels { 0 };
     std::atomic<int> callbackOutputChannels { 0 };
@@ -159,6 +185,7 @@ private:
     int64_t saxDangerSamples = 0;
     int64_t saxRecoverySamples = 0;
     float saxSafetyGain = 1.0f;
+    double diagnosticTonePhase = 0.0;
     double sampleRate = 48000.0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(EcosystemEngine)

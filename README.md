@@ -18,20 +18,23 @@ Il nome **Commento** e' provvisorio.
 - prima registrazione audio libera e overdub successivo con headroom, decadimento
   e saturazione morbida;
 - dieci trattamenti sax con delay, modulazione, tremolo, tono e spazi differenti;
-- profilo appliance dedicato alla Tascam Model 12, aperta realmente come
-  dispositivo USB 12-in/10-out;
-- router hardware a cinque bus: ambiente sui canali audio 1/2 della Model 12,
-  basso sul canale audio 5 e sax sui canali audio 7/8;
-- rilevamento automatico del Keystep Pro, senza MIDI thru o menu audio generici;
+- pagina CONNESSIONI hardware-generica con profili Model 12, stereo e
+  personalizzato, controlli grandi e applicazione esplicita della configurazione;
+- router configurabile a cinque bus logici: ambiente stereo, basso, sax stereo,
+  con ingresso e uscite fisiche scegliibili in base all'interfaccia collegata;
+- rilevamento automatico del Keystep Pro, senza MIDI thru esterno;
 - interfaccia touch a quattro organismi MIDI e una fascia RESPIRO, con stati
   espliciti, meter del sax e controlli grandi;
 - build macOS e Raspberry Pi OS 64 bit dallo stesso codice.
 
 Questa versione non salva ancora i loop su disco. Salva invece l'ultimo scenario
-selezionato e il livello di GRANA. I parametri sonori sono scelti per il live e
-non espongono ancora un pannello di sintesi dettagliato.
+selezionato, il livello di GRANA e l'ultima configurazione audio applicata. I
+parametri sonori sono scelti per il live e non espongono ancora un pannello di
+sintesi dettagliato.
 
 ## Flusso del sistema autonomo
+
+Con il profilo **MODEL 12** la mappa iniziale e':
 
 ```text
 Keystep MIDI 5 -> basso live Commento -> canale AUDIO 5 Model 12
@@ -39,22 +42,44 @@ Keystep MIDI 2/3/4 -> loop e voci ambient -> canali AUDIO 1/2 Model 12
 Sax -> ingressi AUDIO 7/8 -> RESPIRO + effetti -> ritorno AUDIO 7/8 Model 12
 ```
 
-All'avvio Commento:
+All'avvio Commento legge i sistemi e i dispositivi audio disponibili, ripristina
+l'ultima configurazione riuscita e cerca il Keystep Pro. Alla prima esecuzione
+prova il profilo MODEL 12; se non trova un dispositivo adatto, ripiega sul
+profilo stereo generico. Il riepilogo mostra il dispositivo realmente aperto,
+frequenza, buffer, numero di ingressi/uscite attivi e xrun.
 
-1. cerca una Model 12 che esponga almeno 12 ingressi, 10 uscite e 48 kHz;
-2. apre insieme tutti i 12 ingressi e le 10 uscite con buffer 512;
-3. preleva i canali fisici 7/8 per RESPIRO;
-4. mappa i bus logici su audio 1/2, 5 e 7/8, azzerando ogni altra uscita;
-5. cerca il Keystep Pro e abilita un solo ingresso MIDI;
-6. mostra lo stato effettivo di entrambi nell'intestazione.
+### Pagina CONNESSIONI
 
-La pagina **CONNESSIONI** non contiene menu o checkbox piccoli. Offre soltanto
-due pulsanti grandi, **RIPROVA MODEL 12** e **RIPROVA KEYSTEP PRO**, insieme a
-rate, buffer, xrun e mappa dei canali. Modificare input e output separatamente
-con il selettore generico JUCE poteva produrre una configurazione ALSA
-intermedia non valida e portare entrambi su `none`.
+La pagina **CONNESSIONI** usa selettori grandi con frecce, adatti al touchscreen.
+Permette di scegliere:
 
-Sulla Model 12 impostare:
+- profilo, sistema audio, dispositivo di ingresso e dispositivo di uscita;
+- frequenza di campionamento e buffer;
+- ingresso fisico del sax;
+- uscite fisiche dei bus ambiente, basso e sax;
+- percorso diagnostico del sax e tono di prova a 997 Hz.
+
+I profili sono punti di partenza, non vincoli:
+
+- **MODEL 12** cerca una Tascam con almeno 12 ingressi e 10 uscite e prepara sax
+  IN 7/8, ambiente OUT 1/2, basso OUT 5 e sax OUT 7/8 a 48 kHz / 512 campioni;
+- **STEREO GENERICO** usa IN 1/2 e fa convergere ambiente, basso e sax su OUT
+  1/2, con headroom automatico quando piu' bus condividono la stessa uscita;
+- **PERSONALIZZATO** lascia scegliere liberamente dispositivi e canali esposti
+  dall'hardware collegato.
+
+Le frecce modificano soltanto una bozza. Il dispositivo viene riaperto e il
+routing diventa effettivo solo premendo **APPLICA AUDIO**; se l'apertura fallisce,
+Commento conserva la configurazione precedente. **RILEGGI DISPOSITIVI** aggiorna
+l'elenco e **RIPROVA KEYSTEP PRO** ripete la ricerca MIDI.
+
+`NESSUNO - CAPTURE OFF` nel campo dispositivo di ingresso apre davvero solo
+l'uscita audio: nessun flusso di cattura viene richiesto al driver. E' diverso da
+`NESSUNO - ROUTE MUTA` in CANALE SAX IN, che lascia il dispositivo di ingresso
+aperto ma non inoltra alcun canale al motore. Questa distinzione e' utile per
+capire se un disturbo nasce dal full-duplex/driver oppure dal routing del sax.
+
+Quando si usa la Model 12, impostare manualmente sul mixer:
 
 - canali 1/2 su `PC` per le tre voci ambient;
 - canale 5 su `PC` per il basso generato dal MIDI 5;
@@ -63,9 +88,10 @@ Sulla Model 12 impostare:
 - `MTR/USB SEND POINT: PRE COMP`.
 
 Il punto `PRE COMP` permette di inviare al Raspberry l'ingresso analogico del
-sax prima del ritorno PC. Partire con fader 7/8 e casse bassi: se il meter sax
-non reagisce o il livello cresce da solo, abbassare immediatamente 7/8 e
-ricontrollare queste due impostazioni.
+sax prima del ritorno PC. E' una regolazione manuale della Model 12: Commento non
+puo' leggerla ne' confermarla via USB. Partire con fader 7/8 e casse bassi: se il
+meter sax non reagisce o il livello cresce da solo, abbassare immediatamente 7/8
+e ricontrollare le impostazioni sul mixer.
 
 Poiche' 7/8 e' su `PC`, Commento rimanda anche il sax live sul proprio bus
 dedicato. A 48 kHz, 512 campioni equivalgono a 10,67 ms per periodo; il monitor
@@ -94,8 +120,8 @@ durante il collegamento.
 - premere **CHIUDI IL CICLO** per stabilire la durata libera;
 - tenere premuto **TIENI PER DISSOLVERE** per 1,1 secondi per cancellare;
 - su RESPIRO, premere **NUTRI** per sovraincidere;
-- scegliere **MONO DA INGRESSO 7** per un microfono singolo oppure
-  **STEREO 7/8** per una sorgente stereo;
+- scegliere nella pagina CONNESSIONI il canale mono o la coppia stereo realmente
+  usata dal sax; il profilo MODEL 12 propone rispettivamente 7 mono o 7/8;
 - **PERSISTENZA DEL RESPIRO** decide quanto materiale precedente sopravvive a ogni
   overdub (`1.000` conserva tutto, valori inferiori dissolvono il passato).
 
@@ -105,22 +131,44 @@ dallo scenario. Dopo un aggiornamento da una versione precedente, cancellare un
 loop RESPIRO gia' distorto: la distorsione era memorizzata nel buffer e non puo'
 essere rimossa retroattivamente.
 
-### Se il sax diventa digitale o cresce da solo
+### Diagnostica graduale del sax
 
-1. cancellare RESPIRO e riavviare Commento;
-2. verificare `MTR/USB SEND POINT: PRE COMP`, non `POST COMP` o `POST EQ`;
-3. scegliere `GRANA: PULITA` e non attivare NUTRI;
-4. regolare il preamplificatore per leggere circa -18/-12 dB sul sax;
-5. controllare nella pagina CONNESSIONI che `xrun` resti a zero.
+Se il sax sembra sottocampionato, distorto o instabile, non cambiare molti
+parametri insieme. Abbassare prima casse e fader, disattivare NUTRI, cancellare
+un eventuale loop RESPIRO gia' distorto e usare questa sequenza nella pagina
+CONNESSIONI. Dopo ogni modifica premere **APPLICA AUDIO** e controllare gli xrun.
 
-Se il problema sparisce disabilitando gli ingressi, ma ritorna appena 7/8 e'
-attivo, controllare per prima cosa il feedback USB. Con 7/8 su `PC`, soltanto
-`PRE COMP` garantisce che al Raspberry arrivino gli ingressi analogici invece
-del ritorno proveniente dal computer. Partire sempre con il fader 7/8 basso.
-Se l'ingresso resta quasi a fondo scala per circa 180 ms, Commento interrompe
-automaticamente il ritorno e mostra `FEEDBACK SAX`; torna gradualmente attivo
-dopo un secondo di silenzio. Questa protezione evita il picco, ma non sostituisce
-la configurazione PRE COMP corretta.
+1. **CAPTURE OFF + tono 997 Hz.** Scegliere `NESSUNO - CAPTURE OFF`, attivare il
+   tono sul bus SAX e ascoltare la sua uscita configurata. Se anche il tono e'
+   sporco, il problema e' a valle del sax: uscita, frequenza/clock, buffer,
+   driver o conversione del mixer.
+2. **Capture attiva + MUTO.** Riaprire l'ingresso corretto, lasciare il tono
+   acceso e scegliere `MUTO - CAPTURE RESTA APERTA`. Se il difetto appare solo
+   ora, e' legato all'apertura full-duplex, al driver/clock o agli xrun, non al
+   looper o agli effetti del sax.
+3. **DIRETTO PROTETTO -4,7 dB.** Spegnere il tono e scegliere questo percorso:
+   l'ingresso viene inviato linearmente al bus sax, attenuato per sicurezza,
+   senza looper e senza effetti. La protezione dai livelli quasi a fondo scala
+   resta attiva e viene segnalata nell'header. Un difetto qui indica prima di
+   tutto canale fisico errato, livello/preamplificatore, flusso USB o
+   impostazioni manuali del mixer.
+4. **LOOPER PULITO.** Questo percorso aggiunge la memoria RESPIRO, ma esclude il
+   trattamento dello scenario. Se DIRETTO PROTETTO e' pulito e questo no, cancellare
+   il loop e verificare registrazione/overdub.
+5. **EFFETTI SCENA (FX).** E' il percorso musicale completo. Se i primi quattro
+   test precedenti sono puliti e il difetto compare qui, cercare la causa nel trattamento
+   sax, nello scenario o nella quantita' di GRANA.
+6. **Tono sui tre bus.** Senza suonare, spostare il test 997 Hz tra `AMBIENTE`,
+   `BASSO` e `SAX`: ogni tono deve arrivare all'uscita fisica scelta per quel
+   bus. Questo controlla la mappa anche con una scheda diversa dalla Model 12.
+
+Sulla Model 12 verificare inoltre manualmente `MTR/USB SEND POINT: PRE COMP`, non
+`POST COMP` o `POST EQ`, e regolare il preamplificatore per leggere tra -18 e
+-12 dB sul sax. Con 7/8 su `PC`, partire sempre con il fader 7/8 basso. Se
+l'ingresso resta quasi a fondo scala per circa 180 ms, Commento interrompe
+automaticamente il ritorno e mostra `PROTEZIONE SAX`; torna gradualmente attivo
+dopo un secondo di silenzio. Questa protezione evita il picco, ma non certifica
+la configurazione PRE COMP e non diagnostica da sola disturbi di clock o driver.
 
 ## I dieci scenari
 
@@ -139,7 +187,7 @@ la configurazione PRE COMP corretta.
 
 Le note dei loop restano le stesse quando si cambia scenario: vengono suonate
 di nuovo con i nuovi strumenti. Il basso MIDI 5 cambia timbro, ma resta live e
-continua a uscire esclusivamente dal canale audio 5 della Model 12.
+usa sempre il bus BASSO; nel profilo Model 12 quel bus parte dall'uscita audio 5.
 
 ## Build macOS
 
@@ -194,10 +242,10 @@ aconnect -l
 ```
 
 Impostare le quattro parti del Keystep Pro, nell'ordine, sui canali MIDI
-5, 2, 3 e 4. Audio e MIDI vengono trovati automaticamente; CONNESSIONI serve
-per controllarne lo stato e riprovare un'apertura fallita. In avvio manuale,
-se la Model 12 viene collegata dopo Commento, riavviare l'applicazione; il kiosk
-attende invece il mixer prima di lanciare il processo.
+5, 2, 3 e 4. CONNESSIONI permette di scegliere l'hardware audio e verificare la
+configurazione effettiva; il MIDI viene cercato automaticamente. Se un dispositivo
+USB viene collegato dopo Commento, usare **RILEGGI DISPOSITIVI**; se ALSA non lo
+espone ancora al processo, riavviare l'applicazione.
 
 Su Raspberry Pi OS Desktop si puo' avviare manualmente con:
 
@@ -233,10 +281,13 @@ systemctl status commento-kiosk.service
 journalctl -u commento-kiosk.service -f
 ```
 
-Il launcher aspetta che la Model 12 compaia in `/proc/asound/cards` prima di
-avviare Commento. Questo e' necessario perche' la scansione ALSA di JUCE avviene
-una sola volta per processo. Se il mixer manca o viene scollegato, systemd
-aspetta che torni disponibile e riavvia automaticamente Commento.
+Il launcher attende che udev completi l'enumerazione dei dispositivi gia'
+collegati, ma non impone piu' il nome Model 12: la pagina CONNESSIONI puo' quindi
+usare qualunque interfaccia ALSA. Poiche' la scansione ALSA di JUCE avviene una
+sola volta per processo, dopo aver collegato a caldo una scheda assente all'avvio
+puo' essere necessario riavviare il servizio. Se un'installazione deve partire
+solo in presenza di una scheda specifica, si puo' aggiungere alla unit systemd,
+per esempio, `Environment="COMMENTO_AUDIO_CARD_PATTERN=MODEL ?12|TASCAM"`.
 
 ### Diagnostica Model 12
 
@@ -266,7 +317,8 @@ sudo systemctl reboot
 ## Architettura
 
 - `EcosystemEngine`: callback audio realtime e coordinamento delle memorie;
-- `Model12AudioRouter`: adattatore tra i 12/10 canali fisici e cinque bus logici;
+- `Model12AudioRouter`: adattatore configurabile tra i canali fisici
+  dell'interfaccia scelta e i cinque bus logici;
 - `Scenarios`: dieci orchestrazioni per basso, tre layer ambient e sax;
 - `SaxProcessor`: tono, delay, modulazione, riverbero e protezione del bus sax;
 - `MidiMemory`: eventi MIDI con posizione in campioni e durata indipendente;

@@ -192,6 +192,263 @@ int main()
     passed &= expect(physicalNoInput.finite(blockSize),
                      "input None/null deve produrre soltanto campioni finiti");
 
+    // The generic preset deliberately converges ambient, bass and sax on the
+    // same stereo pair. Each destination has three logical routes, therefore
+    // every individual route must arrive at exactly one third of its logical
+    // level. This checks both the complete mapping and its deterministic
+    // headroom without relying on a particular audio interface.
+    struct ToneRouteExpectation
+    {
+        EcosystemEngine::DiagnosticToneBus destination;
+        int referenceBus;
+        const char* message;
+    };
+    constexpr std::array<ToneRouteExpectation, 3> toneRouteExpectations {{
+        { EcosystemEngine::DiagnosticToneBus::ambient,
+          EcosystemEngine::ambientLeftBus,
+          "il tono ambiente deve convergere sul preset stereo con headroom" },
+        { EcosystemEngine::DiagnosticToneBus::bass,
+          EcosystemEngine::bassBus,
+          "il tono basso deve convergere sul preset stereo con headroom" },
+        { EcosystemEngine::DiagnosticToneBus::sax,
+          EcosystemEngine::saxLeftBus,
+          "il tono sax deve convergere sul preset stereo con headroom" }
+    }};
+
+    for (const auto& expectation : toneRouteExpectations)
+    {
+        EcosystemEngine logicalToneEngine;
+        logicalToneEngine.prepare(sampleRate, blockSize);
+        logicalToneEngine.setDiagnosticToneBus(expectation.destination);
+        OutputBlock<EcosystemEngine::logicalOutputBusCount> logicalToneOutput(
+            blockSize);
+        process(logicalToneEngine, nullptr, 0, logicalToneOutput.pointers.data(),
+                EcosystemEngine::logicalOutputBusCount, blockSize);
+
+        EcosystemEngine genericToneEngine;
+        genericToneEngine.prepare(sampleRate, blockSize);
+        genericToneEngine.setDiagnosticToneBus(expectation.destination);
+        Model12AudioRouter genericToneRouter(genericToneEngine);
+        genericToneRouter.setRoutingConfig(
+            Model12AudioRouter::getGenericStereoRouting());
+        OutputBlock<2> genericToneOutput(blockSize);
+        process(genericToneRouter, nullptr, 0, genericToneOutput.pointers.data(),
+                2, blockSize);
+
+        const auto logicalPeak = logicalToneOutput.peak(
+            static_cast<size_t>(expectation.referenceBus), blockSize);
+        const auto leftPeak = genericToneOutput.peak(0, blockSize);
+        const auto rightPeak = genericToneOutput.peak(1, blockSize);
+        passed &= expect(logicalPeak > 0.001f
+                             && std::abs(leftPeak * 3.0f - logicalPeak) < 0.00001f
+                             && std::abs(rightPeak * 3.0f - logicalPeak) < 0.00001f,
+                         expectation.message);
+        passed &= expect(genericToneOutput.finite(blockSize),
+                         "la convergenza dei bus deve produrre campioni finiti");
+    }
+
+    // A configurable router must use the selected physical input pair rather
+    // than assuming channels 7/8. Distinct signs and amplitudes make an
+    // accidental read from physical channel 1 immediately visible.
+    EcosystemEngine selectedInputEngine;
+    selectedInputEngine.prepare(sampleRate, blockSize);
+    selectedInputEngine.setSaxPathMode(EcosystemEngine::SaxPathMode::direct);
+    selectedInputEngine.setSaxStereoInput(true);
+    Model12AudioRouter selectedInputRouter(selectedInputEngine);
+    Model12AudioRouter::RoutingConfig selectedInputRouting;
+    selectedInputRouting.saxInputLeft = 3;
+    selectedInputRouting.saxInputRight = 4;
+    selectedInputRouting.ambientOutputLeft = Model12AudioRouter::RoutingConfig::none;
+    selectedInputRouting.ambientOutputRight = Model12AudioRouter::RoutingConfig::none;
+    selectedInputRouting.bassOutputLeft = Model12AudioRouter::RoutingConfig::none;
+    selectedInputRouting.bassOutputRight = Model12AudioRouter::RoutingConfig::none;
+    selectedInputRouting.saxOutputLeft = 2;
+    selectedInputRouting.saxOutputRight = 3;
+    selectedInputRouter.setRoutingConfig(selectedInputRouting);
+
+    std::array<std::vector<float>, 5> selectableInputStorage;
+    std::array<const float*, 5> selectableInputs {};
+    constexpr std::array<float, 5> selectableValues {
+        0.91f, -0.73f, 0.49f, 0.20f, -0.30f
+    };
+    for (size_t channel = 0; channel < selectableInputStorage.size(); ++channel)
+    {
+        selectableInputStorage[channel].assign(
+            blockSize, selectableValues[channel]);
+        selectableInputs[channel] = selectableInputStorage[channel].data();
+    }
+    OutputBlock<4> selectedInputOutput(blockSize, 0.75f);
+    process(selectedInputRouter, selectableInputs.data(), 5,
+            selectedInputOutput.pointers.data(), 4, blockSize);
+    const auto selectedLeft = selectedInputOutput.storage[2][blockSize / 2];
+    const auto selectedRight = selectedInputOutput.storage[3][blockSize / 2];
+    passed &= expect(std::abs(selectedLeft - 0.20f * 0.58f) < 0.00001f
+                         && std::abs(selectedRight + 0.30f * 0.58f) < 0.00001f,
+                     "il router deve leggere la coppia di ingressi fisici scelta");
+    passed &= expect(selectedInputOutput.silent(0, blockSize)
+                         && selectedInputOutput.silent(1, blockSize)
+                         && selectedInputOutput.finite(blockSize),
+                     "il test diretto deve rispettare le sole uscite sax scelte");
+    passed &= expect(selectedInputRouter.getPhysicalInputChannelCount() == 5,
+                     "il router configurabile deve contare tutti gli ingressi fisici");
+
+    // A mono destination for a stereo bus must be a downmix, not a silent
+    // discard of its right side. Pointing both sax routes at one output asks
+    // the router for (L + R) / 2 with deterministic headroom.
+    selectedInputRouting.saxOutputLeft = 2;
+    selectedInputRouting.saxOutputRight = 2;
+    selectedInputRouter.setRoutingConfig(selectedInputRouting);
+    selectedInputOutput.clear();
+    process(selectedInputRouter, selectableInputs.data(), 5,
+            selectedInputOutput.pointers.data(), 4, blockSize);
+    const auto expectedMono = (0.20f - 0.30f) * 0.58f * 0.5f;
+    passed &= expect(std::abs(selectedInputOutput.storage[2][blockSize / 2]
+                              - expectedMono) < 0.00001f
+                         && selectedInputOutput.silent(3, blockSize),
+                     "una route sax mono deve fare downmix L+R senza scartare R");
+
+    // Diagnostic path modes isolate progressively larger parts of the sax
+    // chain. Muted must be bit-silent, direct must preserve the raw signal and
+    // cleanLooper must be able to record/play a finite loop without effects.
+    std::array<std::vector<float>, 2> diagnosticInputStorage;
+    std::array<const float*, 2> diagnosticInputs {};
+    for (size_t channel = 0; channel < diagnosticInputStorage.size(); ++channel)
+    {
+        diagnosticInputStorage[channel].assign(blockSize,
+                                                channel == 0 ? 0.08f : -0.06f);
+        diagnosticInputs[channel] = diagnosticInputStorage[channel].data();
+    }
+
+    EcosystemEngine mutedPathEngine;
+    mutedPathEngine.prepare(sampleRate, blockSize);
+    mutedPathEngine.setSaxPathMode(EcosystemEngine::SaxPathMode::muted);
+    OutputBlock<EcosystemEngine::logicalOutputBusCount> mutedPathOutput(blockSize);
+    process(mutedPathEngine, diagnosticInputs.data(), 2,
+            mutedPathOutput.pointers.data(),
+            EcosystemEngine::logicalOutputBusCount, blockSize);
+    passed &= expect(mutedPathOutput.silent(EcosystemEngine::saxLeftBus, blockSize)
+                         && mutedPathOutput.silent(EcosystemEngine::saxRightBus,
+                                                   blockSize)
+                         && mutedPathOutput.finite(blockSize),
+                     "il percorso sax MUTO deve essere silenzioso e finito");
+
+    EcosystemEngine directPathEngine;
+    directPathEngine.prepare(sampleRate, blockSize);
+    directPathEngine.setSaxStereoInput(true);
+    directPathEngine.setSaxPathMode(EcosystemEngine::SaxPathMode::direct);
+    OutputBlock<EcosystemEngine::logicalOutputBusCount> directPathOutput(blockSize);
+    process(directPathEngine, diagnosticInputs.data(), 2,
+            directPathOutput.pointers.data(),
+            EcosystemEngine::logicalOutputBusCount, blockSize);
+    passed &= expect(directPathOutput.peak(EcosystemEngine::saxLeftBus,
+                                          blockSize) > 0.001f
+                         && directPathOutput.peak(EcosystemEngine::saxRightBus,
+                                                 blockSize) > 0.001f
+                         && directPathOutput.finite(blockSize),
+                     "il percorso sax DIRETTO deve passare segnale finito");
+
+    constexpr auto cleanLoopSamples = 4096;
+    EcosystemEngine cleanLooperEngine;
+    cleanLooperEngine.prepare(sampleRate, cleanLoopSamples);
+    cleanLooperEngine.setSaxStereoInput(true);
+    cleanLooperEngine.setSaxPathMode(EcosystemEngine::SaxPathMode::cleanLooper);
+    std::array<std::vector<float>, 2> cleanInputStorage;
+    std::array<const float*, 2> cleanInputs {};
+    for (size_t channel = 0; channel < cleanInputStorage.size(); ++channel)
+    {
+        cleanInputStorage[channel].resize(cleanLoopSamples);
+        for (int sample = 0; sample < cleanLoopSamples; ++sample)
+            cleanInputStorage[channel][static_cast<size_t>(sample)] = 0.025f
+                * static_cast<float>(std::sin(
+                    juce::MathConstants<double>::twoPi
+                    * (220.0 + 37.0 * static_cast<double>(channel))
+                    * static_cast<double>(sample) / sampleRate));
+        cleanInputs[channel] = cleanInputStorage[channel].data();
+    }
+    OutputBlock<EcosystemEngine::logicalOutputBusCount> cleanLooperOutput(
+        cleanLoopSamples);
+    cleanLooperEngine.toggleRecording(EcosystemEngine::midiMemoryCount);
+    process(cleanLooperEngine, cleanInputs.data(), 2,
+            cleanLooperOutput.pointers.data(),
+            EcosystemEngine::logicalOutputBusCount, cleanLoopSamples);
+    cleanLooperEngine.toggleRecording(EcosystemEngine::midiMemoryCount);
+    cleanLooperOutput.clear();
+    process(cleanLooperEngine, nullptr, 0, cleanLooperOutput.pointers.data(),
+            EcosystemEngine::logicalOutputBusCount, cleanLoopSamples);
+    passed &= expect(cleanLooperEngine.hasMaterial(
+                         EcosystemEngine::midiMemoryCount)
+                         && cleanLooperOutput.peak(EcosystemEngine::saxLeftBus,
+                                                   cleanLoopSamples) > 0.0001f
+                         && cleanLooperOutput.finite(cleanLoopSamples),
+                     "LOOP PULITO deve registrare e riprodurre un loop finito");
+
+    EcosystemEngine effectsPathEngine;
+    effectsPathEngine.prepare(sampleRate, blockSize);
+    effectsPathEngine.setSaxStereoInput(true);
+    effectsPathEngine.setSaxPathMode(EcosystemEngine::SaxPathMode::sceneEffects);
+    OutputBlock<EcosystemEngine::logicalOutputBusCount> effectsPathOutput(blockSize);
+    process(effectsPathEngine, diagnosticInputs.data(), 2,
+            effectsPathOutput.pointers.data(),
+            EcosystemEngine::logicalOutputBusCount, blockSize);
+    passed &= expect(effectsPathOutput.finite(blockSize),
+                     "il percorso sax FX deve produrre campioni finiti");
+
+    // With no musical input, every diagnostic tone destination must energise
+    // only its requested logical bus (or stereo pair). This is the invariant
+    // used by the touch panel to test one section at a time.
+    EcosystemEngine toneSelectionEngine;
+    toneSelectionEngine.prepare(sampleRate, blockSize);
+    OutputBlock<EcosystemEngine::logicalOutputBusCount> toneSelectionOutput(
+        blockSize);
+    toneSelectionEngine.setDiagnosticToneBus(
+        EcosystemEngine::DiagnosticToneBus::off);
+    process(toneSelectionEngine, nullptr, 0,
+            toneSelectionOutput.pointers.data(),
+            EcosystemEngine::logicalOutputBusCount, blockSize);
+    passed &= expect(toneSelectionOutput.silent(
+                         EcosystemEngine::ambientLeftBus, blockSize)
+                         && toneSelectionOutput.silent(
+                             EcosystemEngine::ambientRightBus, blockSize)
+                         && toneSelectionOutput.silent(
+                             EcosystemEngine::bassBus, blockSize)
+                         && toneSelectionOutput.silent(
+                             EcosystemEngine::saxLeftBus, blockSize)
+                         && toneSelectionOutput.silent(
+                             EcosystemEngine::saxRightBus, blockSize),
+                     "tono diagnostico OFF deve lasciare tutti i bus muti");
+
+    for (const auto& expectation : toneRouteExpectations)
+    {
+        toneSelectionOutput.clear();
+        toneSelectionEngine.setDiagnosticToneBus(expectation.destination);
+        process(toneSelectionEngine, nullptr, 0,
+                toneSelectionOutput.pointers.data(),
+                EcosystemEngine::logicalOutputBusCount, blockSize);
+
+        const auto ambientActive = expectation.destination
+            == EcosystemEngine::DiagnosticToneBus::ambient;
+        const auto bassActive = expectation.destination
+            == EcosystemEngine::DiagnosticToneBus::bass;
+        const auto saxActive = expectation.destination
+            == EcosystemEngine::DiagnosticToneBus::sax;
+        passed &= expect((toneSelectionOutput.peak(
+                              EcosystemEngine::ambientLeftBus, blockSize)
+                              > 0.001f) == ambientActive
+                             && (toneSelectionOutput.peak(
+                                     EcosystemEngine::ambientRightBus, blockSize)
+                                     > 0.001f) == ambientActive
+                             && (toneSelectionOutput.peak(
+                                     EcosystemEngine::bassBus, blockSize)
+                                     > 0.001f) == bassActive
+                             && (toneSelectionOutput.peak(
+                                     EcosystemEngine::saxLeftBus, blockSize)
+                                     > 0.001f) == saxActive
+                             && (toneSelectionOutput.peak(
+                                     EcosystemEngine::saxRightBus, blockSize)
+                                     > 0.001f) == saxActive,
+                         "il tono diagnostico deve raggiungere soltanto il bus scelto");
+    }
+
     EcosystemEngine feedbackSafetyEngine;
     feedbackSafetyEngine.prepare(sampleRate, blockSize);
     std::array<std::vector<float>, 2> feedbackInputStorage;

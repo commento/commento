@@ -32,24 +32,33 @@ if command -v unclutter >/dev/null 2>&1; then
     unclutter --timeout 0 --jitter 0 --hide-on-touch --start-hidden &
 fi
 
-# JUCE's ALSA device list is scanned once. Wait for the dedicated mixer before
-# starting the app so a late USB enumeration cannot leave MODEL 12 invisible
-# until the next process restart.
-model12_ready=false
-for _ in $(seq 1 50); do
-    if grep -Eqi 'MODEL ?12|TASCAM' /proc/asound/cards 2>/dev/null; then
-        model12_ready=true
-        break
-    fi
-    sleep 0.2
-done
+# Let devices already connected at boot finish their udev enumeration before
+# JUCE performs its one-shot ALSA scan. No mixer name is hardcoded: the touch UI
+# can configure any interface exposed by ALSA. An installation that must wait
+# for one particular interface may set COMMENTO_AUDIO_CARD_PATTERN to an ERE,
+# for example 'MODEL ?12|TASCAM'.
+if command -v udevadm >/dev/null 2>&1; then
+    udevadm settle --timeout=10 || true
+fi
 
-if [[ ${model12_ready} != true ]]; then
-    echo "Commento: MODEL 12 non presente in /proc/asound/cards; riprovo tramite systemd." >&2
-    if [[ -r /proc/asound/cards ]]; then
-        cat /proc/asound/cards >&2
+audio_card_pattern=${COMMENTO_AUDIO_CARD_PATTERN:-}
+if [[ -n ${audio_card_pattern} ]]; then
+    audio_card_ready=false
+    for _ in $(seq 1 50); do
+        if grep -Eqi -- "${audio_card_pattern}" /proc/asound/cards 2>/dev/null; then
+            audio_card_ready=true
+            break
+        fi
+        sleep 0.2
+    done
+
+    if [[ ${audio_card_ready} != true ]]; then
+        echo "Commento: nessuna scheda corrisponde a COMMENTO_AUDIO_CARD_PATTERN; riprovo tramite systemd." >&2
+        if [[ -r /proc/asound/cards ]]; then
+            cat /proc/asound/cards >&2
+        fi
+        exit 75
     fi
-    exit 75
 fi
 
 exec /opt/commento/bin/Commento "$@"

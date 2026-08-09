@@ -254,6 +254,32 @@ bool EcosystemEngine::isSaxStereoInput() const
     return saxStereoInput.load();
 }
 
+void EcosystemEngine::setSaxPathMode(SaxPathMode mode)
+{
+    saxPathMode.store(juce::jlimit(
+        static_cast<int>(SaxPathMode::muted),
+        static_cast<int>(SaxPathMode::sceneEffects),
+        static_cast<int>(mode)));
+}
+
+EcosystemEngine::SaxPathMode EcosystemEngine::getSaxPathMode() const
+{
+    return static_cast<SaxPathMode>(saxPathMode.load());
+}
+
+void EcosystemEngine::setDiagnosticToneBus(DiagnosticToneBus bus)
+{
+    diagnosticToneBus.store(juce::jlimit(
+        static_cast<int>(DiagnosticToneBus::off),
+        static_cast<int>(DiagnosticToneBus::sax),
+        static_cast<int>(bus)));
+}
+
+EcosystemEngine::DiagnosticToneBus EcosystemEngine::getDiagnosticToneBus() const
+{
+    return static_cast<DiagnosticToneBus>(diagnosticToneBus.load());
+}
+
 void EcosystemEngine::audioDeviceAboutToStart(juce::AudioIODevice* device)
 {
     prepare(device != nullptr ? device->getCurrentSampleRate() : 48000.0,
@@ -389,6 +415,7 @@ void EcosystemEngine::audioDeviceIOCallbackWithContext(
                          numSamples, blockMidiOutput);
     renderAudioMemory(inputChannelData, numInputChannels,
                       outputChannelData, numOutputChannels, numSamples);
+    renderDiagnosticTone(outputChannelData, numOutputChannels, numSamples);
 
     float inputPeak = 0.0f;
     const auto saxLeftChannel = 0;
@@ -773,7 +800,9 @@ void EcosystemEngine::renderAudioMemory(
     const auto decay = audioDecay.load();
     const auto rightInputChannel = juce::jmin(1, inputChannels - 1);
     const auto useStereoInput = saxStereoInput.load();
-    const auto inputAllowed = ! saxSafetyMuted.load();
+    const auto pathMode = getSaxPathMode();
+    const auto inputAllowed = pathMode != SaxPathMode::muted
+        && ! saxSafetyMuted.load();
 
     const auto readInput = [inputs, inputChannels, rightInputChannel,
                             useStereoInput, inputAllowed](int channel, int sample)
@@ -789,11 +818,18 @@ void EcosystemEngine::renderAudioMemory(
 
     for (int sample = 0; sample < numSamples; ++sample)
     {
-        // Channels 7/8 on the Model 12 are used as PC returns, therefore the
-        // live sax is monitored here with deliberate headroom.
+        if (pathMode == SaxPathMode::muted)
+            continue;
+
+        // The configured sax input is monitored with deliberate headroom.
         for (int channel = 0; channel < 2; ++channel)
             saxRenderBuffer.addSample(channel, sample,
                                       readInput(channel, sample) * 0.58f);
+
+        // This path is deliberately just input -> output. It distinguishes a
+        // capture/driver problem from loop and effects processing.
+        if (pathMode == SaxPathMode::direct)
+            continue;
 
         if (audioMemory.recordingActive && audioMemory.initialCapture)
         {
@@ -840,8 +876,10 @@ void EcosystemEngine::renderAudioMemory(
                                        % audioMemory.loopLength;
     }
 
-    saxProcessor.process(saxRenderBuffer, numSamples);
-    const auto safetyTarget = saxSafetyMuted.load() ? 0.0f : 1.0f;
+    if (pathMode == SaxPathMode::sceneEffects)
+        saxProcessor.process(saxRenderBuffer, numSamples);
+    const auto safetyTarget = saxSafetyMuted.load()
+            || pathMode == SaxPathMode::muted ? 0.0f : 1.0f;
     const auto safetyTime = safetyTarget < saxSafetyGain ? 0.006 : 0.25;
     const auto safetyCoefficient = static_cast<float>(
         1.0 - std::exp(-1.0 / (safetyTime * sampleRate)));
@@ -874,5 +912,57 @@ void EcosystemEngine::renderAudioMemory(
     {
         audioMemory.phase.store(static_cast<double>(audioMemory.playbackPosition)
                                 / static_cast<double>(audioMemory.loopLength));
+    }
+}
+
+void EcosystemEngine::renderDiagnosticTone(float* const* outputs,
+                                           int outputChannels,
+                                           int numSamples)
+{
+    const auto destination = getDiagnosticToneBus();
+    if (destination == DiagnosticToneBus::off || outputs == nullptr
+        || numSamples <= 0)
+    {
+        diagnosticTonePhase = 0.0;
+        return;
+    }
+
+    // A diagnostic tone must be unambiguous: silence every musical bus first,
+    // then write only the selected destination. This also makes capture-on vs
+    // capture-off comparisons possible while loops keep their state.
+    for (int channel = 0; channel < outputChannels; ++channel)
+        if (outputs[channel] != nullptr)
+            juce::FloatVectorOperations::clear(outputs[channel], numSamples);
+
+    constexpr auto frequency = 997.0;
+    constexpr auto level = 0.06309573f; // -24 dBFS
+    const auto increment = juce::MathConstants<double>::twoPi
+                         * frequency / sampleRate;
+    for (int sample = 0; sample < numSamples; ++sample)
+    {
+        const auto value = static_cast<float>(std::sin(diagnosticTonePhase)) * level;
+        const auto add = [outputs, outputChannels, sample, value](int bus)
+        {
+            if (juce::isPositiveAndBelow(bus, outputChannels)
+                && outputs[bus] != nullptr)
+                outputs[bus][sample] = value;
+        };
+
+        if (destination == DiagnosticToneBus::ambient)
+        {
+            add(ambientLeftBus);
+            add(ambientRightBus);
+        }
+        else if (destination == DiagnosticToneBus::bass)
+            add(bassBus);
+        else if (destination == DiagnosticToneBus::sax)
+        {
+            add(saxLeftBus);
+            add(saxRightBus);
+        }
+
+        diagnosticTonePhase += increment;
+        if (diagnosticTonePhase >= juce::MathConstants<double>::twoPi)
+            diagnosticTonePhase -= juce::MathConstants<double>::twoPi;
     }
 }
