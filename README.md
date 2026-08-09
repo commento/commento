@@ -7,7 +7,7 @@ Il nome **Commento** e' provvisorio.
 
 ## Stato del prototipo
 
-- quattro memorie MIDI indipendenti associate ai canali 1-4;
+- quattro memorie MIDI indipendenti associate, nell'ordine, ai canali 5, 2, 3 e 4;
 - quattro motori sonori interni polifonici, uno per memoria MIDI;
 - MIDI thru opzionale verso un eventuale strumento esterno;
 - registrazione e riproduzione continua degli eventi MIDI;
@@ -25,15 +25,17 @@ delay, riverbero, drift o mutazioni generative.
 ## Flusso del sistema autonomo
 
 ```text
-Keystep Pro -> ingresso MIDI di Commento -> quattro voci interne
-Sax/microfono -> canale 3 Model 12 -> memoria RESPIRO
+Keystep Pro (MIDI 5, 2, 3, 4) -> ingresso MIDI di Commento -> quattro voci interne
+Sax/microfono -> ingressi USB 7+8 Model 12 -> memoria RESPIRO mono
 Commento stereo out USB 1-2 -> canali 1-2 Model 12 -> casse / impianto
 ```
 
 In CONNESSIONI:
 
 1. scegliere Tascam Model 12 come dispositivo audio;
-2. abilitare soltanto l'ingresso USB sul quale arriva il sax, per esempio 3;
+2. abilitare la coppia USB `7+8`: selezionandola, l'eventuale coppia predefinita
+   `1+2` viene disattivata automaticamente; il sax sull'ingresso 7 viene trattato
+   come mono e duplicato al centro;
 3. abilitare le uscite USB 1 e 2 per il ritorno stereo di Commento;
 4. scegliere il Keystep Pro come ingresso MIDI;
 5. lasciare MIDI Output su `none`, salvo uso volontario di hardware esterno.
@@ -117,9 +119,10 @@ arecord -l
 aconnect -l
 ```
 
-Nella pagina CONNESSIONI scegliere Model 12, 48000 Hz, buffer 256, ingresso sax
-e uscite 1-2. Scegliere Keystep Pro tra gli ingressi MIDI e lasciare MIDI Output
-su `none`.
+Nella pagina CONNESSIONI scegliere Model 12, 48000 Hz, buffer 256, coppia di
+ingresso `7+8` per il sax e uscite 1-2. Scegliere Keystep Pro tra gli ingressi
+MIDI e lasciare MIDI Output su `none`. Impostare le quattro parti del Keystep
+Pro, nell'ordine, sui canali MIDI 5, 2, 3 e 4.
 
 Su Raspberry Pi OS Desktop si puo' avviare manualmente con:
 
@@ -139,6 +142,10 @@ cd ~/commento
 sudo ./deploy/raspberry-pi/install-kiosk-service.sh
 sudo systemctl reboot
 ```
+
+Su Raspberry Pi 5 il pacchetto `gldriver-test`, installato automaticamente dallo
+script, prepara Xorg per il controller grafico RP1. Senza questo pacchetto Xorg
+su Raspberry Pi OS Lite puo' terminare con `Cannot run in framebuffer mode`.
 
 Al riavvio Xorg viene avviato direttamente su `tty1` e Commento occupa il
 touchscreen a 1920x1200. Da SSH:

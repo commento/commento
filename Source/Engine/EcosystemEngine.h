@@ -24,6 +24,7 @@ public:
     [[nodiscard]] double getPhase(int memoryIndex) const;
     [[nodiscard]] double getLengthSeconds(int memoryIndex) const;
     [[nodiscard]] int getEventCount(int memoryIndex) const;
+    [[nodiscard]] int getMidiChannelForMemory(int memoryIndex) const;
 
     void setAudioDecay(float newDecay);
     [[nodiscard]] float getAudioDecay() const;
@@ -82,6 +83,9 @@ private:
     static constexpr int incomingCapacity = 512;
     static constexpr int maximumMidiEvents = 8192;
     static constexpr double maximumAudioSeconds = 120.0;
+    static constexpr std::array<int, midiMemoryCount> midiChannels { 5, 2, 3, 4 };
+
+    [[nodiscard]] static int memoryIndexForMidiChannel(int midiChannel);
 
     void applyMidiCommands(MidiMemory& memory, int channel, juce::MidiBuffer& output);
     void applyAudioCommands();

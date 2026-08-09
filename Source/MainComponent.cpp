@@ -16,6 +16,57 @@ const std::array<juce::Colour, EcosystemEngine::memoryCount> memoryColours {
 };
 }
 
+juce::Font ConnectionLookAndFeel::getComboBoxFont(juce::ComboBox& box)
+{
+    return juce::FontOptions(juce::jlimit(22.0f, 30.0f,
+        static_cast<float>(box.getHeight()) * 0.44f));
+}
+
+juce::Font ConnectionLookAndFeel::getPopupMenuFont()
+{
+    return juce::FontOptions(28.0f);
+}
+
+juce::Font ConnectionLookAndFeel::getLabelFont(juce::Label&)
+{
+    return juce::FontOptions(23.0f);
+}
+
+juce::Font ConnectionLookAndFeel::getTextButtonFont(juce::TextButton&, int buttonHeight)
+{
+    return juce::FontOptions(juce::jlimit(21.0f, 28.0f,
+        static_cast<float>(buttonHeight) * 0.42f));
+}
+
+void ConnectionLookAndFeel::getIdealPopupMenuItemSize(
+    const juce::String& text, bool isSeparator, int standardMenuItemHeight,
+    int& idealWidth, int& idealHeight)
+{
+    LookAndFeel_V4::getIdealPopupMenuItemSize(
+        text, isSeparator, juce::jmax(64, standardMenuItemHeight),
+        idealWidth, idealHeight);
+    idealWidth = juce::jmax(idealWidth, 420);
+    if (! isSeparator)
+        idealHeight = juce::jmax(idealHeight, 64);
+}
+
+void ConnectionLookAndFeel::drawToggleButton(
+    juce::Graphics& graphics, juce::ToggleButton& button,
+    bool highlighted, bool down)
+{
+    const auto tickSize = juce::jmin(38.0f,
+        static_cast<float>(button.getHeight()) - 8.0f);
+    drawTickBox(graphics, button, 4.0f,
+                (static_cast<float>(button.getHeight()) - tickSize) * 0.5f,
+                tickSize, tickSize, button.getToggleState(), button.isEnabled(),
+                highlighted, down);
+    graphics.setColour(button.findColour(juce::ToggleButton::textColourId));
+    graphics.setFont(juce::FontOptions(23.0f));
+    graphics.drawFittedText(button.getButtonText(),
+        button.getLocalBounds().withTrimmedLeft(static_cast<int>(tickSize) + 16),
+        juce::Justification::centredLeft, 2);
+}
+
 class MemoryOrb final : public juce::Component
 {
 public:
@@ -80,7 +131,8 @@ public:
             detail = juce::String(engine.getLengthSeconds(index), 1) + " s";
         else
             detail = index < EcosystemEngine::midiMemoryCount
-                ? "MIDI " + juce::String(index + 1) : "INGRESSO AUDIO";
+                ? "MIDI " + juce::String(engine.getMidiChannelForMemory(index))
+                : "AUDIO 7+8";
 
         graphics.setColour(recording ? juce::Colours::white : juce::Colour(quietText));
         graphics.setFont(juce::FontOptions(15.0f, juce::Font::plain));
@@ -188,15 +240,30 @@ MainComponent::~MainComponent()
     juce::Timer::stopTimer();
     deviceManager.removeMidiInputDeviceCallback({}, this);
     deviceManager.removeAudioCallback(&engine);
+    connectionViewport.setViewedComponent(nullptr, false);
+    if (deviceSelector != nullptr)
+        deviceSelector->setLookAndFeel(nullptr);
 }
 
 void MainComponent::initialiseAudio()
 {
-    const auto error = deviceManager.initialise(2, 2, nullptr, true);
+    // Start without opening the default input pair. On the Model 12 that pair
+    // is USB 1+2, which is also used for Commento's stereo return and may form
+    // an unwanted loop before the sax pair has been selected.
+    const auto error = deviceManager.initialise(0, 2, nullptr, true);
     deviceSelector = std::make_unique<juce::AudioDeviceSelectorComponent>(
-        deviceManager, 0, 12, 0, 10, true, true, false, false);
-    deviceSelector->setItemHeight(46);
-    addChildComponent(*deviceSelector);
+        // Commento needs one input pair and one output pair only. Limiting each
+        // side to two channels makes selecting 7+8 replace 1+2 instead of
+        // leaving both pairs active; ALSA then exposes channel 7 as inputs[0].
+        deviceManager, 0, 2, 2, 2, true, true, true, false);
+    deviceSelector->setItemHeight(70);
+    deviceSelector->setLookAndFeel(&connectionLookAndFeel);
+    connectionViewport.setViewedComponent(deviceSelector.get(), false);
+    connectionViewport.setScrollBarsShown(true, false);
+    connectionViewport.setScrollBarThickness(28);
+    connectionViewport.setColour(juce::ScrollBar::thumbColourId,
+                                 juce::Colour(0xff6a7c91));
+    addChildComponent(connectionViewport);
 
     for (const auto& input : juce::MidiInput::getAvailableDevices())
         deviceManager.setMidiInputDeviceEnabled(input.identifier, true);
@@ -225,6 +292,23 @@ void MainComponent::timerCallback()
     }
 
     updateControls();
+    if (settingsVisible)
+        enlargeConnectionTargets();
+}
+
+void MainComponent::enlargeConnectionTargets()
+{
+    if (deviceSelector == nullptr)
+        return;
+
+    const auto visit = [](auto&& self, juce::Component& parent) -> void
+    {
+        if (auto* list = dynamic_cast<juce::ListBox*>(&parent))
+            list->setRowHeight(54);
+        for (auto* child : parent.getChildren())
+            self(self, *child);
+    };
+    visit(visit, *deviceSelector);
 }
 
 void MainComponent::hiResTimerCallback()
@@ -254,7 +338,8 @@ void MainComponent::updateControls()
     clearButton.setEnabled(recording || engine.hasMaterial(selectedMemory));
 
     const auto type = selectedMemory < EcosystemEngine::midiMemoryCount
-        ? "MIDI " + juce::String(selectedMemory + 1) : "SAX / AUDIO";
+        ? "MIDI " + juce::String(engine.getMidiChannelForMemory(selectedMemory))
+        : "SAX / AUDIO 7+8";
     const auto count = selectedMemory < EcosystemEngine::midiMemoryCount
         ? "  -  " + juce::String(engine.getEventCount(selectedMemory)) + " eventi" : "";
     statusLabel.setText(type + count, juce::dontSendNotification);
@@ -263,7 +348,7 @@ void MainComponent::updateControls()
 void MainComponent::toggleSettings()
 {
     settingsVisible = ! settingsVisible;
-    deviceSelector->setVisible(settingsVisible);
+    connectionViewport.setVisible(settingsVisible);
     for (auto& orb : orbs)
         orb->setVisible(! settingsVisible);
     recordButton.setVisible(! settingsVisible);
@@ -273,6 +358,7 @@ void MainComponent::toggleSettings()
     decayLabel.setVisible(decaySlider.isVisible());
     settingsButton.setButtonText(settingsVisible ? "TORNA ALLE MEMORIE" : "CONNESSIONI");
     resized();
+    enlargeConnectionTargets();
 }
 
 void MainComponent::paint(juce::Graphics& graphics)
@@ -309,8 +395,15 @@ void MainComponent::resized()
 
     if (settingsVisible)
     {
+        auto connectionArea = bounds.reduced(24, 10);
+        connectionViewport.setBounds(connectionArea);
         if (deviceSelector != nullptr)
-            deviceSelector->setBounds(bounds.reduced(34, 18));
+        {
+            const auto contentWidth = juce::jmax(760,
+                connectionViewport.getMaximumVisibleWidth() - 12);
+            deviceSelector->setBounds(0, 0, contentWidth, 1080);
+            enlargeConnectionTargets();
+        }
         return;
     }
 

@@ -87,6 +87,21 @@ int EcosystemEngine::getEventCount(int memoryIndex) const
     return 0;
 }
 
+int EcosystemEngine::getMidiChannelForMemory(int memoryIndex) const
+{
+    return juce::isPositiveAndBelow(memoryIndex, midiMemoryCount)
+        ? midiChannels[static_cast<size_t>(memoryIndex)] : 0;
+}
+
+int EcosystemEngine::memoryIndexForMidiChannel(int midiChannel)
+{
+    for (int index = 0; index < midiMemoryCount; ++index)
+        if (midiChannels[static_cast<size_t>(index)] == midiChannel)
+            return index;
+
+    return -1;
+}
+
 void EcosystemEngine::setAudioDecay(float newDecay)
 {
     audioDecay.store(juce::jlimit(0.80f, 1.0f, newDecay));
@@ -139,7 +154,8 @@ void EcosystemEngine::audioDeviceIOCallbackWithContext(
 
     blockMidiOutput.clear();
     for (int index = 0; index < midiMemoryCount; ++index)
-        applyMidiCommands(midiMemories[static_cast<size_t>(index)], index + 1, blockMidiOutput);
+        applyMidiCommands(midiMemories[static_cast<size_t>(index)],
+                          midiChannels[static_cast<size_t>(index)], blockMidiOutput);
     applyAudioCommands();
     recordIncomingMidi(numSamples, blockMidiOutput);
     renderMidiMemories(numSamples, blockMidiOutput);
@@ -267,12 +283,13 @@ void EcosystemEngine::recordIncomingMidi(int numSamples, juce::MidiBuffer& liveM
         {
             const auto& message = incomingMessages[static_cast<size_t>(start + offset)];
             const auto channel = message.getChannel();
-            if (! juce::isPositiveAndBelow(channel - 1, midiMemoryCount))
+            const auto memoryIndex = memoryIndexForMidiChannel(channel);
+            if (memoryIndex < 0)
                 continue;
 
             liveMidi.addEvent(message, 0);
 
-            auto& memory = midiMemories[static_cast<size_t>(channel - 1)];
+            auto& memory = midiMemories[static_cast<size_t>(memoryIndex)];
             if (memory.recordingActive
                 && static_cast<int>(memory.events.size()) < maximumMidiEvents)
                 memory.events.push_back({ message, memory.recordPosition });
@@ -308,7 +325,8 @@ void EcosystemEngine::renderInternalSynths(float* const* outputs, int outputChan
     {
         juce::MidiBuffer layerMidi;
         for (const auto metadata : midi)
-            if (metadata.getMessage().getChannel() == layer + 1)
+            if (metadata.getMessage().getChannel()
+                == midiChannels[static_cast<size_t>(layer)])
                 layerMidi.addEvent(metadata.getMessage(), metadata.samplePosition);
 
         internalSynths[static_cast<size_t>(layer)]->render(
@@ -347,7 +365,8 @@ void EcosystemEngine::renderMidiMemories(int numSamples, juce::MidiBuffer& outpu
 
             if (memory.playbackPosition >= memory.loopLength)
             {
-                output.addEvent(juce::MidiMessage::allNotesOff(index + 1),
+                output.addEvent(juce::MidiMessage::allNotesOff(
+                                    midiChannels[static_cast<size_t>(index)]),
                                 juce::jlimit(0, numSamples - 1, outputOffset));
                 memory.playbackPosition = 0;
             }
@@ -394,9 +413,11 @@ void EcosystemEngine::renderAudioMemory(
             }
             for (int channel = 0; channel < audioMemory.buffer.getNumChannels(); ++channel)
             {
-                const auto inputChannel = inputChannels > 0 ? juce::jmin(channel, inputChannels - 1) : -1;
-                const auto input = inputChannel >= 0 && inputs[inputChannel] != nullptr
-                    ? inputs[inputChannel][sample] : 0.0f;
+                // RESPIRO is a mono sax/microphone memory. When JUCE exposes
+                // Model 12 inputs as the pair 7+8, channel 7 is the first active
+                // input and is intentionally duplicated to both loop channels.
+                const auto input = inputChannels > 0 && inputs[0] != nullptr
+                    ? inputs[0][sample] : 0.0f;
                 audioMemory.buffer.setSample(channel,
                     static_cast<int>(audioMemory.writePosition), input);
             }
@@ -421,9 +442,8 @@ void EcosystemEngine::renderAudioMemory(
 
             if (audioMemory.recordingActive)
             {
-                const auto inputChannel = inputChannels > 0 ? juce::jmin(channel, inputChannels - 1) : -1;
-                const auto input = inputChannel >= 0 && inputs[inputChannel] != nullptr
-                    ? inputs[inputChannel][sample] : 0.0f;
+                const auto input = inputChannels > 0 && inputs[0] != nullptr
+                    ? inputs[0][sample] : 0.0f;
                 loopSample = loopSample * decay + input;
                 audioMemory.buffer.setSample(memoryChannel, bufferPosition,
                                              juce::jlimit(-1.0f, 1.0f, loopSample));

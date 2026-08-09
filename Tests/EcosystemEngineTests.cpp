@@ -51,8 +51,8 @@ int main()
 
     engine.toggleRecording(0);
     process(engine, nullptr, 0, outputs.data(), 2, 480);
-    engine.enqueueMidiMessage(juce::MidiMessage::noteOn(1, 60, 0.8f));
-    engine.enqueueMidiMessage(juce::MidiMessage::noteOff(1, 60));
+    engine.enqueueMidiMessage(juce::MidiMessage::noteOn(5, 60, 0.8f));
+    engine.enqueueMidiMessage(juce::MidiMessage::noteOff(5, 60));
     process(engine, nullptr, 0, outputs.data(), 2, 480);
     engine.toggleRecording(0);
     process(engine, nullptr, 0, outputs.data(), 2, 480);
