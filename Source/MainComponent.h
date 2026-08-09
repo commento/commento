@@ -121,6 +121,8 @@ private:
     std::vector<ChannelRouteOption> bassOutputRoutes;
     int draftInputChannelCount = 0;
     int draftOutputChannelCount = 0;
+    bool draftInputCapabilitiesKnown = false;
+    bool draftOutputCapabilitiesKnown = false;
     bool updatingConnectionControls = false;
     bool connectionDraftDirty = false;
     int appliedXRunBaseline = 0;

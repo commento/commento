@@ -9,6 +9,33 @@ constexpr auto panel = 0xff121725;
 constexpr auto paleText = 0xffdce6e8;
 constexpr auto quietText = 0xff7f9298;
 
+bool looksLikeModel12(const juce::String& name)
+{
+    return name.containsIgnoreCase("model 12")
+        || name.containsIgnoreCase("model12");
+}
+
+int highestConfiguredInput(const Model12AudioRouter::RoutingConfig& routing)
+{
+    return juce::jmax(routing.saxInputLeft, routing.saxInputRight);
+}
+
+int highestConfiguredOutput(const Model12AudioRouter::RoutingConfig& routing)
+{
+    return juce::jmax(
+        juce::jmax(routing.ambientOutputLeft, routing.ambientOutputRight,
+                   routing.bassOutputLeft, routing.bassOutputRight),
+        juce::jmax(routing.saxOutputLeft, routing.saxOutputRight));
+}
+
+bool hasContiguousChannels(const juce::BigInteger& channels, int count)
+{
+    for (int channel = 0; channel < count; ++channel)
+        if (! channels[channel])
+            return false;
+    return true;
+}
+
 const std::array<juce::Colour, EcosystemEngine::memoryCount> memoryColours {
     juce::Colour(0xff69d2e7), juce::Colour(0xffa7dbd8),
     juce::Colour(0xffe0e4cc), juce::Colour(0xfff38630),
@@ -852,22 +879,115 @@ void MainComponent::refreshAudioCapabilities()
 {
     draftInputChannelCount = 0;
     draftOutputChannelCount = 0;
+    draftInputCapabilitiesKnown = audioDraft.inputDevice.isEmpty();
+    draftOutputCapabilitiesKnown = audioDraft.outputDevice.isEmpty();
     availableSampleRates.clear();
     availableBufferSizes.clear();
 
+    const auto mergeFormats = [this](juce::AudioIODevice& device)
+    {
+        for (const auto rate : device.getAvailableSampleRates())
+            availableSampleRates.addIfNotAlreadyThere(rate);
+        for (const auto size : device.getAvailableBufferSizes())
+            availableBufferSizes.addIfNotAlreadyThere(size);
+    };
+    const auto channelCapacity = [](juce::AudioIODevice& device, bool input)
+    {
+        const auto names = input ? device.getInputChannelNames()
+                                 : device.getOutputChannelNames();
+        const auto active = input ? device.getActiveInputChannels()
+                                  : device.getActiveOutputChannels();
+        return juce::jmax(names.size(), active.getHighestBit() + 1);
+    };
+
+    auto* currentDevice = deviceManager.getCurrentAudioDevice();
+    const auto currentSetup = deviceManager.getAudioDeviceSetup();
+    const auto sameBackend = currentDevice != nullptr
+        && deviceManager.getCurrentAudioDeviceType() == audioDraft.backend;
+    const auto reuseCurrentOutput = sameBackend
+        && currentSetup.outputDeviceName == audioDraft.outputDevice
+        && audioDraft.outputDevice.isNotEmpty();
+    const auto reuseCurrentInput = sameBackend
+        && currentSetup.inputDeviceName == audioDraft.inputDevice
+        && audioDraft.inputDevice.isNotEmpty();
+
+    if (reuseCurrentOutput)
+    {
+        draftOutputChannelCount = channelCapacity(*currentDevice, false);
+        draftOutputCapabilitiesKnown = true;
+        mergeFormats(*currentDevice);
+    }
+    if (reuseCurrentInput)
+    {
+        draftInputChannelCount = channelCapacity(*currentDevice, true);
+        draftInputCapabilitiesKnown = true;
+        mergeFormats(*currentDevice);
+    }
+
     if (auto* type = getDraftDeviceType())
     {
-        std::unique_ptr<juce::AudioIODevice> probe(type->createDevice(
-            audioDraft.outputDevice, audioDraft.inputDevice));
-        if (probe != nullptr)
+        if (! draftOutputCapabilitiesKnown
+            && audioDraft.outputDevice.isNotEmpty())
         {
-            draftInputChannelCount = audioDraft.inputDevice.isEmpty()
-                ? 0 : probe->getInputChannelNames().size();
-            draftOutputChannelCount = audioDraft.outputDevice.isEmpty()
-                ? 0 : probe->getOutputChannelNames().size();
-            availableSampleRates = probe->getAvailableSampleRates();
-            availableBufferSizes = probe->getAvailableBufferSizes();
+            std::unique_ptr<juce::AudioIODevice> outputProbe(
+                type->createDevice(audioDraft.outputDevice, {}));
+            if (outputProbe != nullptr)
+            {
+                const auto count = outputProbe->getOutputChannelNames().size();
+                if (count > 0)
+                {
+                    draftOutputChannelCount = count;
+                    draftOutputCapabilitiesKnown = true;
+                }
+                mergeFormats(*outputProbe);
+            }
         }
+
+        if (! draftInputCapabilitiesKnown
+            && audioDraft.inputDevice.isNotEmpty())
+        {
+            std::unique_ptr<juce::AudioIODevice> inputProbe(
+                type->createDevice({}, audioDraft.inputDevice));
+            if (inputProbe != nullptr)
+            {
+                const auto count = inputProbe->getInputChannelNames().size();
+                if (count > 0)
+                {
+                    draftInputChannelCount = count;
+                    draftInputCapabilitiesKnown = true;
+                }
+                mergeFormats(*inputProbe);
+            }
+        }
+    }
+
+    // A raw ALSA hw device may be exclusive. If a non-owning probe receives
+    // EBUSY, JUCE reports zero channel names; that means "unknown", not zero.
+    // Use the routing as an optimistic contiguous mask and let the real open
+    // below provide the authoritative result.
+    if (! draftOutputCapabilitiesKnown
+        && audioDraft.outputDevice.isNotEmpty())
+    {
+        draftOutputChannelCount = juce::jmax(
+            1, highestConfiguredOutput(audioDraft.routing) + 1);
+        if (looksLikeModel12(audioDraft.outputDevice))
+            draftOutputChannelCount = juce::jmax(10, draftOutputChannelCount);
+        juce::Logger::writeToLog(
+            "Commento: capacita' output temporaneamente ignote/busy per '"
+            + audioDraft.outputDevice + "'; provo "
+            + juce::String(draftOutputChannelCount) + " canali contigui");
+    }
+    if (! draftInputCapabilitiesKnown
+        && audioDraft.inputDevice.isNotEmpty())
+    {
+        draftInputChannelCount = juce::jmax(
+            1, highestConfiguredInput(audioDraft.routing) + 1);
+        if (looksLikeModel12(audioDraft.inputDevice))
+            draftInputChannelCount = juce::jmax(12, draftInputChannelCount);
+        juce::Logger::writeToLog(
+            "Commento: capacita' input temporaneamente ignote/busy per '"
+            + audioDraft.inputDevice + "'; provo "
+            + juce::String(draftInputChannelCount) + " canali contigui");
     }
 
     if (availableSampleRates.isEmpty())
@@ -991,8 +1111,7 @@ void MainComponent::applyAudioProfile(int profile)
     {
         const auto isModel12 = [](const juce::String& name)
         {
-            return name.containsIgnoreCase("model 12")
-                || name.containsIgnoreCase("model12")
+            return looksLikeModel12(name)
                 || name.containsIgnoreCase("tascam");
         };
         auto bestScore = -1;
@@ -1012,14 +1131,16 @@ void MainComponent::applyAudioProfile(int profile)
                         continue;
                     std::unique_ptr<juce::AudioIODevice> probe(
                         type->createDevice(output, input));
-                    if (probe == nullptr
-                        || probe->getInputChannelNames().size() < 12
-                        || probe->getOutputChannelNames().size() < 10)
-                        continue;
                     auto score = input == output ? 20 : 0;
                     score += type->getTypeName().containsIgnoreCase("alsa") ? 20 : 0;
+                    score += looksLikeModel12(input) && looksLikeModel12(output)
+                        ? 200 : 0;
                     score += input.containsIgnoreCase("direct hardware")
                           || output.containsIgnoreCase("direct hardware") ? 30 : 0;
+                    if (probe != nullptr
+                        && probe->getInputChannelNames().size() >= 12
+                        && probe->getOutputChannelNames().size() >= 10)
+                        score += 100;
                     if (score > bestScore)
                     {
                         bestScore = score;
@@ -1210,16 +1331,21 @@ void MainComponent::applyAudioConfiguration()
     }
 
     refreshAudioCapabilities();
-    if (audioDraft.inputDevice.isNotEmpty() && draftInputChannelCount <= 0)
+    if (audioDraft.inputDevice.isNotEmpty()
+        && draftInputCapabilitiesKnown && draftInputChannelCount <= 0)
     {
-        // Some unified backends list an output-only device as an input choice.
-        // Treat zero exposed channels as a real output-only configuration.
-        audioDraft.inputDevice.clear();
-        refreshAudioCapabilities();
+        lastAudioError = "Il dispositivo scelto non dispone di ingressi audio";
+        connectionStatusLabel.setColour(juce::Label::textColourId,
+                                        juce::Colour(0xffff9f8e));
+        connectionStatusLabel.setText(lastAudioError,
+                                      juce::dontSendNotification);
+        return;
     }
-    if (draftOutputChannelCount <= 0)
+    if (draftOutputCapabilitiesKnown && draftOutputChannelCount <= 0)
     {
         lastAudioError = "Il dispositivo scelto non espone uscite audio";
+        connectionStatusLabel.setColour(juce::Label::textColourId,
+                                        juce::Colour(0xffff9f8e));
         connectionStatusLabel.setText(lastAudioError,
                                       juce::dontSendNotification);
         return;
@@ -1230,6 +1356,8 @@ void MainComponent::applyAudioConfiguration()
     const auto oldRouting = audioRouter.getRoutingConfig();
     const auto oldSaxPath = engine.getSaxPathMode();
     const auto oldTone = engine.getDiagnosticToneBus();
+    auto* currentDevice = deviceManager.getCurrentAudioDevice();
+    const auto oldWasOpen = currentDevice != nullptr && currentDevice->isOpen();
 
     const auto applyRuntimeRouting = [this]
     {
@@ -1248,6 +1376,7 @@ void MainComponent::applyAudioConfiguration()
         if (! audioReady)
             return false;
 
+        refreshAudioCapabilities();
         audioDraft.sampleRate = device->getCurrentSampleRate();
         audioDraft.bufferSize = device->getCurrentBufferSizeSamples();
         connectionDraftDirty = false;
@@ -1283,7 +1412,6 @@ void MainComponent::applyAudioConfiguration()
         return true;
     };
 
-    auto* currentDevice = deviceManager.getCurrentAudioDevice();
     const auto deviceNeedsReopen = currentDevice == nullptr
         || ! engine.isAudioRunning()
         || oldType != audioDraft.backend
@@ -1291,7 +1419,16 @@ void MainComponent::applyAudioConfiguration()
         || oldSetup.outputDeviceName != audioDraft.outputDevice
         || std::abs(currentDevice->getCurrentSampleRate()
                     - audioDraft.sampleRate) > 0.5
-        || currentDevice->getCurrentBufferSizeSamples() != audioDraft.bufferSize;
+        || currentDevice->getCurrentBufferSizeSamples() != audioDraft.bufferSize
+        || ! hasContiguousChannels(currentDevice->getActiveOutputChannels(),
+                                   draftOutputChannelCount)
+        || audioRouter.getPhysicalOutputChannelCount() < draftOutputChannelCount
+        || (audioDraft.inputDevice.isNotEmpty()
+            && ! hasContiguousChannels(currentDevice->getActiveInputChannels(),
+                                       draftInputChannelCount))
+        || (audioDraft.inputDevice.isNotEmpty()
+            && audioRouter.getPhysicalInputChannelCount()
+                < draftInputChannelCount);
 
     if (! deviceNeedsReopen)
     {
@@ -1313,6 +1450,29 @@ void MainComponent::applyAudioConfiguration()
     }
 
     deviceManager.removeAudioCallback(&audioRouter);
+    const auto restorePreviousAudio = [this, &oldType, &oldSetup,
+                                       &oldRouting, oldSaxPath, oldTone,
+                                       oldWasOpen]()
+    {
+        if (oldType.isNotEmpty()
+            && deviceManager.getCurrentAudioDeviceType() != oldType)
+            deviceManager.setCurrentAudioDeviceType(oldType, false);
+
+        juce::String restoreError;
+        if (oldWasOpen)
+            restoreError = deviceManager.setAudioDeviceSetup(oldSetup, false);
+        else
+            deviceManager.closeAudioDevice();
+
+        audioRouter.setRoutingConfig(oldRouting);
+        engine.setSaxPathMode(oldSaxPath);
+        engine.setDiagnosticToneBus(oldTone);
+        deviceManager.addAudioCallback(&audioRouter);
+        auto* restored = deviceManager.getCurrentAudioDevice();
+        audioReady = restored != nullptr && restored->isOpen();
+        return restoreError;
+    };
+
     if (oldType != audioDraft.backend)
         deviceManager.setCurrentAudioDeviceType(audioDraft.backend, false);
 
@@ -1329,20 +1489,46 @@ void MainComponent::applyAudioConfiguration()
         setup.inputChannels.setRange(0, draftInputChannelCount, true);
     setup.outputChannels.setRange(0, draftOutputChannelCount, true);
 
-    const auto error = deviceManager.setAudioDeviceSetup(setup, true);
+    const auto error = deviceManager.setAudioDeviceSetup(setup, false);
     if (error.isNotEmpty())
     {
-        if (oldType.isNotEmpty()
-            && deviceManager.getCurrentAudioDeviceType() != oldType)
-            deviceManager.setCurrentAudioDeviceType(oldType, false);
-        if (oldSetup.outputDeviceName.isNotEmpty())
-            deviceManager.setAudioDeviceSetup(oldSetup, false);
-        audioRouter.setRoutingConfig(oldRouting);
-        engine.setSaxPathMode(oldSaxPath);
-        engine.setDiagnosticToneBus(oldTone);
-        deviceManager.addAudioCallback(&audioRouter);
-        audioReady = deviceManager.getCurrentAudioDevice() != nullptr;
+        const auto restoreError = restorePreviousAudio();
         lastAudioError = "APERTURA FALLITA: " + error;
+        if (restoreError.isNotEmpty() || (oldWasOpen && ! audioReady))
+            lastAudioError += " | RIPRISTINO FALLITO: "
+                + (restoreError.isNotEmpty() ? restoreError
+                                             : juce::String("device non aperto"));
+        connectionStatusLabel.setColour(juce::Label::textColourId,
+                                        juce::Colour(0xffff9f8e));
+        connectionStatusLabel.setText(lastAudioError,
+                                      juce::dontSendNotification);
+        return;
+    }
+
+    auto* device = deviceManager.getCurrentAudioDevice();
+    const auto requiredOutputs = juce::jmax(
+        1, highestConfiguredOutput(audioDraft.routing) + 1);
+    const auto requiredInputs = audioDraft.inputDevice.isNotEmpty()
+        ? juce::jmax(1, highestConfiguredInput(audioDraft.routing) + 1) : 0;
+    juce::String validationError;
+    if (device == nullptr || ! device->isOpen())
+        validationError = "il device non e' rimasto aperto";
+    else if (! hasContiguousChannels(device->getActiveOutputChannels(),
+                                     requiredOutputs))
+        validationError = "uscite attive insufficienti per il routing scelto";
+    else if (requiredInputs > 0
+             && ! hasContiguousChannels(device->getActiveInputChannels(),
+                                        requiredInputs))
+        validationError = "ingressi attivi insufficienti per il routing scelto";
+
+    if (validationError.isNotEmpty())
+    {
+        const auto restoreError = restorePreviousAudio();
+        lastAudioError = "CONFIGURAZIONE RIFIUTATA: " + validationError;
+        if (restoreError.isNotEmpty() || (oldWasOpen && ! audioReady))
+            lastAudioError += " | RIPRISTINO FALLITO: "
+                + (restoreError.isNotEmpty() ? restoreError
+                                             : juce::String("device non aperto"));
         connectionStatusLabel.setColour(juce::Label::textColourId,
                                         juce::Colour(0xffff9f8e));
         connectionStatusLabel.setText(lastAudioError,
@@ -1353,7 +1539,6 @@ void MainComponent::applyAudioConfiguration()
     applyRuntimeRouting();
     deviceManager.addAudioCallback(&audioRouter);
 
-    auto* device = deviceManager.getCurrentAudioDevice();
     if (! finishSuccessfulApply(device, true))
     {
         lastAudioError = "Il sistema audio non e' rimasto aperto";
