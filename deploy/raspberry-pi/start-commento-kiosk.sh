@@ -32,5 +32,24 @@ if command -v unclutter >/dev/null 2>&1; then
     unclutter --timeout 0 --jitter 0 --hide-on-touch --start-hidden &
 fi
 
-exec /opt/commento/bin/Commento "$@"
+# JUCE's ALSA device list is scanned once. Wait for the dedicated mixer before
+# starting the app so a late USB enumeration cannot leave MODEL 12 invisible
+# until the next process restart.
+model12_ready=false
+for _ in $(seq 1 50); do
+    if grep -Eqi 'MODEL ?12|TASCAM' /proc/asound/cards 2>/dev/null; then
+        model12_ready=true
+        break
+    fi
+    sleep 0.2
+done
 
+if [[ ${model12_ready} != true ]]; then
+    echo "Commento: MODEL 12 non presente in /proc/asound/cards; riprovo tramite systemd." >&2
+    if [[ -r /proc/asound/cards ]]; then
+        cat /proc/asound/cards >&2
+    fi
+    exit 75
+fi
+
+exec /opt/commento/bin/Commento "$@"

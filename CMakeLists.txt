@@ -3,6 +3,7 @@ cmake_minimum_required(VERSION 3.24)
 project(Commento VERSION 0.1.0 LANGUAGES C CXX)
 
 set(COMMENTO_JUCE_SOURCE_DIR "" CACHE PATH "Optional path to an existing JUCE checkout")
+option(COMMENTO_ALSA_DIAGNOSTICS "Log detailed ALSA setup on Linux" ON)
 
 if (COMMENTO_JUCE_SOURCE_DIR)
     add_subdirectory("${COMMENTO_JUCE_SOURCE_DIR}" JUCE)
@@ -29,6 +30,7 @@ target_sources(Commento PRIVATE
     Source/MainComponent.cpp
     Source/Engine/AmbientSynth.cpp
     Source/Engine/EcosystemEngine.cpp
+    Source/Hardware/Model12AudioRouter.cpp
 )
 
 target_include_directories(Commento PRIVATE Source)
@@ -38,6 +40,10 @@ target_compile_definitions(Commento PRIVATE
     JUCE_WEB_BROWSER=0
     JUCE_USE_CURL=0
 )
+
+if (CMAKE_SYSTEM_NAME STREQUAL "Linux" AND COMMENTO_ALSA_DIAGNOSTICS)
+    target_compile_definitions(Commento PRIVATE JUCE_ALSA_LOGGING=1)
+endif()
 
 target_link_libraries(Commento PRIVATE
     juce::juce_audio_devices
@@ -57,6 +63,7 @@ if (BUILD_TESTING)
         Tests/EcosystemEngineTests.cpp
         Source/Engine/AmbientSynth.cpp
         Source/Engine/EcosystemEngine.cpp
+        Source/Hardware/Model12AudioRouter.cpp
     )
     target_include_directories(CommentoEngineTests PRIVATE Source)
     target_compile_features(CommentoEngineTests PRIVATE cxx_std_17)

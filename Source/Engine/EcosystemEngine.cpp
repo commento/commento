@@ -7,7 +7,7 @@ EcosystemEngine::EcosystemEngine()
 {
     for (int index = 0; index < midiMemoryCount; ++index)
     {
-        midiMemories[static_cast<size_t>(index)].events.reserve(maximumMidiEvents);
+        midiMemories[static_cast<size_t>(index)].events.reserve(maximumMidiEvents + 128);
         internalSynths[static_cast<size_t>(index)] = std::make_unique<AmbientSynth>(index);
     }
 }
@@ -24,7 +24,11 @@ void EcosystemEngine::enqueueMidiMessage(const juce::MidiMessage& message)
     incomingFifo.prepareToWrite(1, start1, size1, start2, size2);
     juce::ignoreUnused(start2, size2);
     if (size1 == 0)
+    {
+        midiOverflowed.store(true);
+        droppedMidiMessages.fetch_add(1);
         return;
+    }
 
     incomingMessages[static_cast<size_t>(start1)] = message;
     incomingFifo.finishedWrite(1);
@@ -93,6 +97,36 @@ int EcosystemEngine::getMidiChannelForMemory(int memoryIndex) const
         ? midiChannels[static_cast<size_t>(memoryIndex)] : 0;
 }
 
+bool EcosystemEngine::isAudioRunning() const
+{
+    return audioRunning.load();
+}
+
+int EcosystemEngine::getCallbackInputChannelCount() const
+{
+    return callbackInputChannels.load();
+}
+
+int EcosystemEngine::getCallbackOutputChannelCount() const
+{
+    return callbackOutputChannels.load();
+}
+
+float EcosystemEngine::getSaxInputLevel() const
+{
+    return saxInputLevel.load();
+}
+
+float EcosystemEngine::getStereoOutputLevel() const
+{
+    return stereoOutputLevel.load();
+}
+
+int EcosystemEngine::getDroppedMidiMessageCount() const
+{
+    return droppedMidiMessages.load();
+}
+
 int EcosystemEngine::memoryIndexForMidiChannel(int midiChannel)
 {
     for (int index = 0; index < midiMemoryCount; ++index)
@@ -112,34 +146,105 @@ float EcosystemEngine::getAudioDecay() const
     return audioDecay.load();
 }
 
-juce::MidiBuffer EcosystemEngine::takeMidiOutput()
+void EcosystemEngine::setSaxStereoInput(bool shouldUseStereo)
 {
-    const juce::ScopedLock lock(midiOutputLock);
-    juce::MidiBuffer result;
-    result.swapWith(pendingMidiOutput);
-    return result;
+    saxStereoInput.store(shouldUseStereo);
+}
+
+bool EcosystemEngine::isSaxStereoInput() const
+{
+    return saxStereoInput.load();
 }
 
 void EcosystemEngine::audioDeviceAboutToStart(juce::AudioIODevice* device)
 {
-    prepare(device != nullptr ? device->getCurrentSampleRate() : 48000.0);
+    prepare(device != nullptr ? device->getCurrentSampleRate() : 48000.0,
+            device != nullptr ? device->getCurrentBufferSizeSamples() : 4096);
+    audioRunning.store(device != nullptr);
 }
 
-void EcosystemEngine::prepare(double newSampleRate)
+void EcosystemEngine::prepare(double newSampleRate, int maximumBlockSize)
 {
-    sampleRate = newSampleRate > 0.0 ? newSampleRate : 48000.0;
+    const auto preparedSampleRate = newSampleRate > 0.0 ? newSampleRate : 48000.0;
+    const auto sampleRateChanged = std::abs(sampleRate - preparedSampleRate) > 0.5;
+    const auto needsAudioStorage = audioMemory.buffer.getNumSamples() == 0
+        || sampleRateChanged;
+
+    sampleRate = preparedSampleRate;
     const auto maximumSamples = static_cast<int>(std::ceil(sampleRate * maximumAudioSeconds));
-    audioMemory.buffer.setSize(2, maximumSamples, false, true, false);
-    audioMemory.buffer.clear();
-    synthMixBuffer.setSize(2, 4096, false, true, false);
+    if (needsAudioStorage)
+    {
+        audioMemory.recordingRequested.store(false);
+        audioMemory.recordingForDisplay.store(false);
+        audioMemory.containsMaterial.store(false);
+        audioMemory.recordingActive = false;
+        audioMemory.initialCapture = false;
+        audioMemory.writePosition = 0;
+        audioMemory.playbackPosition = 0;
+        audioMemory.loopLength = 0;
+        audioMemory.phase.store(0.0);
+        audioMemory.lengthSeconds.store(0.0);
+        audioMemory.buffer.setSize(2, maximumSamples, false, true, false);
+        audioMemory.buffer.clear();
+    }
+
+    synthMixBuffer.setSize(2, juce::jmax(8192, maximumBlockSize),
+                           false, true, false);
+    blockMidiOutput.ensureSize(128 * 1024);
+    for (auto& midi : layerMidiBuffers)
+        midi.ensureSize(64 * 1024);
     for (auto& synth : internalSynths)
         synth->prepare(sampleRate);
 }
 
 void EcosystemEngine::audioDeviceStopped()
 {
-    for (auto& memory : midiMemories)
+    audioRunning.store(false);
+    callbackInputChannels.store(0);
+    callbackOutputChannels.store(0);
+    saxInputLevel.store(0.0f);
+    stereoOutputLevel.store(0.0f);
+    for (int index = 0; index < midiMemoryCount; ++index)
+    {
+        auto& memory = midiMemories[static_cast<size_t>(index)];
+        if (memory.recordingActive)
+        {
+            const auto closingPosition = juce::jmax<int64_t>(0, memory.recordPosition - 1);
+            for (int note = 0;
+                 note < static_cast<int>(memory.activeRecordedNotes.size()); ++note)
+                if (memory.activeRecordedNotes[static_cast<size_t>(note)])
+                    memory.events.push_back({ juce::MidiMessage::noteOff(
+                                                  midiChannels[static_cast<size_t>(index)], note),
+                                              closingPosition });
+            memory.activeRecordedNotes.fill(false);
+            memory.loopLength = memory.recordPosition;
+            memory.playbackPosition = 0;
+            const auto usable = memory.loopLength > 0 && ! memory.events.empty();
+            memory.containsMaterial.store(usable);
+            memory.eventCount.store(static_cast<int>(memory.events.size()));
+            memory.lengthSeconds.store(usable
+                ? static_cast<double>(memory.loopLength) / sampleRate : 0.0);
+        }
+        memory.recordingRequested.store(false);
+        memory.recordingActive = false;
         memory.recordingForDisplay.store(false);
+    }
+
+    if (audioMemory.recordingActive && audioMemory.initialCapture)
+    {
+        audioMemory.loopLength = audioMemory.writePosition;
+        audioMemory.playbackPosition = 0;
+        const auto usable = audioMemory.loopLength
+            > static_cast<int64_t>(sampleRate * 0.05);
+        audioMemory.containsMaterial.store(usable);
+        audioMemory.lengthSeconds.store(usable
+            ? static_cast<double>(audioMemory.loopLength) / sampleRate : 0.0);
+        if (! usable)
+            audioMemory.loopLength = 0;
+    }
+    audioMemory.recordingRequested.store(false);
+    audioMemory.recordingActive = false;
+    audioMemory.initialCapture = false;
     audioMemory.recordingForDisplay.store(false);
 }
 
@@ -148,27 +253,66 @@ void EcosystemEngine::audioDeviceIOCallbackWithContext(
     float* const* outputChannelData, int numOutputChannels, int numSamples,
     const juce::AudioIODeviceCallbackContext&)
 {
+    callbackInputChannels.store(numInputChannels);
+    callbackOutputChannels.store(numOutputChannels);
+
     for (int channel = 0; channel < numOutputChannels; ++channel)
         if (outputChannelData[channel] != nullptr)
             juce::FloatVectorOperations::clear(outputChannelData[channel], numSamples);
 
     blockMidiOutput.clear();
+    if (midiOverflowed.exchange(false))
+        for (const auto channel : midiChannels)
+            blockMidiOutput.addEvent(juce::MidiMessage::allNotesOff(channel), 0);
+
     for (int index = 0; index < midiMemoryCount; ++index)
         applyMidiCommands(midiMemories[static_cast<size_t>(index)],
                           midiChannels[static_cast<size_t>(index)], blockMidiOutput);
     applyAudioCommands();
     recordIncomingMidi(numSamples, blockMidiOutput);
     renderMidiMemories(numSamples, blockMidiOutput);
-    renderInternalSynths(outputChannelData, numOutputChannels,
+    // USB multichannel devices such as Model 12 may force ALSA/JUCE to open
+    // all hardware playback channels. Commento deliberately writes only to
+    // USB outputs 1+2; channels 3-10 remain at the zeroes written above.
+    const auto stereoOutputChannels = juce::jmin(2, numOutputChannels);
+    renderInternalSynths(outputChannelData, stereoOutputChannels,
                          numSamples, blockMidiOutput);
     renderAudioMemory(inputChannelData, numInputChannels,
-                      outputChannelData, numOutputChannels, numSamples);
+                      outputChannelData, stereoOutputChannels, numSamples);
 
-    if (! blockMidiOutput.isEmpty())
+    float inputPeak = 0.0f;
+    const auto saxLeftChannel = 0;
+    const auto saxRightChannel = juce::jmin(1, numInputChannels - 1);
+    if (numInputChannels > 0 && inputChannelData != nullptr
+        && inputChannelData[saxLeftChannel] != nullptr)
     {
-        const juce::ScopedLock lock(midiOutputLock);
-        pendingMidiOutput.addEvents(blockMidiOutput, 0, numSamples, 0);
+        for (int sample = 0; sample < numSamples; ++sample)
+        {
+            inputPeak = juce::jmax(inputPeak,
+                                   std::abs(inputChannelData[saxLeftChannel][sample]));
+            if (saxStereoInput.load()
+                && juce::isPositiveAndBelow(saxRightChannel, numInputChannels)
+                && inputChannelData[saxRightChannel] != nullptr)
+                inputPeak = juce::jmax(inputPeak,
+                                       std::abs(inputChannelData[saxRightChannel][sample]));
+        }
     }
+    saxInputLevel.store(juce::jmax(inputPeak, saxInputLevel.load() * 0.86f));
+
+    float outputPeak = 0.0f;
+    for (int channel = 0; channel < stereoOutputChannels; ++channel)
+    {
+        if (outputChannelData[channel] == nullptr)
+            continue;
+
+        for (int sample = 0; sample < numSamples; ++sample)
+        {
+            auto& value = outputChannelData[channel][sample];
+            value = std::tanh(value * 0.88f);
+            outputPeak = juce::jmax(outputPeak, std::abs(value));
+        }
+    }
+    stereoOutputLevel.store(juce::jmax(outputPeak, stereoOutputLevel.load() * 0.86f));
 }
 
 void EcosystemEngine::applyMidiCommands(MidiMemory& memory, int channel,
@@ -187,6 +331,7 @@ void EcosystemEngine::applyMidiCommands(MidiMemory& memory, int channel,
         memory.eventCount.store(0);
         memory.lengthSeconds.store(0.0);
         memory.phase.store(0.0);
+        memory.activeRecordedNotes.fill(false);
         output.addEvent(juce::MidiMessage::allNotesOff(channel), 0);
     }
 
@@ -208,9 +353,18 @@ void EcosystemEngine::applyMidiCommands(MidiMemory& memory, int channel,
         memory.eventCount.store(0);
         memory.lengthSeconds.store(0.0);
         memory.phase.store(0.0);
+        memory.activeRecordedNotes.fill(false);
     }
     else
     {
+        const auto closingPosition = juce::jmax<int64_t>(0, memory.recordPosition - 1);
+        for (int note = 0; note < static_cast<int>(memory.activeRecordedNotes.size()); ++note)
+        {
+            if (memory.activeRecordedNotes[static_cast<size_t>(note)])
+                memory.events.push_back({ juce::MidiMessage::noteOff(channel, note),
+                                          closingPosition });
+        }
+        memory.activeRecordedNotes.fill(false);
         memory.loopLength = memory.recordPosition;
         memory.playbackPosition = 0;
         const auto usable = memory.loopLength > 0 && ! memory.events.empty();
@@ -234,7 +388,6 @@ void EcosystemEngine::applyAudioCommands()
         audioMemory.containsMaterial.store(false);
         audioMemory.lengthSeconds.store(0.0);
         audioMemory.phase.store(0.0);
-        audioMemory.buffer.clear();
     }
 
     const auto shouldRecord = audioMemory.recordingRequested.load();
@@ -248,7 +401,6 @@ void EcosystemEngine::applyAudioCommands()
         audioMemory.initialCapture = audioMemory.loopLength == 0;
         if (audioMemory.initialCapture)
         {
-            audioMemory.buffer.clear();
             audioMemory.writePosition = 0;
             audioMemory.playbackPosition = 0;
             audioMemory.containsMaterial.store(false);
@@ -292,7 +444,13 @@ void EcosystemEngine::recordIncomingMidi(int numSamples, juce::MidiBuffer& liveM
             auto& memory = midiMemories[static_cast<size_t>(memoryIndex)];
             if (memory.recordingActive
                 && static_cast<int>(memory.events.size()) < maximumMidiEvents)
+            {
                 memory.events.push_back({ message, memory.recordPosition });
+                if (message.isNoteOn())
+                    memory.activeRecordedNotes[static_cast<size_t>(message.getNoteNumber())] = true;
+                else if (message.isNoteOff())
+                    memory.activeRecordedNotes[static_cast<size_t>(message.getNoteNumber())] = false;
+            }
         }
     };
 
@@ -323,7 +481,8 @@ void EcosystemEngine::renderInternalSynths(float* const* outputs, int outputChan
 
     for (int layer = 0; layer < midiMemoryCount; ++layer)
     {
-        juce::MidiBuffer layerMidi;
+        auto& layerMidi = layerMidiBuffers[static_cast<size_t>(layer)];
+        layerMidi.clear();
         for (const auto metadata : midi)
             if (metadata.getMessage().getChannel()
                 == midiChannels[static_cast<size_t>(layer)])
@@ -365,9 +524,6 @@ void EcosystemEngine::renderMidiMemories(int numSamples, juce::MidiBuffer& outpu
 
             if (memory.playbackPosition >= memory.loopLength)
             {
-                output.addEvent(juce::MidiMessage::allNotesOff(
-                                    midiChannels[static_cast<size_t>(index)]),
-                                juce::jlimit(0, numSamples - 1, outputOffset));
                 memory.playbackPosition = 0;
             }
         }
@@ -401,6 +557,20 @@ void EcosystemEngine::renderAudioMemory(
 
     const auto maximumLength = static_cast<int64_t>(audioMemory.buffer.getNumSamples());
     const auto decay = audioDecay.load();
+    const auto rightInputChannel = juce::jmin(1, inputChannels - 1);
+    const auto useStereoInput = saxStereoInput.load();
+
+    const auto readInput = [inputs, inputChannels, rightInputChannel,
+                            useStereoInput](int channel, int sample)
+    {
+        if (inputs == nullptr || inputChannels <= 0)
+            return 0.0f;
+        const auto sourceChannel = useStereoInput && channel > 0
+            ? rightInputChannel : 0;
+        return juce::isPositiveAndBelow(sourceChannel, inputChannels)
+                && inputs[sourceChannel] != nullptr
+            ? inputs[sourceChannel][sample] : 0.0f;
+    };
 
     for (int sample = 0; sample < numSamples; ++sample)
     {
@@ -413,18 +583,11 @@ void EcosystemEngine::renderAudioMemory(
             }
             for (int channel = 0; channel < audioMemory.buffer.getNumChannels(); ++channel)
             {
-                // RESPIRO is a mono sax/microphone memory. When JUCE exposes
-                // Model 12 inputs as the pair 7+8, channel 7 is the first active
-                // input and is intentionally duplicated to both loop channels.
-                const auto input = inputChannels > 0 && inputs[0] != nullptr
-                    ? inputs[0][sample] : 0.0f;
+                const auto input = readInput(channel, sample);
                 audioMemory.buffer.setSample(channel,
                     static_cast<int>(audioMemory.writePosition), input);
             }
             ++audioMemory.writePosition;
-            audioMemory.phase.store(static_cast<double>(audioMemory.writePosition)
-                                    / static_cast<double>(maximumLength));
-            audioMemory.lengthSeconds.store(static_cast<double>(audioMemory.writePosition) / sampleRate);
             continue;
         }
 
@@ -442,8 +605,7 @@ void EcosystemEngine::renderAudioMemory(
 
             if (audioMemory.recordingActive)
             {
-                const auto input = inputChannels > 0 && inputs[0] != nullptr
-                    ? inputs[0][sample] : 0.0f;
+                const auto input = readInput(memoryChannel, sample);
                 loopSample = loopSample * decay + input;
                 audioMemory.buffer.setSample(memoryChannel, bufferPosition,
                                              juce::jlimit(-1.0f, 1.0f, loopSample));
@@ -453,6 +615,17 @@ void EcosystemEngine::renderAudioMemory(
 
         audioMemory.playbackPosition = (audioMemory.playbackPosition + 1)
                                        % audioMemory.loopLength;
+    }
+
+    if (audioMemory.recordingActive && audioMemory.initialCapture)
+    {
+        audioMemory.phase.store(static_cast<double>(audioMemory.writePosition)
+                                / static_cast<double>(maximumLength));
+        audioMemory.lengthSeconds.store(
+            static_cast<double>(audioMemory.writePosition) / sampleRate);
+    }
+    else if (audioMemory.loopLength > 0)
+    {
         audioMemory.phase.store(static_cast<double>(audioMemory.playbackPosition)
                                 / static_cast<double>(audioMemory.loopLength));
     }

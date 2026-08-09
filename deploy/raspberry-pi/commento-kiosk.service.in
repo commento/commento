@@ -14,6 +14,7 @@ WorkingDirectory=@HOME@
 Environment=HOME=@HOME@
 Environment=DISPLAY=:0
 Environment=COMMENTO_DISPLAY_MODE=1920x1200
+Environment=COMMENTO_KIOSK=1
 TTYPath=/dev/tty1
 StandardInput=tty
 StandardOutput=journal
@@ -32,4 +33,3 @@ LimitMEMLOCK=infinity
 
 [Install]
 WantedBy=multi-user.target
-

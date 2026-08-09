@@ -62,7 +62,8 @@ public:
     void setCurrentPlaybackSampleRate(double newRate) override
     {
         juce::SynthesiserVoice::setCurrentPlaybackSampleRate(newRate);
-        envelope.setSampleRate(newRate);
+        if (newRate > 0.0)
+            envelope.setSampleRate(newRate);
     }
 
     void renderNextBlock(juce::AudioBuffer<float>& output, int startSample,
@@ -140,4 +141,3 @@ void AmbientSynth::render(juce::AudioBuffer<float>& output,
 {
     synthesiser.renderNextBlock(output, midi, startSample, numSamples);
 }
-

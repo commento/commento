@@ -25,12 +25,18 @@ public:
     [[nodiscard]] double getLengthSeconds(int memoryIndex) const;
     [[nodiscard]] int getEventCount(int memoryIndex) const;
     [[nodiscard]] int getMidiChannelForMemory(int memoryIndex) const;
+    [[nodiscard]] bool isAudioRunning() const;
+    [[nodiscard]] int getCallbackInputChannelCount() const;
+    [[nodiscard]] int getCallbackOutputChannelCount() const;
+    [[nodiscard]] float getSaxInputLevel() const;
+    [[nodiscard]] float getStereoOutputLevel() const;
+    [[nodiscard]] int getDroppedMidiMessageCount() const;
 
     void setAudioDecay(float newDecay);
     [[nodiscard]] float getAudioDecay() const;
-    void prepare(double newSampleRate);
-
-    juce::MidiBuffer takeMidiOutput();
+    void setSaxStereoInput(bool shouldUseStereo);
+    [[nodiscard]] bool isSaxStereoInput() const;
+    void prepare(double newSampleRate, int maximumBlockSize = 4096);
 
     void audioDeviceIOCallbackWithContext(const float* const* inputChannelData,
                                           int numInputChannels,
@@ -62,6 +68,7 @@ private:
         int64_t recordPosition = 0;
         int64_t playbackPosition = 0;
         int64_t loopLength = 0;
+        std::array<bool, 128> activeRecordedNotes {};
     };
 
     struct AudioMemory
@@ -105,11 +112,17 @@ private:
     std::array<juce::MidiMessage, incomingCapacity> incomingMessages;
     juce::AbstractFifo incomingFifo { incomingCapacity };
     juce::MidiBuffer blockMidiOutput;
+    std::array<juce::MidiBuffer, midiMemoryCount> layerMidiBuffers;
     juce::AudioBuffer<float> synthMixBuffer;
-    juce::CriticalSection midiOutputLock;
-    juce::MidiBuffer pendingMidiOutput;
-
     std::atomic<float> audioDecay { 0.985f };
+    std::atomic<bool> saxStereoInput { false };
+    std::atomic<bool> audioRunning { false };
+    std::atomic<int> callbackInputChannels { 0 };
+    std::atomic<int> callbackOutputChannels { 0 };
+    std::atomic<float> saxInputLevel { 0.0f };
+    std::atomic<float> stereoOutputLevel { 0.0f };
+    std::atomic<bool> midiOverflowed { false };
+    std::atomic<int> droppedMidiMessages { 0 };
     double sampleRate = 48000.0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(EcosystemEngine)
