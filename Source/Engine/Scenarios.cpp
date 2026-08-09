@@ -1,6 +1,7 @@
 #include "Scenarios.h"
 
 #include <array>
+#include <cstddef>
 
 namespace
 {
@@ -247,5 +248,5 @@ int CommentoScenarios::wrapIndex(int index)
 
 const SoundScenario& CommentoScenarios::get(int index)
 {
-    return scenarios[static_cast<size_t>(wrapIndex(index))];
+    return scenarios[static_cast<std::size_t>(wrapIndex(index))];
 }
