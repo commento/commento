@@ -1,5 +1,7 @@
 #include "Model12AudioRouter.h"
 
+#include <array>
+
 int Model12AudioRouter::getPhysicalInputChannelCount() const
 {
     return physicalInputChannels.load();
@@ -38,11 +40,21 @@ void Model12AudioRouter::audioDeviceIOCallbackWithContext(
         }
     }
 
-    float* logicalOutputs[2] { nullptr, nullptr };
+    // The engine owns five named buses. Their physical Model 12 returns are:
+    // ambient 1/2, bass 5, and sax 7/8. Every other hardware output remains
+    // at the zeroes written above.
+    constexpr std::array<int, EcosystemEngine::logicalOutputBusCount> physicalMap {
+        0, 1, 4, 6, 7
+    };
+    float* logicalOutputs[EcosystemEngine::logicalOutputBusCount] {};
     const auto numLogicalOutputs = physicalOutputs != nullptr
-        ? juce::jmin(2, numPhysicalOutputs) : 0;
-    for (int channel = 0; channel < numLogicalOutputs; ++channel)
-        logicalOutputs[channel] = physicalOutputs[channel];
+        ? EcosystemEngine::logicalOutputBusCount : 0;
+    for (int bus = 0; bus < numLogicalOutputs; ++bus)
+    {
+        const auto physicalChannel = physicalMap[static_cast<size_t>(bus)];
+        if (juce::isPositiveAndBelow(physicalChannel, numPhysicalOutputs))
+            logicalOutputs[bus] = physicalOutputs[physicalChannel];
+    }
 
     engine.audioDeviceIOCallbackWithContext(
         logicalInputs, numLogicalInputs, logicalOutputs, numLogicalOutputs,

@@ -2,6 +2,8 @@
 
 #include <JuceHeader.h>
 #include "AmbientSynth.h"
+#include "SaxProcessor.h"
+#include "Scenarios.h"
 #include <array>
 #include <atomic>
 #include <memory>
@@ -12,6 +14,13 @@ class EcosystemEngine final : public juce::AudioIODeviceCallback
 public:
     static constexpr int midiMemoryCount = 4;
     static constexpr int memoryCount = 5;
+    static constexpr int bassLayerIndex = 0;
+    static constexpr int ambientLeftBus = 0;
+    static constexpr int ambientRightBus = 1;
+    static constexpr int bassBus = 2;
+    static constexpr int saxLeftBus = 3;
+    static constexpr int saxRightBus = 4;
+    static constexpr int logicalOutputBusCount = 5;
 
     EcosystemEngine();
 
@@ -30,7 +39,15 @@ public:
     [[nodiscard]] int getCallbackOutputChannelCount() const;
     [[nodiscard]] float getSaxInputLevel() const;
     [[nodiscard]] float getStereoOutputLevel() const;
+    [[nodiscard]] float getBassOutputLevel() const;
+    [[nodiscard]] float getSaxOutputLevel() const;
     [[nodiscard]] int getDroppedMidiMessageCount() const;
+    [[nodiscard]] static bool isLiveBassLayer(int memoryIndex);
+
+    void setScenarioIndex(int index);
+    [[nodiscard]] int getScenarioIndex() const;
+    void setBassEnabled(bool shouldBeEnabled);
+    [[nodiscard]] bool isBassEnabled() const;
 
     void setAudioDecay(float newDecay);
     [[nodiscard]] float getAudioDecay() const;
@@ -96,6 +113,7 @@ private:
 
     void applyMidiCommands(MidiMemory& memory, int channel, juce::MidiBuffer& output);
     void applyAudioCommands();
+    void applyScenarioIfNeeded();
     void recordIncomingMidi(int numSamples, juce::MidiBuffer& liveMidi);
     void renderMidiMemories(int numSamples, juce::MidiBuffer& output);
     void renderMidiSegment(MidiMemory& memory, int64_t segmentStart,
@@ -108,12 +126,15 @@ private:
     std::array<MidiMemory, midiMemoryCount> midiMemories;
     std::array<std::unique_ptr<AmbientSynth>, midiMemoryCount> internalSynths;
     AudioMemory audioMemory;
+    SaxProcessor saxProcessor;
 
     std::array<juce::MidiMessage, incomingCapacity> incomingMessages;
     juce::AbstractFifo incomingFifo { incomingCapacity };
     juce::MidiBuffer blockMidiOutput;
     std::array<juce::MidiBuffer, midiMemoryCount> layerMidiBuffers;
-    juce::AudioBuffer<float> synthMixBuffer;
+    juce::AudioBuffer<float> ambientSynthBuffer;
+    juce::AudioBuffer<float> bassSynthBuffer;
+    juce::AudioBuffer<float> saxRenderBuffer;
     std::atomic<float> audioDecay { 0.985f };
     std::atomic<bool> saxStereoInput { false };
     std::atomic<bool> audioRunning { false };
@@ -121,8 +142,14 @@ private:
     std::atomic<int> callbackOutputChannels { 0 };
     std::atomic<float> saxInputLevel { 0.0f };
     std::atomic<float> stereoOutputLevel { 0.0f };
+    std::atomic<float> bassOutputLevel { 0.0f };
+    std::atomic<float> saxOutputLevel { 0.0f };
     std::atomic<bool> midiOverflowed { false };
     std::atomic<int> droppedMidiMessages { 0 };
+    std::atomic<int> requestedScenario { 0 };
+    std::atomic<int> activeScenario { -1 };
+    std::atomic<bool> bassEnabled { true };
+    bool bassWasEnabled = true;
     double sampleRate = 48000.0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(EcosystemEngine)

@@ -36,17 +36,20 @@ public:
         const auto phase = engine.getPhase(index);
         const auto recording = engine.isRecording(index);
         const auto material = engine.hasMaterial(index);
+        const auto isBass = EcosystemEngine::isLiveBassLayer(index);
+        const auto bassActive = isBass && engine.isBassEnabled();
         const auto breathing = 1.0f + 0.035f * std::sin(static_cast<float>(animation * 2.0
                                                     + static_cast<double>(index)));
 
         juce::ColourGradient surface(
-            colour.withAlpha(recording ? 0.26f : (material ? 0.14f : 0.06f)),
+            colour.withAlpha(recording ? 0.26f
+                : (material || bassActive ? 0.14f : 0.06f)),
             bounds.getX(), bounds.getY(), juce::Colour(panel).darker(0.32f),
             bounds.getRight(), bounds.getBottom(), false);
         graphics.setGradientFill(surface);
         graphics.fillRoundedRectangle(bounds, 24.0f);
         graphics.setColour(recording ? juce::Colours::white.withAlpha(0.92f)
-                                     : colour.withAlpha(selected ? 0.95f : 0.34f));
+            : colour.withAlpha(selected || bassActive ? 0.95f : 0.34f));
         graphics.drawRoundedRectangle(bounds.reduced(selected ? 3.0f : 2.0f), 22.0f,
                                       selected ? 6.0f : 2.5f);
 
@@ -64,7 +67,8 @@ public:
         graphics.fillEllipse(juce::Rectangle<float>(radius * 2.0f * breathing,
                                                      radius * 2.0f * breathing)
                                  .withCentre(centre));
-        graphics.setColour(colour.withAlpha(material || recording ? 0.70f : 0.20f));
+        graphics.setColour(colour.withAlpha(
+            material || recording || bassActive ? 0.70f : 0.20f));
         graphics.drawEllipse(juce::Rectangle<float>(radius * 2.0f, radius * 2.0f)
                                  .withCentre(centre), selected ? 5.0f : 3.0f);
 
@@ -91,7 +95,11 @@ public:
                                 : juce::Justification::centred, false);
 
         juce::String detail;
-        if (recording && material)
+        if (isBass)
+            detail = engine.isBassEnabled()
+                ? "ATTIVO / MIDI 5 -> CH AUDIO 5"
+                : "MUTO / TOCCA ATTIVA BASSO";
+        else if (recording && material)
             detail = "NUTRE  /  " + juce::String(engine.getLengthSeconds(index), 1) + " s";
         else if (recording)
             detail = "REGISTRA  /  " + juce::String(engine.getLengthSeconds(index), 1) + " s";
@@ -100,12 +108,23 @@ public:
         else
             detail = index < EcosystemEngine::midiMemoryCount
                 ? "VUOTA  /  MIDI " + juce::String(engine.getMidiChannelForMemory(index))
-                : "VUOTA  /  USB 7/8";
+                : "VUOTA  /  AUDIO 7/8";
 
         graphics.setColour(recording ? juce::Colours::white : juce::Colour(quietText));
-        graphics.setFont(juce::FontOptions(isSax ? 24.0f : 19.0f,
+        graphics.setFont(juce::FontOptions(isSax ? 24.0f : (isBass ? 16.0f : 19.0f),
                                            juce::Font::plain));
         graphics.drawText(detail, textArea.removeFromTop(isSax ? 44.0f : 34.0f),
+                          isSax ? juce::Justification::centredLeft
+                                : juce::Justification::centred, false);
+
+        const auto& scenario = CommentoScenarios::get(engine.getScenarioIndex());
+        const auto timbre = isSax
+            ? juce::String("SAX: ") + scenario.sax.name
+            : juce::String(scenario.layers[static_cast<size_t>(index)].name);
+        graphics.setColour(colour.withAlpha(0.76f));
+        graphics.setFont(juce::FontOptions(isSax ? 18.0f : 16.0f,
+                                           juce::Font::bold));
+        graphics.drawText(timbre, textArea.removeFromTop(28.0f),
                           isSax ? juce::Justification::centredLeft
                                 : juce::Justification::centred, false);
 
@@ -147,15 +166,31 @@ MainComponent::MainComponent()
 {
     setOpaque(true);
 
+    juce::PropertiesFile::Options propertyOptions;
+    propertyOptions.applicationName = "Commento";
+    propertyOptions.filenameSuffix = "settings";
+    propertyOptions.folderName = "Commento";
+    propertyOptions.osxLibrarySubFolder = "Application Support";
+    properties.setStorageParameters(propertyOptions);
+
     titleLabel.setText("COMMENTO", juce::dontSendNotification);
     titleLabel.setFont(juce::FontOptions(34.0f, juce::Font::bold));
     titleLabel.setColour(juce::Label::textColourId, juce::Colour(paleText));
     addAndMakeVisible(titleLabel);
 
-    subtitleLabel.setText("quattro organismi e un respiro", juce::dontSendNotification);
-    subtitleLabel.setFont(juce::FontOptions(17.0f));
+    subtitleLabel.setText("tre memorie, un basso e un respiro",
+                          juce::dontSendNotification);
+    subtitleLabel.setFont(juce::FontOptions(15.0f));
     subtitleLabel.setColour(juce::Label::textColourId, juce::Colour(quietText));
     addAndMakeVisible(subtitleLabel);
+
+    scenarioLabel.setJustificationType(juce::Justification::centred);
+    scenarioLabel.setFont(juce::FontOptions(19.0f, juce::Font::bold));
+    scenarioLabel.setColour(juce::Label::textColourId, juce::Colour(paleText));
+    scenarioLabel.setColour(juce::Label::backgroundColourId, juce::Colour(panel));
+    addAndMakeVisible(scenarioLabel);
+    addAndMakeVisible(previousScenarioButton);
+    addAndMakeVisible(nextScenarioButton);
 
     statusLabel.setJustificationType(juce::Justification::centredRight);
     statusLabel.setColour(juce::Label::textColourId, juce::Colour(quietText));
@@ -171,7 +206,7 @@ MainComponent::MainComponent()
     }
 
     const std::array<juce::String, EcosystemEngine::memoryCount> names {
-        "I - MAREA", "II - NEBBIA", "III - RADICE", "IV - SCINTILLA", "RESPIRO"
+        "I - BASSO LIVE", "II - MAREA", "III - RADICE", "IV - SCINTILLA", "RESPIRO"
     };
     for (int index = 0; index < EcosystemEngine::memoryCount; ++index)
     {
@@ -198,6 +233,8 @@ MainComponent::MainComponent()
     styleButton(model12RoutingButton, juce::Colour(0xff5da8a1));
     styleButton(keyStepRoutingButton, juce::Colour(0xff8aa6d6));
     styleButton(saxModeButton, memoryColours[4]);
+    styleButton(previousScenarioButton, juce::Colour(0xff8299bd));
+    styleButton(nextScenarioButton, juce::Colour(0xff8299bd));
     addAndMakeVisible(recordButton);
     addAndMakeVisible(clearButton);
     addAndMakeVisible(settingsButton);
@@ -218,7 +255,7 @@ MainComponent::MainComponent()
     hardwareRouteLabel.setFont(juce::FontOptions(22.0f));
     hardwareRouteLabel.setColour(juce::Label::textColourId, juce::Colour(paleText));
     hardwareRouteLabel.setText(
-        "MODEL 12\n12 ingressi / 10 uscite\nSax 7/8 -> RESPIRO\nMaster -> USB 1/2",
+        "MODEL 12 / AUDIO\nAmbiente -> canali 1/2\nBasso -> canale 5\nSax in + out -> canali 7/8",
         juce::dontSendNotification);
     addChildComponent(hardwareRouteLabel);
 
@@ -226,7 +263,7 @@ MainComponent::MainComponent()
     midiMapLabel.setFont(juce::FontOptions(22.0f));
     midiMapLabel.setColour(juce::Label::textColourId, juce::Colour(paleText));
     midiMapLabel.setText(
-        "KEYSTEP PRO\nI - 5    II - 2    III - 3    IV - 4",
+        "KEYSTEP PRO\nBASSO LIVE - MIDI 5\nLOOP AMBIENT - MIDI 2 / 3 / 4",
         juce::dontSendNotification);
     addChildComponent(midiMapLabel);
 
@@ -237,7 +274,10 @@ MainComponent::MainComponent()
 
     recordButton.onClick = [this]
     {
-        engine.toggleRecording(selectedMemory);
+        if (EcosystemEngine::isLiveBassLayer(selectedMemory))
+            engine.setBassEnabled(! engine.isBassEnabled());
+        else
+            engine.toggleRecording(selectedMemory);
         updateControls();
     };
     clearButton.onStateChange = [this]
@@ -254,6 +294,8 @@ MainComponent::MainComponent()
         }
     };
     settingsButton.onClick = [this] { toggleSettings(); };
+    previousScenarioButton.onClick = [this] { changeScenario(-1); };
+    nextScenarioButton.onClick = [this] { changeScenario(1); };
     model12RoutingButton.onClick = [this] { configureModel12Routing(); };
     keyStepRoutingButton.onClick = [this] { configureKeyStepMidi(); };
     saxModeButton.onClick = [this]
@@ -277,6 +319,9 @@ MainComponent::MainComponent()
     addAndMakeVisible(decaySlider);
     addAndMakeVisible(decayLabel);
 
+    const auto savedScenario = properties.getUserSettings() != nullptr
+        ? properties.getUserSettings()->getIntValue("scenario", 0) : 0;
+    applyScenario(savedScenario);
     selectMemory(0);
     setSize(1280, 800);
     initialiseAudio();
@@ -286,8 +331,43 @@ MainComponent::MainComponent()
 MainComponent::~MainComponent()
 {
     juce::Timer::stopTimer();
+    properties.saveIfNeeded();
     deviceManager.removeMidiInputDeviceCallback({}, this);
     deviceManager.removeAudioCallback(&audioRouter);
+}
+
+void MainComponent::changeScenario(int delta)
+{
+    applyScenario(engine.getScenarioIndex() + delta);
+}
+
+void MainComponent::applyScenario(int index)
+{
+    const auto wrapped = CommentoScenarios::wrapIndex(index);
+    const auto& scenario = CommentoScenarios::get(wrapped);
+    engine.setScenarioIndex(wrapped);
+    engine.setAudioDecay(scenario.sax.loopDecay);
+    decaySlider.setValue(scenario.sax.loopDecay, juce::dontSendNotification);
+    if (auto* settings = properties.getUserSettings())
+    {
+        settings->setValue("scenario", wrapped);
+        settings->saveIfNeeded();
+    }
+    updateScenarioLabels();
+    for (auto& orb : orbs)
+        if (orb != nullptr)
+            orb->repaint();
+}
+
+void MainComponent::updateScenarioLabels()
+{
+    const auto index = engine.getScenarioIndex();
+    const auto& scenario = CommentoScenarios::get(index);
+    scenarioLabel.setText(
+        juce::String(index + 1).paddedLeft('0', 2) + "/"
+            + juce::String(CommentoScenarios::count) + "  " + scenario.name
+            + "\n" + scenario.character,
+        juce::dontSendNotification);
 }
 
 void MainComponent::initialiseAudio()
@@ -435,7 +515,7 @@ void MainComponent::configureModel12Routing()
     setup.inputDeviceName = inputDeviceName;
     setup.outputDeviceName = outputDeviceName;
     setup.sampleRate = 48000.0;
-    setup.bufferSize = 256;
+    setup.bufferSize = 512;
     setup.useDefaultInputChannels = false;
     setup.useDefaultOutputChannels = false;
     setup.inputChannels.clear();
@@ -482,7 +562,7 @@ void MainComponent::configureModel12Routing()
     connectionStatusLabel.setColour(juce::Label::textColourId,
                                     juce::Colour(0xff91e5c4));
     connectionStatusLabel.setText(
-        "MODEL 12 pronta: 48 kHz / 256  |  SAX 7+8  |  USCITA 1+2",
+        "MODEL 12 pronta: 48 kHz / 512  |  AUDIO 1/2 + 5 + 7/8",
         juce::dontSendNotification);
 }
 
@@ -577,8 +657,12 @@ void MainComponent::updateHardwareIndicators()
         const auto xruns = device != nullptr ? device->getXRunCount() : -1;
         const auto inputDb = juce::Decibels::gainToDecibels(
             engine.getSaxInputLevel(), -60.0f);
-        const auto outputDb = juce::Decibels::gainToDecibels(
+        const auto ambientDb = juce::Decibels::gainToDecibels(
             engine.getStereoOutputLevel(), -60.0f);
+        const auto bassDb = juce::Decibels::gainToDecibels(
+            engine.getBassOutputLevel(), -60.0f);
+        const auto saxDb = juce::Decibels::gainToDecibels(
+            engine.getSaxOutputLevel(), -60.0f);
         connectionStatusLabel.setText(
             "ATTIVA / " + juce::String(device != nullptr
                                            ? device->getCurrentSampleRate() / 1000.0 : 0.0, 1)
@@ -591,8 +675,10 @@ void MainComponent::updateHardwareIndicators()
             "MODEL 12\nCallback fisico: "
                 + juce::String(audioRouter.getPhysicalInputChannelCount()) + " in / "
                 + juce::String(audioRouter.getPhysicalOutputChannelCount()) + " out\n"
-                + "Sax 7/8 -> RESPIRO   " + juce::String(inputDb, 1) + " dB\n"
-                + "Master -> USB 1/2   " + juce::String(outputDb, 1) + " dB",
+                + "Ambiente -> AUDIO 1/2   " + juce::String(ambientDb, 1) + " dB\n"
+                + "Basso -> AUDIO 5   " + juce::String(bassDb, 1) + " dB\n"
+                + "Sax IN 7/8 " + juce::String(inputDb, 1)
+                + " / OUT 7/8 " + juce::String(saxDb, 1) + " dB",
             juce::dontSendNotification);
     }
 }
@@ -612,27 +698,38 @@ void MainComponent::selectMemory(int index)
 
 void MainComponent::updateControls()
 {
+    const auto isBass = EcosystemEngine::isLiveBassLayer(selectedMemory);
     const auto recording = engine.isRecording(selectedMemory);
     const auto material = engine.hasMaterial(selectedMemory);
-    if (recording)
+    if (isBass)
+        recordButton.setButtonText(engine.isBassEnabled()
+                                       ? "SPEGNI BASSO" : "ATTIVA BASSO");
+    else if (recording)
         recordButton.setButtonText(material ? "FERMA NUTRIMENTO" : "CHIUDI IL CICLO");
     else if (material)
         recordButton.setButtonText(selectedMemory == EcosystemEngine::midiMemoryCount
                                        ? "NUTRI" : "RISCRIVI");
     else
         recordButton.setButtonText("SEMINA");
-    recordButton.setToggleState(recording, juce::dontSendNotification);
-    clearButton.setEnabled(recording || material);
+    recordButton.setToggleState(isBass ? engine.isBassEnabled() : recording,
+                                juce::dontSendNotification);
+    clearButton.setEnabled(! isBass && (recording || material));
     if (! clearButton.isDown())
-        clearButton.setButtonText("TIENI PER DISSOLVERE");
+        clearButton.setButtonText(isBass ? "NESSUN LOOP SUL BASSO"
+                                         : "TIENI PER DISSOLVERE");
 
     saxModeButton.setButtonText(engine.isSaxStereoInput()
                                    ? "STEREO 7/8" : "MONO DA INGRESSO 7");
 
-    const auto type = selectedMemory < EcosystemEngine::midiMemoryCount
-        ? "MIDI " + juce::String(engine.getMidiChannelForMemory(selectedMemory))
-        : "SAX / AUDIO 7+8";
-    const auto count = selectedMemory < EcosystemEngine::midiMemoryCount
+    decaySlider.setValue(engine.getAudioDecay(), juce::dontSendNotification);
+
+    const auto type = isBass
+        ? "BASSO LIVE / MIDI 5 -> AUDIO CH 5"
+        : (selectedMemory < EcosystemEngine::midiMemoryCount
+            ? "LOOP MIDI " + juce::String(engine.getMidiChannelForMemory(selectedMemory))
+            : "SAX / IN+OUT AUDIO 7+8");
+    const auto count = selectedMemory > EcosystemEngine::bassLayerIndex
+        && selectedMemory < EcosystemEngine::midiMemoryCount
         ? "  -  " + juce::String(engine.getEventCount(selectedMemory)) + " eventi" : "";
     statusLabel.setText(type + count, juce::dontSendNotification);
 }
@@ -686,11 +783,15 @@ void MainComponent::resized()
 {
     auto bounds = getLocalBounds().reduced(38);
     auto header = bounds.removeFromTop(82);
-    titleLabel.setBounds(header.removeFromLeft(245));
-    subtitleLabel.setBounds(header.removeFromLeft(325));
     midiStatusLabel.setBounds(header.removeFromRight(180).reduced(5, 16));
     audioStatusLabel.setBounds(header.removeFromRight(205).reduced(5, 16));
-    statusLabel.setBounds(header.reduced(8, 0));
+    auto titleArea = header.removeFromLeft(190);
+    titleLabel.setBounds(titleArea.removeFromTop(49));
+    subtitleLabel.setBounds(titleArea);
+    previousScenarioButton.setBounds(header.removeFromLeft(70).reduced(5, 10));
+    scenarioLabel.setBounds(header.removeFromLeft(300).reduced(5, 7));
+    nextScenarioButton.setBounds(header.removeFromLeft(70).reduced(5, 10));
+    statusLabel.setBounds(header.reduced(6, 0));
 
     auto footer = bounds.removeFromBottom(108);
     settingsButton.setBounds(footer.removeFromLeft(230).reduced(4, 14));

@@ -5,11 +5,17 @@
 
 EcosystemEngine::EcosystemEngine()
 {
+    const auto& initialScenario = CommentoScenarios::get(0);
     for (int index = 0; index < midiMemoryCount; ++index)
     {
         midiMemories[static_cast<size_t>(index)].events.reserve(maximumMidiEvents + 128);
         internalSynths[static_cast<size_t>(index)] = std::make_unique<AmbientSynth>(index);
+        internalSynths[static_cast<size_t>(index)]->setPatch(
+            initialScenario.layers[static_cast<size_t>(index)]);
     }
+    saxProcessor.setPatch(initialScenario.sax);
+    audioDecay.store(initialScenario.sax.loopDecay);
+    activeScenario.store(0);
 }
 
 void EcosystemEngine::enqueueMidiMessage(const juce::MidiMessage& message)
@@ -36,7 +42,8 @@ void EcosystemEngine::enqueueMidiMessage(const juce::MidiMessage& message)
 
 void EcosystemEngine::toggleRecording(int memoryIndex)
 {
-    if (juce::isPositiveAndBelow(memoryIndex, midiMemoryCount))
+    if (juce::isPositiveAndBelow(memoryIndex, midiMemoryCount)
+        && ! isLiveBassLayer(memoryIndex))
     {
         auto& requested = midiMemories[static_cast<size_t>(memoryIndex)].recordingRequested;
         requested.store(! requested.load());
@@ -50,7 +57,8 @@ void EcosystemEngine::toggleRecording(int memoryIndex)
 
 void EcosystemEngine::clearMemory(int memoryIndex)
 {
-    if (juce::isPositiveAndBelow(memoryIndex, midiMemoryCount))
+    if (juce::isPositiveAndBelow(memoryIndex, midiMemoryCount)
+        && ! isLiveBassLayer(memoryIndex))
         midiMemories[static_cast<size_t>(memoryIndex)].clearRequested.store(true);
     else if (memoryIndex == midiMemoryCount)
         audioMemory.clearRequested.store(true);
@@ -58,6 +66,8 @@ void EcosystemEngine::clearMemory(int memoryIndex)
 
 bool EcosystemEngine::isRecording(int memoryIndex) const
 {
+    if (isLiveBassLayer(memoryIndex))
+        return false;
     if (juce::isPositiveAndBelow(memoryIndex, midiMemoryCount))
         return midiMemories[static_cast<size_t>(memoryIndex)].recordingForDisplay.load();
     return memoryIndex == midiMemoryCount && audioMemory.recordingForDisplay.load();
@@ -65,6 +75,8 @@ bool EcosystemEngine::isRecording(int memoryIndex) const
 
 bool EcosystemEngine::hasMaterial(int memoryIndex) const
 {
+    if (isLiveBassLayer(memoryIndex))
+        return false;
     if (juce::isPositiveAndBelow(memoryIndex, midiMemoryCount))
         return midiMemories[static_cast<size_t>(memoryIndex)].containsMaterial.load();
     return memoryIndex == midiMemoryCount && audioMemory.containsMaterial.load();
@@ -86,6 +98,8 @@ double EcosystemEngine::getLengthSeconds(int memoryIndex) const
 
 int EcosystemEngine::getEventCount(int memoryIndex) const
 {
+    if (isLiveBassLayer(memoryIndex))
+        return 0;
     if (juce::isPositiveAndBelow(memoryIndex, midiMemoryCount))
         return midiMemories[static_cast<size_t>(memoryIndex)].eventCount.load();
     return 0;
@@ -122,9 +136,44 @@ float EcosystemEngine::getStereoOutputLevel() const
     return stereoOutputLevel.load();
 }
 
+float EcosystemEngine::getBassOutputLevel() const
+{
+    return bassOutputLevel.load();
+}
+
+float EcosystemEngine::getSaxOutputLevel() const
+{
+    return saxOutputLevel.load();
+}
+
 int EcosystemEngine::getDroppedMidiMessageCount() const
 {
     return droppedMidiMessages.load();
+}
+
+bool EcosystemEngine::isLiveBassLayer(int memoryIndex)
+{
+    return memoryIndex == bassLayerIndex;
+}
+
+void EcosystemEngine::setScenarioIndex(int index)
+{
+    requestedScenario.store(CommentoScenarios::wrapIndex(index));
+}
+
+int EcosystemEngine::getScenarioIndex() const
+{
+    return requestedScenario.load();
+}
+
+void EcosystemEngine::setBassEnabled(bool shouldBeEnabled)
+{
+    bassEnabled.store(shouldBeEnabled);
+}
+
+bool EcosystemEngine::isBassEnabled() const
+{
+    return bassEnabled.load();
 }
 
 int EcosystemEngine::memoryIndexForMidiChannel(int midiChannel)
@@ -188,13 +237,26 @@ void EcosystemEngine::prepare(double newSampleRate, int maximumBlockSize)
         audioMemory.buffer.clear();
     }
 
-    synthMixBuffer.setSize(2, juce::jmax(8192, maximumBlockSize),
-                           false, true, false);
+    const auto renderCapacity = juce::jmax(8192, maximumBlockSize);
+    ambientSynthBuffer.setSize(2, renderCapacity, false, true, false);
+    bassSynthBuffer.setSize(2, renderCapacity, false, true, false);
+    saxRenderBuffer.setSize(2, renderCapacity, false, true, false);
     blockMidiOutput.ensureSize(128 * 1024);
     for (auto& midi : layerMidiBuffers)
         midi.ensureSize(64 * 1024);
     for (auto& synth : internalSynths)
-        synth->prepare(sampleRate);
+        synth->prepare(sampleRate, maximumBlockSize);
+    saxProcessor.prepare(sampleRate, maximumBlockSize);
+
+    const auto scenarioIndex = activeScenario.load();
+    if (scenarioIndex >= 0)
+    {
+        const auto& scenario = CommentoScenarios::get(scenarioIndex);
+        for (int index = 0; index < midiMemoryCount; ++index)
+            internalSynths[static_cast<size_t>(index)]->setPatch(
+                scenario.layers[static_cast<size_t>(index)]);
+        saxProcessor.setPatch(scenario.sax);
+    }
 }
 
 void EcosystemEngine::audioDeviceStopped()
@@ -204,6 +266,8 @@ void EcosystemEngine::audioDeviceStopped()
     callbackOutputChannels.store(0);
     saxInputLevel.store(0.0f);
     stereoOutputLevel.store(0.0f);
+    bassOutputLevel.store(0.0f);
+    saxOutputLevel.store(0.0f);
     for (int index = 0; index < midiMemoryCount; ++index)
     {
         auto& memory = midiMemories[static_cast<size_t>(index)];
@@ -265,20 +329,17 @@ void EcosystemEngine::audioDeviceIOCallbackWithContext(
         for (const auto channel : midiChannels)
             blockMidiOutput.addEvent(juce::MidiMessage::allNotesOff(channel), 0);
 
-    for (int index = 0; index < midiMemoryCount; ++index)
+    applyScenarioIfNeeded();
+    for (int index = 1; index < midiMemoryCount; ++index)
         applyMidiCommands(midiMemories[static_cast<size_t>(index)],
                           midiChannels[static_cast<size_t>(index)], blockMidiOutput);
     applyAudioCommands();
     recordIncomingMidi(numSamples, blockMidiOutput);
     renderMidiMemories(numSamples, blockMidiOutput);
-    // USB multichannel devices such as Model 12 may force ALSA/JUCE to open
-    // all hardware playback channels. Commento deliberately writes only to
-    // USB outputs 1+2; channels 3-10 remain at the zeroes written above.
-    const auto stereoOutputChannels = juce::jmin(2, numOutputChannels);
-    renderInternalSynths(outputChannelData, stereoOutputChannels,
+    renderInternalSynths(outputChannelData, numOutputChannels,
                          numSamples, blockMidiOutput);
     renderAudioMemory(inputChannelData, numInputChannels,
-                      outputChannelData, stereoOutputChannels, numSamples);
+                      outputChannelData, numOutputChannels, numSamples);
 
     float inputPeak = 0.0f;
     const auto saxLeftChannel = 0;
@@ -299,8 +360,9 @@ void EcosystemEngine::audioDeviceIOCallbackWithContext(
     }
     saxInputLevel.store(juce::jmax(inputPeak, saxInputLevel.load() * 0.86f));
 
-    float outputPeak = 0.0f;
-    for (int channel = 0; channel < stereoOutputChannels; ++channel)
+    float ambientPeak = 0.0f;
+    for (int channel = ambientLeftBus;
+         channel <= ambientRightBus && channel < numOutputChannels; ++channel)
     {
         if (outputChannelData[channel] == nullptr)
             continue;
@@ -308,11 +370,50 @@ void EcosystemEngine::audioDeviceIOCallbackWithContext(
         for (int sample = 0; sample < numSamples; ++sample)
         {
             auto& value = outputChannelData[channel][sample];
-            value = std::tanh(value * 0.88f);
-            outputPeak = juce::jmax(outputPeak, std::abs(value));
+            value = std::tanh(value * 0.82f) * 0.92f;
+            ambientPeak = juce::jmax(ambientPeak, std::abs(value));
         }
     }
-    stereoOutputLevel.store(juce::jmax(outputPeak, stereoOutputLevel.load() * 0.86f));
+    stereoOutputLevel.store(juce::jmax(
+        ambientPeak, stereoOutputLevel.load() * 0.86f));
+
+    float bassPeak = 0.0f;
+    if (numOutputChannels > bassBus && outputChannelData[bassBus] != nullptr)
+    {
+        for (int sample = 0; sample < numSamples; ++sample)
+        {
+            auto& value = outputChannelData[bassBus][sample];
+            value = std::tanh(value * 0.88f) * 0.9f;
+            bassPeak = juce::jmax(bassPeak, std::abs(value));
+        }
+    }
+    bassOutputLevel.store(juce::jmax(
+        bassPeak, bassOutputLevel.load() * 0.86f));
+
+    float saxPeak = 0.0f;
+    for (int channel = saxLeftBus;
+         channel <= saxRightBus && channel < numOutputChannels; ++channel)
+        if (outputChannelData[channel] != nullptr)
+            for (int sample = 0; sample < numSamples; ++sample)
+                saxPeak = juce::jmax(saxPeak,
+                    std::abs(outputChannelData[channel][sample]));
+    saxOutputLevel.store(juce::jmax(
+        saxPeak, saxOutputLevel.load() * 0.86f));
+}
+
+void EcosystemEngine::applyScenarioIfNeeded()
+{
+    const auto desired = CommentoScenarios::wrapIndex(requestedScenario.load());
+    if (desired == activeScenario.load())
+        return;
+
+    const auto& scenario = CommentoScenarios::get(desired);
+    for (int index = 0; index < midiMemoryCount; ++index)
+        internalSynths[static_cast<size_t>(index)]->setPatch(
+            scenario.layers[static_cast<size_t>(index)]);
+    saxProcessor.setPatch(scenario.sax);
+    audioDecay.store(scenario.sax.loopDecay);
+    activeScenario.store(desired);
 }
 
 void EcosystemEngine::applyMidiCommands(MidiMemory& memory, int channel,
@@ -475,9 +576,11 @@ void EcosystemEngine::renderInternalSynths(float* const* outputs, int outputChan
     if (outputChannels <= 0)
         return;
 
-    if (synthMixBuffer.getNumSamples() < numSamples)
-        synthMixBuffer.setSize(2, numSamples, false, false, true);
-    synthMixBuffer.clear(0, numSamples);
+    if (ambientSynthBuffer.getNumSamples() < numSamples
+        || bassSynthBuffer.getNumSamples() < numSamples)
+        return;
+    ambientSynthBuffer.clear(0, numSamples);
+    bassSynthBuffer.clear(0, numSamples);
 
     for (int layer = 0; layer < midiMemoryCount; ++layer)
     {
@@ -488,23 +591,49 @@ void EcosystemEngine::renderInternalSynths(float* const* outputs, int outputChan
                 == midiChannels[static_cast<size_t>(layer)])
                 layerMidi.addEvent(metadata.getMessage(), metadata.samplePosition);
 
+        if (layer == bassLayerIndex)
+        {
+            const auto enabled = bassEnabled.load();
+            if (! enabled)
+            {
+                layerMidi.clear();
+                if (bassWasEnabled)
+                    layerMidi.addEvent(juce::MidiMessage::allNotesOff(
+                                           midiChannels[static_cast<size_t>(layer)]), 0);
+            }
+            bassWasEnabled = enabled;
+        }
+
+        auto& destination = layer == bassLayerIndex
+            ? bassSynthBuffer : ambientSynthBuffer;
         internalSynths[static_cast<size_t>(layer)]->render(
-            synthMixBuffer, layerMidi, 0, numSamples);
+            destination, layerMidi, 0, numSamples);
     }
 
-    for (int channel = 0; channel < outputChannels; ++channel)
+    for (int channel = ambientLeftBus;
+         channel <= ambientRightBus && channel < outputChannels; ++channel)
     {
         if (outputs[channel] == nullptr)
             continue;
-        const auto synthChannel = juce::jmin(channel, synthMixBuffer.getNumChannels() - 1);
         juce::FloatVectorOperations::add(outputs[channel],
-            synthMixBuffer.getReadPointer(synthChannel), numSamples);
+            ambientSynthBuffer.getReadPointer(channel), numSamples);
     }
+
+    if (outputChannels > bassBus && outputs[bassBus] != nullptr)
+        for (int sample = 0; sample < numSamples; ++sample)
+            outputs[bassBus][sample] += 0.5f
+                * (bassSynthBuffer.getSample(0, sample)
+                   + bassSynthBuffer.getSample(1, sample));
+    else
+        for (int channel = 0; channel < juce::jmin(2, outputChannels); ++channel)
+            if (outputs[channel] != nullptr)
+                juce::FloatVectorOperations::add(outputs[channel],
+                    bassSynthBuffer.getReadPointer(channel), numSamples);
 }
 
 void EcosystemEngine::renderMidiMemories(int numSamples, juce::MidiBuffer& output)
 {
-    for (int index = 0; index < midiMemoryCount; ++index)
+    for (int index = 1; index < midiMemoryCount; ++index)
     {
         auto& memory = midiMemories[static_cast<size_t>(index)];
         if (memory.recordingActive || memory.loopLength <= 0 || memory.events.empty())
@@ -552,9 +681,11 @@ void EcosystemEngine::renderAudioMemory(
     const float* const* inputs, int inputChannels,
     float* const* outputs, int outputChannels, int numSamples)
 {
-    if (audioMemory.buffer.getNumSamples() == 0)
+    if (audioMemory.buffer.getNumSamples() == 0
+        || saxRenderBuffer.getNumSamples() < numSamples)
         return;
 
+    saxRenderBuffer.clear(0, numSamples);
     const auto maximumLength = static_cast<int64_t>(audioMemory.buffer.getNumSamples());
     const auto decay = audioDecay.load();
     const auto rightInputChannel = juce::jmin(1, inputChannels - 1);
@@ -574,6 +705,12 @@ void EcosystemEngine::renderAudioMemory(
 
     for (int sample = 0; sample < numSamples; ++sample)
     {
+        // Channels 7/8 on the Model 12 are used as PC returns, therefore the
+        // live sax is monitored here with deliberate headroom.
+        for (int channel = 0; channel < 2; ++channel)
+            saxRenderBuffer.addSample(channel, sample,
+                                      readInput(channel, sample) * 0.58f);
+
         if (audioMemory.recordingActive && audioMemory.initialCapture)
         {
             if (audioMemory.writePosition >= maximumLength)
@@ -585,7 +722,7 @@ void EcosystemEngine::renderAudioMemory(
             {
                 const auto input = readInput(channel, sample);
                 audioMemory.buffer.setSample(channel,
-                    static_cast<int>(audioMemory.writePosition), input);
+                    static_cast<int>(audioMemory.writePosition), input * 0.72f);
             }
             ++audioMemory.writePosition;
             continue;
@@ -595,26 +732,35 @@ void EcosystemEngine::renderAudioMemory(
             continue;
 
         const auto bufferPosition = static_cast<int>(audioMemory.playbackPosition);
-        for (int channel = 0; channel < outputChannels; ++channel)
+        for (int channel = 0; channel < 2; ++channel)
         {
-            if (outputs[channel] == nullptr)
-                continue;
-            const auto memoryChannel = juce::jmin(channel,
-                audioMemory.buffer.getNumChannels() - 1);
+            const auto memoryChannel = channel;
             auto loopSample = audioMemory.buffer.getSample(memoryChannel, bufferPosition);
 
             if (audioMemory.recordingActive)
             {
                 const auto input = readInput(memoryChannel, sample);
-                loopSample = loopSample * decay + input;
+                const auto overdub = loopSample * decay + input * 0.32f;
+                loopSample = std::tanh(overdub * 0.82f) / std::tanh(0.82f);
                 audioMemory.buffer.setSample(memoryChannel, bufferPosition,
-                                             juce::jlimit(-1.0f, 1.0f, loopSample));
+                                             loopSample);
             }
-            outputs[channel][sample] += loopSample * 0.82f;
+            saxRenderBuffer.addSample(channel, sample, loopSample * 0.72f);
         }
 
         audioMemory.playbackPosition = (audioMemory.playbackPosition + 1)
                                        % audioMemory.loopLength;
+    }
+
+    saxProcessor.process(saxRenderBuffer, numSamples);
+    if (outputChannels > saxRightBus)
+    {
+        if (outputs[saxLeftBus] != nullptr)
+            juce::FloatVectorOperations::add(outputs[saxLeftBus],
+                saxRenderBuffer.getReadPointer(0), numSamples);
+        if (outputs[saxRightBus] != nullptr)
+            juce::FloatVectorOperations::add(outputs[saxRightBus],
+                saxRenderBuffer.getReadPointer(1), numSamples);
     }
 
     if (audioMemory.recordingActive && audioMemory.initialCapture)

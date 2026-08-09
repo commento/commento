@@ -31,6 +31,9 @@ private:
     void configureKeyStepMidi();
     void updateHardwareIndicators();
     void updateClearHold();
+    void changeScenario(int delta);
+    void applyScenario(int index);
+    void updateScenarioLabels();
 
     EcosystemEngine engine;
     Model12AudioRouter audioRouter { engine };
@@ -39,6 +42,9 @@ private:
 
     juce::Label titleLabel;
     juce::Label subtitleLabel;
+    juce::TextButton previousScenarioButton { "<" };
+    juce::TextButton nextScenarioButton { ">" };
+    juce::Label scenarioLabel;
     juce::Label statusLabel;
     juce::Label audioStatusLabel;
     juce::Label midiStatusLabel;
@@ -54,6 +60,7 @@ private:
     juce::TextButton saxModeButton { "MONO DA INGRESSO 7" };
     juce::Slider decaySlider;
     juce::Label decayLabel;
+    juce::ApplicationProperties properties;
 
     int selectedMemory = 0;
     bool settingsVisible = false;
