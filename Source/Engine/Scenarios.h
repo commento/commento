@@ -65,17 +65,28 @@ struct SaxPatch
     float loopDecay = 0.965f;
 };
 
+struct SaxLoopKeyboardPatch
+{
+    bool enabled = false;
+    int rootNote = 60;
+    float attackSeconds = 0.010f;
+    float releaseSeconds = 0.180f;
+    float level = 0.70f;
+    float grainMilliseconds = 64.0f;
+};
+
 struct SoundScenario
 {
     const char* name = "";
     const char* character = "";
     std::array<SynthPatch, 4> layers;
     SaxPatch sax;
+    SaxLoopKeyboardPatch saxLoopKeyboard;
 };
 
 namespace CommentoScenarios
 {
-constexpr int count = 10;
+constexpr int count = 14;
 
 [[nodiscard]] int wrapIndex(int index);
 [[nodiscard]] const SoundScenario& get(int index);

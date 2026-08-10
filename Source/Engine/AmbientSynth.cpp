@@ -529,6 +529,11 @@ void AmbientSynth::setDelayLevel(float newLevel) noexcept
         delayLevel.setTargetValue(requestedDelayLevel);
 }
 
+void AmbientSynth::allNotesOff()
+{
+    synthesiser.allNotesOff(0, false);
+}
+
 void AmbientSynth::updateEffectTargets(bool immediately)
 {
     const auto resetValue = [this, immediately](juce::SmoothedValue<float>& value,

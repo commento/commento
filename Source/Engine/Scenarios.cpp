@@ -149,6 +149,101 @@ SynthPatch makeAir(const char* name, float attack, float release,
     return patch;
 }
 
+SynthPatch makeDrone(const char* name, OscillatorModel model, int transpose,
+                     float cutoff, float pan, float delayMs, float movement,
+                     float level, float noise = 0.0f)
+{
+    SynthPatch patch;
+    patch.name = name;
+    patch.model = model;
+    patch.transposeSemitones = transpose;
+    patch.detuneCents = 11.0f + movement * 18.0f;
+    patch.attackSeconds = 2.8f + movement * 7.0f;
+    patch.decaySeconds = 4.0f;
+    patch.sustain = 0.91f;
+    patch.releaseSeconds = 13.0f + movement * 12.0f;
+    patch.cutoffHz = cutoff;
+    patch.keyTrack = 0.32f;
+    patch.drive = 1.04f;
+    patch.harmonicMix = 0.30f;
+    patch.noiseMix = noise;
+    patch.lfoRateHz = 0.012f + movement * 0.055f;
+    patch.lfoDepth = 0.10f + movement * 0.22f;
+    patch.pan = pan;
+    patch.level = level;
+    patch.delayMilliseconds = delayMs;
+    patch.delaySpread = pan < 0.0f ? 1.19f : 1.37f;
+    patch.delayFeedback = 0.30f + movement * 0.23f;
+    patch.delayMix = 0.12f + movement * 0.12f;
+    patch.reverbSize = 0.90f + movement * 0.08f;
+    patch.reverbDamping = 0.58f;
+    patch.reverbWet = 0.38f + movement * 0.12f;
+    return patch;
+}
+
+SynthPatch makeMetal(const char* name, OscillatorModel model, int transpose,
+                     float cutoff, float pan, float delayMs, float brightness)
+{
+    SynthPatch patch;
+    patch.name = name;
+    patch.model = model;
+    patch.transposeSemitones = transpose;
+    patch.detuneCents = 7.0f + brightness * 9.0f;
+    patch.attackSeconds = 0.002f;
+    patch.decaySeconds = 0.24f + brightness * 0.42f;
+    patch.sustain = 0.015f;
+    patch.releaseSeconds = 1.4f + brightness * 2.2f;
+    patch.cutoffHz = cutoff;
+    patch.keyTrack = 0.82f;
+    patch.drive = 1.08f + brightness * 0.34f;
+    patch.harmonicMix = 0.54f + brightness * 0.18f;
+    patch.noiseMix = model == OscillatorModel::pulse ? 0.035f : 0.012f;
+    patch.pulseWidth = pan < 0.0f ? 0.19f : 0.77f;
+    patch.lfoRateHz = 0.17f + brightness * 0.24f;
+    patch.lfoDepth = 0.035f;
+    patch.pan = pan;
+    patch.level = 0.085f + brightness * 0.018f;
+    patch.delayMilliseconds = delayMs;
+    patch.delaySpread = pan < 0.0f ? 1.43f : 1.71f;
+    patch.delayFeedback = 0.34f + brightness * 0.20f;
+    patch.delayMix = 0.18f + brightness * 0.10f;
+    patch.reverbSize = 0.58f;
+    patch.reverbDamping = 0.24f;
+    patch.reverbWet = 0.18f + brightness * 0.10f;
+    return patch;
+}
+
+SynthPatch makeNoise(const char* name, OscillatorModel model, float cutoff,
+                     float pan, float delayMs, float movement, float level)
+{
+    SynthPatch patch;
+    patch.name = name;
+    patch.model = model;
+    patch.detuneCents = 14.0f + movement * 20.0f;
+    patch.attackSeconds = 0.025f + movement * 0.42f;
+    patch.decaySeconds = 1.1f;
+    patch.sustain = 0.34f + movement * 0.24f;
+    patch.releaseSeconds = 3.2f + movement * 5.0f;
+    patch.cutoffHz = cutoff;
+    patch.keyTrack = 0.18f;
+    patch.drive = 1.16f + movement * 0.30f;
+    patch.harmonicMix = 0.13f;
+    patch.noiseMix = 0.27f + movement * 0.22f;
+    patch.pulseWidth = pan < 0.0f ? 0.14f : 0.84f;
+    patch.lfoRateHz = 0.15f + movement * 0.54f;
+    patch.lfoDepth = 0.22f + movement * 0.28f;
+    patch.pan = pan;
+    patch.level = level;
+    patch.delayMilliseconds = delayMs;
+    patch.delaySpread = pan < 0.0f ? 1.57f : 1.83f;
+    patch.delayFeedback = 0.31f + movement * 0.22f;
+    patch.delayMix = 0.13f + movement * 0.13f;
+    patch.reverbSize = 0.72f + movement * 0.18f;
+    patch.reverbDamping = 0.68f;
+    patch.reverbWet = 0.22f + movement * 0.17f;
+    return patch;
+}
+
 SaxPatch makeSax(const char* name, float tone, float drive, float delay,
                  float spread, float feedback, float cross, float delayMix,
                  float modRate, float modDepth, float room, float damping,
@@ -274,6 +369,71 @@ const std::array<SoundScenario, CommentoScenarios::count> scenarios {{
         }},
         makeSax("UN SOLO ECO", 5200.0f, 0.98f, 4200.0f, 1.13f, 0.43f, 0.12f,
                 0.31f, 0.018f, 1.5f, 0.82f, 0.58f, 0.22f, 0.0f, 0.0f, 0.64f, 0.986f)
+    },
+    {
+        "DRONE", "masse lente, pedali e deriva profonda",
+        {{
+            makeBass("PEDALE TELLURICO", OscillatorModel::sub, -12, 680.0f,
+                     0.085f, 0.82f, 1.18f),
+            makeDrone("FONDO IMMOBILE", OscillatorModel::warm, -12, 1150.0f,
+                      -0.31f, 1320.0f, 0.22f, 0.090f),
+            makeDrone("CORO FOSSILE", OscillatorModel::reed, 0, 2450.0f,
+                      0.24f, 1710.0f, 0.46f, 0.072f),
+            makeDrone("ARIA FERMA", OscillatorModel::air, 12, 1750.0f,
+                      0.39f, 2070.0f, 0.68f, 0.052f, 0.20f)
+        }},
+        makeSax("COLONNA D'ARIA", 2200.0f, 1.05f, 3100.0f, 1.41f, 0.62f, 0.58f,
+                0.46f, 0.024f, 5.0f, 0.96f, 0.64f, 0.52f, 0.025f, 0.14f,
+                0.49f, 0.972f)
+    },
+    {
+        "FERRO", "urti metallici, risonanze corte e taglienti",
+        {{
+            makeBass("MOTORE FERRO", OscillatorModel::pulse, -12, 1850.0f,
+                     0.006f, 0.28f, 1.46f),
+            makeMetal("LAMIERA", OscillatorModel::bell, 0, 10800.0f,
+                      -0.37f, 313.0f, 0.72f),
+            makeMetal("FILO TESO", OscillatorModel::pulse, 12, 7600.0f,
+                      0.29f, 521.0f, 0.50f),
+            makeMetal("RISONATORE", OscillatorModel::glass, -12, 6100.0f,
+                      0.41f, 887.0f, 0.88f)
+        }},
+        makeSax("LASTRA", 9200.0f, 1.38f, 430.0f, 1.67f, 0.54f, 0.86f,
+                0.45f, 0.33f, 2.0f, 0.61f, 0.23f, 0.18f, 0.43f, 0.32f,
+                0.52f, 0.950f)
+    },
+    {
+        "SCIAME", "rumore vivo, scatti e traiettorie instabili",
+        {{
+            makeBass("BASSO INSETTO", OscillatorModel::pluck, -12, 1550.0f,
+                     0.004f, 0.24f, 1.42f),
+            makeNoise("ALI", OscillatorModel::air, 4300.0f, -0.42f,
+                      457.0f, 0.82f, 0.058f),
+            makeNoise("NUVOLA VIVA", OscillatorModel::cloud, 2600.0f, 0.19f,
+                      733.0f, 0.56f, 0.066f),
+            makeNoise("SCATTI", OscillatorModel::pulse, 5700.0f, 0.43f,
+                      1193.0f, 0.94f, 0.052f)
+        }},
+        makeSax("RONZIO", 3600.0f, 1.46f, 1040.0f, 1.97f, 0.65f, 0.90f,
+                0.56f, 0.41f, 11.0f, 0.78f, 0.69f, 0.31f, 0.23f, 0.45f,
+                0.48f, 0.952f)
+    },
+    {
+        "COSMOS", "anelli di respiro e sax granulare",
+        {{
+            makeBass("SAX GRANULARE", OscillatorModel::reed, -12, 1900.0f,
+                     0.012f, 0.42f, 1.18f),
+            makeDrone("ANELLO I", OscillatorModel::warm, -12, 1650.0f,
+                      -0.36f, 1597.0f, 0.40f, 0.068f),
+            makeDrone("ANELLO II", OscillatorModel::glass, 0, 3900.0f,
+                      0.27f, 1901.0f, 0.58f, 0.058f),
+            makeNoise("CODA DI POLVERE", OscillatorModel::cloud, 2100.0f,
+                      0.41f, 2213.0f, 0.62f, 0.044f)
+        }},
+        makeSax("ANELLI COSMOS", 4800.0f, 1.12f, 4000.0f, 1.61f, 0.78f, 0.92f,
+                0.62f, 0.019f, 7.5f, 0.96f, 0.52f, 0.46f, 0.017f, 0.16f,
+                0.46f, 0.968f),
+        { true, 60, 0.012f, 0.240f, 0.68f, 64.0f }
     }
 }};
 }

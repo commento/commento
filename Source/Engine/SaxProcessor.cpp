@@ -133,6 +133,27 @@ void SaxProcessor::process(juce::AudioBuffer<float>& buffer, int numSamples)
         || delayBuffer.getNumSamples() < 4 || numSamples <= 0)
         return;
 
+    if (incrementalClearPosition >= 0)
+    {
+        // Clearing the complete eight-second delay in one audio callback can
+        // create a realtime spike. Spread the work across a handful of
+        // callbacks and keep this processor silent until the new generation
+        // is ready.
+        constexpr auto samplesPerClearPass = 32768;
+        const auto samplesToClear = juce::jmin(
+            samplesPerClearPass,
+            delayBuffer.getNumSamples() - incrementalClearPosition);
+        for (int channel = 0; channel < delayBuffer.getNumChannels(); ++channel)
+            juce::FloatVectorOperations::clear(
+                delayBuffer.getWritePointer(channel, incrementalClearPosition),
+                samplesToClear);
+        incrementalClearPosition += samplesToClear;
+        if (incrementalClearPosition >= delayBuffer.getNumSamples())
+            incrementalClearPosition = -1;
+        buffer.clear(0, numSamples);
+        return;
+    }
+
     juce::ScopedNoDenormals noDenormals;
     auto* left = buffer.getWritePointer(0);
     auto* right = buffer.getWritePointer(1);
@@ -226,4 +247,25 @@ void SaxProcessor::resetTails()
     modulationPhase = 0.0;
     tremoloPhase = 0.0;
     writePosition = 0;
+    incrementalClearPosition = -1;
+}
+
+void SaxProcessor::beginIncrementalTailReset() noexcept
+{
+    if (! prepared || delayBuffer.getNumSamples() <= 0)
+        return;
+
+    reverb.reset();
+    lowPassState.fill(0.0f);
+    highPassState.fill(0.0f);
+    previousInput.fill(0.0f);
+    modulationPhase = 0.0;
+    tremoloPhase = 0.0;
+    writePosition = 0;
+    incrementalClearPosition = 0;
+}
+
+bool SaxProcessor::isIncrementalTailResetActive() const noexcept
+{
+    return incrementalClearPosition >= 0;
 }

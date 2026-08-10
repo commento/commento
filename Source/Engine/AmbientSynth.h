@@ -11,6 +11,7 @@ public:
     void prepare(double sampleRate, int maximumBlockSize);
     void setPatch(const SynthPatch& newPatch);
     void setDelayLevel(float newLevel) noexcept;
+    void allNotesOff();
     void render(juce::AudioBuffer<float>& output, const juce::MidiBuffer& midi,
                 int startSample, int numSamples);
 

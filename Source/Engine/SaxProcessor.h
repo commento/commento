@@ -11,6 +11,8 @@ public:
     void setDelayLevel(float newLevel) noexcept;
     void process(juce::AudioBuffer<float>& buffer, int numSamples);
     void resetTails();
+    void beginIncrementalTailReset() noexcept;
+    [[nodiscard]] bool isIncrementalTailResetActive() const noexcept;
 
 private:
     void updateTargets(bool immediately);
@@ -37,6 +39,7 @@ private:
     double modulationPhase = 0.0;
     double tremoloPhase = 0.0;
     int writePosition = 0;
+    int incrementalClearPosition = -1;
     float requestedDelayLevel = 1.0f;
     bool prepared = false;
 };

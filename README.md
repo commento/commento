@@ -7,25 +7,33 @@ Il nome **Commento** e' provvisorio.
 
 ## Stato del prototipo
 
-- un basso monofonico sempre live sul MIDI 5, attivabile dal touchscreen;
+- un basso monofonico live sul MIDI 5 nei primi tredici scenari, attivabile dal
+  touchscreen;
 - tre memorie MIDI indipendenti sui canali 2, 3 e 4;
 - quattro motori sonori interni, con basso separato e tre voci ambient;
 - nessun MIDI thru esterno: live e loop alimentano direttamente le quattro voci;
 - registrazione e riproduzione continua degli eventi MIDI;
-- dieci scenari che ri-orchestrano i loop senza cancellarli;
+- quattordici scenari che ri-orchestrano i loop senza cancellarli;
 - pluck dilatati tramite delay asincroni e riverberi per singola voce;
 - una memoria audio stereo circolare fino a 120 secondi per il sax;
 - prima registrazione audio libera e overdub successivo con headroom, decadimento
   e saturazione morbida;
-- dieci trattamenti sax con delay, modulazione, tremolo, tono e spazi differenti;
+- quattordici trattamenti sax con delay, modulazione, tremolo, tono e spazi
+  differenti;
+- nello scenario COSMOS, un pitch shifter granulare a otto voci che mappa la
+  registrazione RESPIRO sulla tastiera del MIDI 5 e sostituisce temporaneamente
+  il basso;
+- nello scenario COSMOS, una rilettura del loop sax con quattro testine
+  asincrone e lentamente divergenti, ispirata alle memorie drifting;
 - pagina CONNESSIONI hardware-generica con profili Model 12, stereo e
   personalizzato, controlli grandi e applicazione esplicita della configurazione;
-- router configurabile a cinque bus logici: ambiente stereo, basso, sax stereo,
-  con ingresso e uscite fisiche scegliibili in base all'interfaccia collegata;
+- router configurabile a cinque bus logici: ambiente stereo, canale I mono
+  (basso o SAX TASTIERA) e sax stereo, con ingresso e uscite fisiche scegliibili
+  in base all'interfaccia collegata;
 - rilevamento automatico del Keystep Pro, senza MIDI thru esterno;
 - interfaccia touch a quattro organismi MIDI e una fascia RESPIRO, con stati
   espliciti, meter del sax e controlli grandi;
-- un livello indipendente e anti-click per basso, MIDI 2/3/4 e sax, richiamato
+- un livello indipendente e anti-click per canale I, MIDI 2/3/4 e sax, richiamato
   selezionando la relativa card;
 - build macOS e Raspberry Pi OS 64 bit dallo stesso codice.
 
@@ -39,7 +47,8 @@ espongono ancora un pannello di sintesi dettagliato.
 Con il profilo **MODEL 12** la mappa iniziale e':
 
 ```text
-Keystep MIDI 5 -> basso live Commento -> canale AUDIO 5 Model 12
+Keystep MIDI 5 -> scenari 1-13: basso live -> canale AUDIO 5 Model 12
+Keystep MIDI 5 -> scenario COSMOS: SAX TASTIERA da RESPIRO -> canale AUDIO 5 Model 12
 Keystep MIDI 2/3/4 -> loop e voci ambient -> canali AUDIO 1/2 Model 12
 Sax -> ingressi AUDIO 7/8 -> RESPIRO + effetti -> ritorno AUDIO 7/8 Model 12
 ```
@@ -58,14 +67,14 @@ Permette di scegliere:
 - profilo, sistema audio, dispositivo di ingresso e dispositivo di uscita;
 - frequenza di campionamento e buffer;
 - ingresso fisico del sax;
-- uscite fisiche dei bus ambiente, basso e sax;
+- uscite fisiche dei bus ambiente, canale I e sax;
 - percorso diagnostico del sax e tono di prova a 997 Hz.
 
 I profili sono punti di partenza, non vincoli:
 
 - **MODEL 12** cerca una Tascam con almeno 12 ingressi e 10 uscite e prepara sax
-  IN 7/8, ambiente OUT 1/2, basso OUT 5 e sax OUT 7/8 a 48 kHz / 512 campioni;
-- **STEREO GENERICO** usa IN 1/2 e fa convergere ambiente, basso e sax su OUT
+  IN 7/8, ambiente OUT 1/2, canale I OUT 5 e sax OUT 7/8 a 48 kHz / 512 campioni;
+- **STEREO GENERICO** usa IN 1/2 e fa convergere ambiente, canale I e sax su OUT
   1/2, con headroom automatico quando piu' bus condividono la stessa uscita;
 - **PERSONALIZZATO** lascia scegliere liberamente dispositivi e canali esposti
   dall'hardware collegato.
@@ -84,7 +93,8 @@ capire se un disturbo nasce dal full-duplex/driver oppure dal routing del sax.
 Quando si usa la Model 12, impostare manualmente sul mixer:
 
 - canali 1/2 su `PC` per le tre voci ambient;
-- canale 5 su `PC` per il basso generato dal MIDI 5;
+- canale 5 su `PC` per il basso generato dal MIDI 5 oppure, in COSMOS, per SAX
+  TASTIERA;
 - canale stereo 7/8 su `PC` per monitor ed effetti del sax;
 - `USB AUDIO: MULTI INPUT`;
 - `MTR/USB SEND POINT: PRE COMP`.
@@ -112,26 +122,77 @@ durante il collegamento.
 
 ## Uso
 
-- usare le frecce grandi in alto per scegliere uno dei dieci scenari;
+- usare le frecce grandi in alto per scegliere uno dei quattordici scenari;
 - usare **GRANA** per scegliere `PULITA`, `LEGGERA`, `MEDIA` o `PIENA`; il valore
-  iniziale e' PULITA e viene ricordato al riavvio;
-- toccare una card per selezionare BASSO LIVE, MAREA, RADICE, SCINTILLA o RESPIRO;
+  iniziale e' PULITA e viene ricordato al riavvio; il macro aumenta insieme
+  drive, rumore, detune, movimento e instabilita' dei feedback entro limiti
+  protetti;
+- toccare una card per selezionare il canale I, MAREA, RADICE, SCINTILLA o
+  RESPIRO; il canale I si chiama BASSO LIVE nei primi tredici scenari e SAX
+  TASTIERA in COSMOS;
 - regolare il grande controllo **LIVELLO** della card selezionata; i cinque
   valori sono indipendenti, partono da -6 dB e vengono ricordati al riavvio;
-- su BASSO LIVE, usare **MUTA BASSO LIVE** / **RIATTIVA BASSO LIVE**; e' solo
-  un mute rapido, perche' il MIDI 5 resta sempre live e non viene mai registrato;
-- premere **SEMINA** per iniziare a registrare;
+- nei primi tredici scenari, su BASSO LIVE usare **MUTA BASSO LIVE** / **RIATTIVA
+  BASSO LIVE**; e' un mute rapido e il MIDI 5 suona il basso senza essere
+  registrato in una memoria MIDI;
+- su MAREA, RADICE e SCINTILLA, premere **SEMINA** per armare la registrazione:
+  il comando scatta al contatto (mouse-down/touch-down) e arma subito la
+  memoria; l'interfaccia mostra **ATTENDO NOTA**. Il primo `note-on` avvia
+  realmente il ciclo e diventa il timestamp zero, evitando il
+  silenzio tra il tocco di SEMINA e la prima nota. Gli eventi successivi
+  conservano il proprio timestamp all'interno del blocco audio; premere di
+  nuovo **ATTENDO NOTA** prima di suonare annulla l'armamento senza creare un
+  loop;
 - premere **CHIUDI IL CICLO** per stabilire la durata libera;
 - tenere premuto **TIENI PER DISSOLVERE** per 1,1 secondi per cancellare;
-- su RESPIRO, premere **NUTRI** per sovraincidere;
+- su RESPIRO, premere **SEMINA** per iniziare la registrazione audio oppure
+  **NUTRI** per sovraincidere; questa registrazione parte direttamente dal
+  pulsante e non attende una nota MIDI;
 - scegliere nella pagina CONNESSIONI il canale mono o la coppia stereo realmente
   usata dal sax; il profilo MODEL 12 propone rispettivamente 7 mono o 7/8;
 - **PERSISTENZA DEL RESPIRO** decide quanto materiale precedente sopravvive a ogni
-  overdub (`1.000` conserva tutto, valori inferiori dissolvono il passato).
+  overdub (`1.000` seleziona la persistenza massima; internamente resta un
+  margine di sicurezza dello 0,5%, mentre valori inferiori dissolvono piu'
+  rapidamente il passato).
+
+### COSMOS: RESPIRO sulla tastiera
+
+COSMOS e' un comportamento originale ispirato all'idea di memoria drifting di
+SOMA COSMOS, non un'emulazione del dispositivo. In questo scenario il playback
+automatico di RESPIRO viene ricombinato da quattro testine asincrone, con
+lunghezze e derive differenti, per attenuare la sensazione di un ciclo identico.
+Il sax live e questa memoria in deriva restano sul bus SAX, quindi sul profilo
+Model 12 escono da AUDIO 7/8.
+
+Per preparare e suonare SAX TASTIERA:
+
+1. selezionare lo scenario **COSMOS**;
+2. selezionare **RESPIRO** e, se contiene gia' materiale, cancellarlo con
+   **TIENI PER DISSOLVERE**; premere quindi **SEMINA**, suonare il sax e
+   premere **CHIUDI IL CICLO**; usando invece **NUTRI** si sovraincide senza
+   ridefinire la durata del ciclo;
+3. selezionare **I - SAX TASTIERA** e suonare la parte del Keystep sul canale
+   MIDI 5.
+
+Il player usa fino a otto voci e un pitch shifter granulare con due grani Hann
+sovrapposti per voce. La nota MIDI `60` (Do centrale, spesso indicata come
+`C4`) mantiene l'altezza originale; le altre note trasportano il sax senza
+accelerare o rallentare lo scorrimento del loop. Il trasporto resta quindi a
+`1x`, mentre il rapporto d'intonazione e' limitato tra `0.25x` e `4x`. Agli
+estremi il carattere diventa volutamente piu' granuloso. Le note sono gated:
+partono quando si preme il tasto e sfumano quando lo si rilascia. Il pedale
+sustain e' supportato; il pitch-bend agisce su tutte le voci entro `+/-2`
+semitoni.
+
+SAX TASTIERA esce dal bus del canale I, quindi da AUDIO 5 sul profilo Model 12.
+I controlli **MUTA/RIATTIVA**, **LIVELLO** e **DELAY** della card I agiscono sul
+sampler. La registrazione sorgente appartiene invece sempre a RESPIRO: per
+sovrainciderla, riscriverla o cancellarla bisogna tornare sulla card RESPIRO.
 
 Il percorso PULITA e' lineare ai livelli normali. Le protezioni intervengono solo
-vicino al fondo scala; GRANA reintroduce gradualmente la saturazione prevista
-dallo scenario. Dopo un aggiornamento da una versione precedente, cancellare un
+vicino al fondo scala; GRANA reintroduce gradualmente saturazione, rumore e
+instabilita' previsti dallo scenario. Dopo un aggiornamento da una versione
+precedente, cancellare un
 loop RESPIRO gia' distorto: la distorsione era memorizzata nel buffer e non puo'
 essere rimossa retroattivamente.
 
@@ -174,7 +235,7 @@ automaticamente il ritorno e mostra `PROTEZIONE SAX`; torna gradualmente attivo
 dopo un secondo di silenzio. Questa protezione evita il picco, ma non certifica
 la configurazione PRE COMP e non diagnostica da sola disturbi di clock o driver.
 
-## I dieci scenari
+## I quattordici scenari
 
 | Scenario | Carattere | Sax |
 |---|---|---|
@@ -188,10 +249,17 @@ la configurazione PRE COMP e non diagnostica da sola disturbi di clock o driver.
 | ORBITA | impulsi sospesi e satelliti | ellisse stereo fuori tempo |
 | POLVERE | suoni opachi e fragili | radio lontana, scura e consumata |
 | VUOTO | pochi elementi con code molto lunghe | un solo eco lontanissimo |
+| DRONE | masse lente, pedali e deriva profonda | colonna d'aria ampia e lenta |
+| FERRO | urti metallici e risonanze corte e taglienti | lastra corta, brillante e mobile |
+| SCIAME | rumore vivo, scatti e traiettorie instabili | ronzio granuloso e nervoso |
+| COSMOS | anelli di respiro e sax granulare | quattro testine asincrone e SAX TASTIERA |
 
 Le note dei loop restano le stesse quando si cambia scenario: vengono suonate
-di nuovo con i nuovi strumenti. Il basso MIDI 5 cambia timbro, ma resta live e
-usa sempre il bus BASSO; nel profilo Model 12 quel bus parte dall'uscita audio 5.
+di nuovo con i nuovi strumenti. Nei primi tredici scenari il basso MIDI 5 cambia
+timbro, resta live e usa il bus del canale I; nel profilo Model 12 quel bus parte
+dall'uscita audio 5. In COSMOS lo stesso MIDI 5 controlla invece SAX TASTIERA,
+che legge la registrazione RESPIRO e usa la medesima uscita audio 5. Il sax live
+e la memoria RESPIRO automatica continuano a usare il bus SAX su audio 7/8.
 
 ## Build macOS
 
@@ -344,13 +412,16 @@ sudo systemctl reboot
 
 ## Architettura
 
-- `EcosystemEngine`: callback audio realtime e coordinamento delle memorie;
+- `EcosystemEngine`: callback audio realtime, coordinamento delle memorie e
+  pitch shifter granulare polifonico del buffer RESPIRO pilotato dal MIDI 5 in
+  COSMOS;
 - `Model12AudioRouter`: adattatore configurabile tra i canali fisici
   dell'interfaccia scelta e i cinque bus logici;
-- `Scenarios`: dieci orchestrazioni per basso, tre layer ambient e sax;
+- `Scenarios`: quattordici orchestrazioni per canale I, tre layer ambient e sax;
 - `SaxProcessor`: tono, delay, modulazione, riverbero e protezione del bus sax;
 - `MidiMemory`: eventi MIDI con posizione in campioni e durata indipendente;
-- `AudioMemory`: buffer circolare stereo con overdub e decadimento;
+- `AudioMemory`: buffer circolare stereo con overdub, decadimento e, in COSMOS,
+  quattro testine asincrone;
 - `MainComponent`: interfaccia touch, routing device e animazione.
 
 Il callback MIDI del solo Keystep scrive in una FIFO preallocata. Le memorie
