@@ -39,6 +39,10 @@ public:
     static constexpr int saxLeftBus = 3;
     static constexpr int saxRightBus = 4;
     static constexpr int logicalOutputBusCount = 5;
+    // The source is a monophonic sax phrase and MIDI 5 is normally played as
+    // a live line. Keeping this instrument monophonic avoids transposed phrase
+    // clusters and leaves considerably more headroom on Raspberry Pi.
+    static constexpr int saxLoopKeyboardVoiceCount = 1;
     static_assert(PerformanceLevels::count == memoryCount);
 
     EcosystemEngine();
@@ -55,6 +59,11 @@ public:
     [[nodiscard]] int getEventCount(int memoryIndex) const;
     [[nodiscard]] int getMidiChannelForMemory(int memoryIndex) const;
     [[nodiscard]] bool isAudioRunning() const;
+    // -1 while no callback has run, 0 when Linux refused realtime scheduling,
+    // 1 when the audio callback owns an explicit realtime policy.
+    [[nodiscard]] int getRealtimeSchedulingStatus() const noexcept;
+    [[nodiscard]] float getDspLoad() const noexcept;
+    [[nodiscard]] int getDspNearOverloadCount() const noexcept;
     [[nodiscard]] int getCallbackInputChannelCount() const;
     [[nodiscard]] int getCallbackOutputChannelCount() const;
     [[nodiscard]] float getSaxInputLevel() const;
@@ -162,6 +171,7 @@ private:
         double targetPitchRatio = 1.0;
         float envelope = 0.0f;
         float velocity = 0.0f;
+        float targetVelocity = 0.0f;
         float playbackFilterPole = 0.0f;
         std::array<SaxLoopGrain, 2> grains;
         std::array<float, 2> filterState {};
@@ -236,6 +246,10 @@ private:
         static_cast<int>(DiagnosticToneBus::off)
     };
     std::atomic<bool> audioRunning { false };
+    std::atomic<int> realtimeSchedulingStatus { -1 };
+    std::atomic<float> dspLoad { 0.0f };
+    std::atomic<int> dspNearOverloadCount { 0 };
+    int dspWarmupCallbacksRemaining = 0;
     std::atomic<int> callbackInputChannels { 0 };
     std::atomic<int> callbackOutputChannels { 0 };
     std::atomic<float> saxInputLevel { 0.0f };
@@ -253,7 +267,10 @@ private:
     bool saxLoopKeyboardModeActive = false;
     bool saxLoopKeyboardTailActive = false;
     int64_t saxLoopKeyboardTailSamplesRemaining = 0;
-    std::array<SaxLoopVoice, 8> saxLoopVoices;
+    std::array<SaxLoopVoice, saxLoopKeyboardVoiceCount> saxLoopVoices;
+    std::array<uint8_t, 128> saxLoopHeldNoteCounts {};
+    std::array<float, 128> saxLoopHeldVelocities {};
+    std::array<uint64_t, 128> saxLoopHeldAges {};
     std::array<double, 4> cosmosHeadPositions {};
     double cosmosModulationPhase = 0.0;
     float saxLoopPitchBendSemitones = 0.0f;

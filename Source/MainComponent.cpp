@@ -1954,6 +1954,14 @@ void MainComponent::updateHardwareIndicators()
         const auto captureState = activeInputs == 0 || setup.inputDeviceName.isEmpty()
             ? juce::String("CAPTURE OFF")
             : juce::String("CAPTURE ON");
+        const auto realtimeState = engine.getRealtimeSchedulingStatus();
+        const auto realtimeText = realtimeState > 0
+            ? juce::String("PRIORITA AUDIO OK")
+            : (realtimeState == 0 ? juce::String("PRIORITA AUDIO NON ATTIVA")
+                                  : juce::String("PRIORITA AUDIO IN ATTESA"));
+        const auto dspPercent = juce::jlimit(
+            0, 999, static_cast<int>(std::round(engine.getDspLoad() * 100.0f)));
+        const auto dspNearOverloads = engine.getDspNearOverloadCount();
         const auto effectiveOutputName = setup.outputDeviceName.isNotEmpty()
             ? setup.outputDeviceName : device->getName();
         const auto effectiveInputName = setup.inputDeviceName.isNotEmpty()
@@ -1967,7 +1975,10 @@ void MainComponent::updateHardwareIndicators()
                 + " · " + juce::String(activeInputs) + " IN / "
                 + juce::String(activeOutputs) + " OUT · "
                 + juce::String(device->getCurrentBitDepth()) + " bit · XRUN "
-                + juce::String(xruns) + " (+" + juce::String(xrunDelta) + ")\n"
+                + juce::String(xruns) + " (+" + juce::String(xrunDelta) + ")"
+                + " · DSP " + juce::String(dspPercent) + "%"
+                + " · PICCHI " + juce::String(dspNearOverloads)
+                + " · " + realtimeText + "\n"
                 + captureState + " · SAX IN "
                 + routeName(routing.saxInputLeft, routing.saxInputRight)
                 + " " + juce::String(inputDb, 1) + " dB"

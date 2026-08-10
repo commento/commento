@@ -5,6 +5,36 @@
 
 namespace
 {
+constexpr int sineTableSize = 4096;
+
+// Twenty-four active ambient voices otherwise call libm several million
+// times per second.  A linearly interpolated table is effectively exact for
+// audio here (worst-case error is below 0.000001), fits in L1 cache, and is
+// built before the realtime callback starts.
+const std::array<float, sineTableSize + 1> sineTable = []
+{
+    std::array<float, sineTableSize + 1> table {};
+    for (int index = 0; index <= sineTableSize; ++index)
+        table[static_cast<std::size_t>(index)] = static_cast<float>(std::sin(
+            juce::MathConstants<double>::twoPi
+            * static_cast<double>(index) / static_cast<double>(sineTableSize)));
+    return table;
+}();
+
+float fastSine(double phase) noexcept
+{
+    const auto position = phase
+        * (static_cast<double>(sineTableSize)
+           / juce::MathConstants<double>::twoPi);
+    const auto index = juce::jlimit(
+        0, sineTableSize - 1, static_cast<int>(position));
+    const auto fraction = static_cast<float>(
+        position - static_cast<double>(index));
+    const auto first = sineTable[static_cast<std::size_t>(index)];
+    const auto second = sineTable[static_cast<std::size_t>(index + 1)];
+    return first + (second - first) * fraction;
+}
+
 float polyBlep(float phase, float phaseIncrement)
 {
     const auto increment = juce::jlimit(1.0e-6f, 0.49f,
@@ -244,7 +274,7 @@ public:
         for (int offset = 0; offset < numSamples; ++offset)
         {
             currentFrequency += (targetFrequency - currentFrequency) * glideCoefficient;
-            const auto lfo = static_cast<float>(std::sin(lfoPhase));
+            const auto lfo = fastSine(lfoPhase);
             // Vibrato spans at most +/-0.16 semitone.  A third-order exp
             // polynomial over this tiny interval has sub-ppb error and avoids
             // an expensive transcendental call for every generated sample.
@@ -366,7 +396,7 @@ private:
 
     float oscillator(double phase, double phaseIncrement, OscillatorModel model)
     {
-        const auto sine = static_cast<float>(std::sin(phase));
+        const auto sine = fastSine(phase);
         const auto triangle = [&]
         {
             return bandLimitedTriangle(phase, phaseIncrement);
@@ -430,11 +460,11 @@ private:
         {
             const auto secondGain = partialGain(
                 baseFrequency * secondaryDetuneRatio * secondaryRatioB);
-            return static_cast<float>(std::sin(phaseB)) * 0.62f * firstGain
-                 + static_cast<float>(std::sin(phaseC)) * 0.38f * secondGain;
+            return fastSine(phaseB) * 0.62f * firstGain
+                 + fastSine(phaseC) * 0.38f * secondGain;
         }
 
-        return static_cast<float>(std::sin(phaseB)) * firstGain;
+        return fastSine(phaseB) * firstGain;
     }
 
     SynthPatch patch;

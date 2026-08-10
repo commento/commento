@@ -244,6 +244,73 @@ SynthPatch makeNoise(const char* name, OscillatorModel model, float cutoff,
     return patch;
 }
 
+SynthPatch makeCosmosRing(const char* name, int transpose, float cutoff,
+                          float pan, float delayMs, bool upperRing)
+{
+    // COSMOS used the generic drone recipe here.  Its 18--23 second releases,
+    // wide detuning and deep modulation kept all eight voices alive and made
+    // overlapping MIDI loops turn into an indistinct cluster.  These rings
+    // retain the slow orbit, but favour a nearly-sine glass oscillator (the
+    // cheapest model in AmbientSynth) and leave space for the recorded sax.
+    SynthPatch patch;
+    patch.name = name;
+    patch.model = OscillatorModel::glass;
+    patch.transposeSemitones = transpose;
+    patch.detuneCents = upperRing ? 4.8f : 3.2f;
+    patch.attackSeconds = upperRing ? 1.25f : 0.72f;
+    patch.decaySeconds = upperRing ? 2.8f : 2.1f;
+    patch.sustain = upperRing ? 0.68f : 0.74f;
+    patch.releaseSeconds = upperRing ? 7.2f : 5.6f;
+    patch.cutoffHz = cutoff;
+    patch.keyTrack = 0.38f;
+    patch.drive = 1.0f;
+    patch.harmonicMix = upperRing ? 0.14f : 0.07f;
+    patch.lfoRateHz = upperRing ? 0.031f : 0.019f;
+    patch.lfoDepth = upperRing ? 0.065f : 0.045f;
+    patch.pan = pan;
+    patch.level = upperRing ? 0.060f : 0.070f;
+    patch.delayMilliseconds = delayMs;
+    patch.delaySpread = upperRing ? 1.31f : 1.19f;
+    patch.delayFeedback = upperRing ? 0.24f : 0.20f;
+    patch.delayMix = upperRing ? 0.13f : 0.10f;
+    patch.reverbSize = upperRing ? 0.88f : 0.82f;
+    patch.reverbDamping = 0.64f;
+    patch.reverbWet = upperRing ? 0.30f : 0.25f;
+    return patch;
+}
+
+SynthPatch makeCosmosDust(const char* name)
+{
+    // A restrained breath layer replaces the old makeNoise recipe.  The old
+    // patch combined 26-cent detuning, heavy drive and 35% pitch movement;
+    // beautiful in isolation, but harsh and needlessly dense over two rings.
+    SynthPatch patch;
+    patch.name = name;
+    patch.model = OscillatorModel::cloud;
+    patch.detuneCents = 4.0f;
+    patch.attackSeconds = 1.65f;
+    patch.decaySeconds = 2.6f;
+    patch.sustain = 0.58f;
+    patch.releaseSeconds = 6.4f;
+    patch.cutoffHz = 2350.0f;
+    patch.keyTrack = 0.24f;
+    patch.drive = 1.0f;
+    patch.harmonicMix = 0.10f;
+    patch.noiseMix = 0.035f;
+    patch.lfoRateHz = 0.043f;
+    patch.lfoDepth = 0.075f;
+    patch.pan = 0.38f;
+    patch.level = 0.048f;
+    patch.delayMilliseconds = 475.0f;
+    patch.delaySpread = 1.47f;
+    patch.delayFeedback = 0.18f;
+    patch.delayMix = 0.09f;
+    patch.reverbSize = 0.86f;
+    patch.reverbDamping = 0.72f;
+    patch.reverbWet = 0.28f;
+    return patch;
+}
+
 SaxPatch makeSax(const char* name, float tone, float drive, float delay,
                  float spread, float feedback, float cross, float delayMix,
                  float modRate, float modDepth, float room, float damping,
@@ -419,21 +486,20 @@ const std::array<SoundScenario, CommentoScenarios::count> scenarios {{
                 0.48f, 0.952f)
     },
     {
-        "COSMOS", "anelli di respiro e sax granulare",
+        "COSMOS", "anelli armonici e respiro sospeso",
         {{
-            makeBass("SAX GRANULARE", OscillatorModel::reed, -12, 1900.0f,
+            makeBass("RESPIRO TONALE", OscillatorModel::reed, -12, 1900.0f,
                      0.012f, 0.42f, 1.18f),
-            makeDrone("ANELLO I", OscillatorModel::warm, -12, 1650.0f,
-                      -0.36f, 1597.0f, 0.40f, 0.068f),
-            makeDrone("ANELLO II", OscillatorModel::glass, 0, 3900.0f,
-                      0.27f, 1901.0f, 0.58f, 0.058f),
-            makeNoise("CODA DI POLVERE", OscillatorModel::cloud, 2100.0f,
-                      0.41f, 2213.0f, 0.62f, 0.044f)
+            makeCosmosRing("ANELLO BASSO", -12, 1550.0f, -0.31f,
+                           610.0f, false),
+            makeCosmosRing("ANELLO ALTO", 0, 3450.0f, 0.25f,
+                           890.0f, true),
+            makeCosmosDust("POLVERE D'ARIA")
         }},
-        makeSax("ANELLI COSMOS", 4800.0f, 1.12f, 4000.0f, 1.61f, 0.78f, 0.92f,
-                0.62f, 0.019f, 7.5f, 0.96f, 0.52f, 0.46f, 0.017f, 0.16f,
-                0.46f, 0.968f),
-        { true, 60, 0.012f, 0.240f, 0.68f, 64.0f }
+        makeSax("ALONE COSMOS", 3900.0f, 0.98f, 1150.0f, 1.29f, 0.36f, 0.38f,
+                0.28f, 0.027f, 2.2f, 0.86f, 0.68f, 0.31f, 0.013f, 0.07f,
+                0.54f, 0.972f),
+        { true, 60, 0.035f, 0.320f, 0.46f, 104.0f }
     }
 }};
 }

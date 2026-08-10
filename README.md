@@ -20,7 +20,7 @@ Il nome **Commento** e' provvisorio.
   e saturazione morbida;
 - quattordici trattamenti sax con delay, modulazione, tremolo, tono e spazi
   differenti;
-- nello scenario COSMOS, un pitch shifter granulare a otto voci che mappa la
+- nello scenario COSMOS, un pitch shifter granulare monofonico e legato che mappa la
   registrazione RESPIRO sulla tastiera del MIDI 5 e sostituisce temporaneamente
   il basso;
 - nello scenario COSMOS, una rilettura del loop sax con quattro testine
@@ -174,7 +174,7 @@ Per preparare e suonare SAX TASTIERA:
 3. selezionare **I - SAX TASTIERA** e suonare la parte del Keystep sul canale
    MIDI 5.
 
-Il player usa fino a otto voci e un pitch shifter granulare con due grani Hann
+Il player e' monofonico e usa un pitch shifter granulare con due grani Hann
 sovrapposti per voce. La nota MIDI `60` (Do centrale, spesso indicata come
 `C4`) mantiene l'altezza originale; le altre note trasportano il sax senza
 accelerare o rallentare lo scorrimento del loop. Il trasporto resta quindi a
@@ -183,6 +183,13 @@ estremi il carattere diventa volutamente piu' granuloso. Le note sono gated:
 partono quando si preme il tasto e sfumano quando lo si rilascia. Il pedale
 sustain e' supportato; il pitch-bend agisce su tutte le voci entro `+/-2`
 semitoni.
+
+Per un SAX TASTIERA intonato e leggibile conviene registrare su RESPIRO una nota
+lunga o una frase molto semplice attorno al Do scelto come origine. Una frase
+gia' ricca di molte note conserva infatti quei movimenti nella trasposizione.
+COSMOS usa ora grani piu' lunghi, comportamento monofonico legato, attacchi
+morbidi e un ambiente dedicato piu' corto per rendere anche quel materiale meno
+metallico.
 
 SAX TASTIERA esce dal bus del canale I, quindi da AUDIO 5 sul profilo Model 12.
 I controlli **MUTA/RIATTIVA**, **LIVELLO** e **DELAY** della card I agiscono sul
@@ -201,7 +208,8 @@ essere rimossa retroattivamente.
 Se il sax sembra sottocampionato, distorto o instabile, non cambiare molti
 parametri insieme. Abbassare prima casse e fader, disattivare NUTRI, cancellare
 un eventuale loop RESPIRO gia' distorto e usare questa sequenza nella pagina
-CONNESSIONI. Dopo ogni modifica premere **APPLICA AUDIO** e controllare gli xrun.
+CONNESSIONI. Dopo ogni modifica premere **APPLICA AUDIO** e controllare XRUN,
+**DSP** e **PICCHI**.
 
 1. **CAPTURE OFF + tono 997 Hz.** Scegliere `NESSUNO - CAPTURE OFF`, attivare il
    tono sul bus SAX e ascoltare la sua uscita configurata. Se anche il tono e'
@@ -252,7 +260,7 @@ la configurazione PRE COMP e non diagnostica da sola disturbi di clock o driver.
 | DRONE | masse lente, pedali e deriva profonda | colonna d'aria ampia e lenta |
 | FERRO | urti metallici e risonanze corte e taglienti | lastra corta, brillante e mobile |
 | SCIAME | rumore vivo, scatti e traiettorie instabili | ronzio granuloso e nervoso |
-| COSMOS | anelli di respiro e sax granulare | quattro testine asincrone e SAX TASTIERA |
+| COSMOS | anelli armonici e respiro sospeso | quattro testine asincrone e SAX TASTIERA morbida |
 
 Le note dei loop restano le stesse quando si cambia scenario: vengono suonate
 di nuovo con i nuovi strumenti. Nei primi tredici scenari il basso MIDI 5 cambia
@@ -377,6 +385,19 @@ systemctl status commento-kiosk.service
 journalctl -u commento-kiosk.service -f
 ```
 
+Il servizio concede a Commento memoria bloccabile e priorita' realtime. L'app
+blocca in RAM loop e delay e porta esplicitamente il callback ALSA su
+`SCHED_FIFO`: JUCE su Linux non applica da solo una policy realtime quando usa
+la generica priorita' `high`. In CONNESSIONI devono quindi comparire
+**PRIORITA AUDIO OK**, un valore **DSP** ben sotto il 90% e **PICCHI 0**. Se la
+priorita' non e' attiva, avviare Commento tramite il servizio reinstallato,
+non direttamente da una shell con limiti utente differenti. Il journal indica
+anche esplicitamente se la memoria audio residente e' stata attivata.
+
+I loop audio sono contenuti in RAM e non vengono letti continuamente dalla
+microSD. Spostarli su SSD non riduce il crackling; un SSD puo' essere utile per
+il sistema e per futuri salvataggi, ma non accelera questo percorso realtime.
+
 Il launcher attende che udev completi l'enumerazione dei dispositivi gia'
 collegati, ma non impone piu' il nome Model 12: la pagina CONNESSIONI puo' quindi
 usare qualunque interfaccia ALSA. Poiche' la scansione ALSA di JUCE avviene una
@@ -413,7 +434,7 @@ sudo systemctl reboot
 ## Architettura
 
 - `EcosystemEngine`: callback audio realtime, coordinamento delle memorie e
-  pitch shifter granulare polifonico del buffer RESPIRO pilotato dal MIDI 5 in
+  pitch shifter granulare monofonico e legato del buffer RESPIRO pilotato dal MIDI 5 in
   COSMOS;
 - `Model12AudioRouter`: adattatore configurabile tra i canali fisici
   dell'interfaccia scelta e i cinque bus logici;

@@ -246,6 +246,10 @@ int main()
     bassEngine.enqueueMidiMessage(juce::MidiMessage::noteOn(5, 48, 0.85f));
     process(bassEngine, nullptr, 0, bassOutput.pointers.data(),
             EcosystemEngine::logicalOutputBusCount, blockSize);
+    passed &= expect(bassEngine.getRealtimeSchedulingStatus() >= 0
+                         && std::isfinite(bassEngine.getDspLoad())
+                         && bassEngine.getDspLoad() >= 0.0f,
+                     "il callback deve pubblicare stato realtime e carico DSP");
     passed &= expect(bassOutput.peak(EcosystemEngine::bassBus, blockSize) > 0.0001f,
                      "MIDI 5 deve suonare sul bus audio basso");
     passed &= expect(bassEngine.getBassOutputLevel() > 0.0001f,
@@ -533,11 +537,11 @@ int main()
                              && cosmosOctaveAmbientStayedSilent,
                          "la tastiera sax COSMOS non deve contaminare AMBIENTE");
 
-        // Eight identical starts make voice count and constant-power
-        // normalisation observable: one voice would stay near 1x, while an
-        // unnormalised stack would approach 8x instead of sqrt(8)x.
+        // The sax-derived keyboard is intentionally monophonic: the source is
+        // already a moving phrase, so stacking transpositions is cacophonic.
         cosmosEngine.prepare(sampleRate, blockSize);
-        for (int voice = 0; voice < 8; ++voice)
+        for (int voice = 0;
+             voice < EcosystemEngine::saxLoopKeyboardVoiceCount; ++voice)
             cosmosEngine.enqueueMidiMessage(juce::MidiMessage::noteOn(
                 5, cosmosScenario.saxLoopKeyboard.rootNote, 1.0f));
         float cosmosUnisonPeak = 0.0f;
@@ -558,15 +562,16 @@ int main()
         }
         const auto unisonToRoot = cosmosRootPeak > 0.0f
             ? cosmosUnisonPeak / cosmosRootPeak : 0.0f;
-        passed &= expect(unisonToRoot > 1.4f && unisonToRoot < 4.2f
+        passed &= expect(unisonToRoot > 0.65f && unisonToRoot < 1.45f
                              && cosmosUnisonStayedFinite,
-                         "otto voci COSMOS devono suonare con normalizzazione");
+                         "SAX TASTIERA COSMOS deve restare monofonico");
 
-        // Fill the eight slots with distinct notes, then submit a ninth. Once
-        // the original chord is released, a stable octave proves that the new
-        // note really survived voice stealing rather than the old chord tail.
+        // Retarget the held voice by one octave with a very different
+        // velocity. Pitch and gain must glide without restarting the grains;
+        // releasing the old key must not kill the newer legato note.
         cosmosEngine.prepare(sampleRate, blockSize);
-        for (int note = 0; note < 8; ++note)
+        for (int note = 0;
+             note < EcosystemEngine::saxLoopKeyboardVoiceCount; ++note)
             cosmosEngine.enqueueMidiMessage(juce::MidiMessage::noteOn(
                 5, cosmosScenario.saxLoopKeyboard.rootNote + note, 1.0f));
         float cosmosChordPeak = 0.0f;
@@ -589,7 +594,7 @@ int main()
         const auto sampleBeforeSteal = cosmosOutput.storage[
             EcosystemEngine::bassBus][blockSize - 1];
         cosmosEngine.enqueueMidiMessage(juce::MidiMessage::noteOn(
-            5, cosmosScenario.saxLoopKeyboard.rootNote + 12, 1.0f));
+            5, cosmosScenario.saxLoopKeyboard.rootNote + 12, 0.25f));
         cosmosOutput.clear();
         process(cosmosEngine, nullptr, 0, cosmosOutput.pointers.data(),
                 EcosystemEngine::logicalOutputBusCount, blockSize);
@@ -602,7 +607,8 @@ int main()
         maximumPreProtectionPeak = std::max(maximumPreProtectionPeak,
                                             cosmosEngine.getBassOutputLevel());
 
-        for (int note = 0; note < 8; ++note)
+        for (int note = 0;
+             note < EcosystemEngine::saxLoopKeyboardVoiceCount; ++note)
             cosmosEngine.enqueueMidiMessage(juce::MidiMessage::noteOff(
                 5, cosmosScenario.saxLoopKeyboard.rootNote + note));
         constexpr auto stolenVoiceWarmupBlocks = 36;
@@ -646,24 +652,25 @@ int main()
         passed &= expect(cosmosChordPeak > 0.0001f
                              && stolenVoicePeak > 0.0001f
                              && cosmosChordStayedFinite,
-                         "accordo e nona voce COSMOS devono restare udibili e finiti");
+                         "nota iniziale e legato COSMOS devono restare udibili e finiti");
         passed &= expect(stolenVoiceFrequency
                                  > cosmosRootFrequency * 1.65
                              && stolenVoiceFrequency
                                  < cosmosRootFrequency * 2.35,
-                         "la nona nota COSMOS deve sopravvivere al voice stealing");
+                         "la nuova nota COSMOS deve sopravvivere al rilascio della precedente");
         passed &= expect(maximumStealStep < 0.08f,
-                         "il voice stealing COSMOS non deve creare crackle");
+                         "il legato COSMOS non deve creare crackle al cambio velocity");
         passed &= expect(maximumPreProtectionPeak > 0.0001f
                              && maximumPreProtectionPeak < 0.78f,
-                         "COSMOS polifonico deve conservare headroom prima della protezione");
+                         "SAX TASTIERA deve conservare headroom prima della protezione");
 
-        // Clear while a full chord is sounding. The first post-clear sample
+        // Clear while a held note is sounding. The first post-clear sample
         // must join the previous one, the explicit 8 ms fade must then reach
         // silence inside the block, and fresh MIDI must not resurrect a
         // deleted source while the delay storage is drained incrementally.
         cosmosEngine.prepare(sampleRate, blockSize);
-        for (int note = 0; note < 8; ++note)
+        for (int note = 0;
+             note < EcosystemEngine::saxLoopKeyboardVoiceCount; ++note)
             cosmosEngine.enqueueMidiMessage(juce::MidiMessage::noteOn(
                 5, cosmosScenario.saxLoopKeyboard.rootNote + note, 1.0f));
         float preClearPeak = 0.0f;

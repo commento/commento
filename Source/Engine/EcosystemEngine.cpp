@@ -3,8 +3,28 @@
 #include <algorithm>
 #include <cmath>
 
+#if JUCE_LINUX
+ #include <pthread.h>
+ #include <sched.h>
+#endif
+
 namespace
 {
+#if JUCE_LINUX
+[[nodiscard]] int enableRealtimeAudioScheduling() noexcept
+{
+    // JUCE's ALSA backend starts a Priority::high thread, but on Linux that
+    // priority enum does not install a realtime scheduling policy.  The kiosk
+    // unit grants RLIMIT_RTPRIO explicitly, so claim a conservative FIFO
+    // priority within that allowance and keep the callback off the ordinary
+    // desktop scheduler.
+    sched_param parameters {};
+    parameters.sched_priority = 60;
+    return pthread_setschedparam(pthread_self(), SCHED_FIFO, &parameters) == 0
+        ? 1 : 0;
+}
+#endif
+
 // Ordinary levels remain exactly linear. Only exceptional peaks enter this
 // smooth, unit-slope knee before reaching the physical output.
 [[nodiscard]] float protectPeak(float sample, float knee = 0.90f,
@@ -50,6 +70,31 @@ namespace
         0.0f, 0.65f, patch.tremoloDepth * (0.72f + amount * 0.38f));
     return patch;
 }
+
+[[nodiscard]] SaxPatch makeSaxKeyboardTreatment(SaxPatch patch) noexcept
+{
+    // A moving sax phrase multiplied into a chord becomes metallic very
+    // quickly. Keep the real sax treatment expansive, but give its keyboard
+    // instrument a shorter, darker and almost-linear space of its own.
+    patch.toneHz = juce::jlimit(2600.0f, 5200.0f, patch.toneHz);
+    patch.drive = juce::jlimit(1.0f, 1.025f, patch.drive);
+    patch.delayMilliseconds = juce::jlimit(
+        260.0f, 620.0f, patch.delayMilliseconds * 0.55f);
+    patch.delaySpread = 1.23f;
+    patch.feedback = juce::jlimit(0.0f, 0.24f, patch.feedback * 0.48f);
+    patch.crossFeedback = juce::jlimit(
+        0.0f, 0.42f, patch.crossFeedback * 0.48f);
+    patch.delayMix = juce::jlimit(0.0f, 0.24f, patch.delayMix * 0.62f);
+    patch.modulationRateHz *= 0.70f;
+    patch.modulationDepthMilliseconds = juce::jmin(
+        1.2f, patch.modulationDepthMilliseconds * 0.42f);
+    patch.reverbSize = juce::jmin(0.82f, patch.reverbSize);
+    patch.reverbDamping = juce::jmax(0.62f, patch.reverbDamping);
+    patch.reverbWet = juce::jlimit(0.0f, 0.24f, patch.reverbWet * 0.68f);
+    patch.tremoloDepth *= 0.30f;
+    patch.outputGain = juce::jlimit(0.52f, 0.68f, patch.outputGain * 1.12f);
+    return patch;
+}
 }
 
 EcosystemEngine::EcosystemEngine()
@@ -66,7 +111,8 @@ EcosystemEngine::EcosystemEngine()
             initialScenario.layers[static_cast<size_t>(index)]);
     }
     saxProcessor.setPatch(initialScenario.sax);
-    saxLoopKeyboardProcessor.setPatch(initialScenario.sax);
+    saxLoopKeyboardProcessor.setPatch(
+        makeSaxKeyboardTreatment(initialScenario.sax));
     activeSaxLoopKeyboardPatch = initialScenario.saxLoopKeyboard;
     saxLoopKeyboardModeActive = initialScenario.saxLoopKeyboard.enabled;
     audioDecay.store(initialScenario.sax.loopDecay);
@@ -197,6 +243,21 @@ int EcosystemEngine::getMidiChannelForMemory(int memoryIndex) const
 bool EcosystemEngine::isAudioRunning() const
 {
     return audioRunning.load();
+}
+
+int EcosystemEngine::getRealtimeSchedulingStatus() const noexcept
+{
+    return realtimeSchedulingStatus.load(std::memory_order_relaxed);
+}
+
+float EcosystemEngine::getDspLoad() const noexcept
+{
+    return dspLoad.load(std::memory_order_relaxed);
+}
+
+int EcosystemEngine::getDspNearOverloadCount() const noexcept
+{
+    return dspNearOverloadCount.load(std::memory_order_relaxed);
 }
 
 int EcosystemEngine::getCallbackInputChannelCount() const
@@ -379,6 +440,9 @@ void EcosystemEngine::prepare(double newSampleRate, int maximumBlockSize)
         || sampleRateChanged;
 
     sampleRate = preparedSampleRate;
+    dspLoad.store(0.0f, std::memory_order_relaxed);
+    dspNearOverloadCount.store(0, std::memory_order_relaxed);
+    dspWarmupCallbacksRemaining = 8;
     previousMidiCallbackTimeSeconds
         = juce::Time::getMillisecondCounterHiRes() * 0.001;
     for (int index = 0; index < granularWindowSize; ++index)
@@ -448,6 +512,9 @@ void EcosystemEngine::prepare(double newSampleRate, int maximumBlockSize)
 void EcosystemEngine::audioDeviceStopped()
 {
     audioRunning.store(false);
+    realtimeSchedulingStatus.store(-1, std::memory_order_relaxed);
+    dspLoad.store(0.0f, std::memory_order_relaxed);
+    dspNearOverloadCount.store(0, std::memory_order_relaxed);
     callbackInputChannels.store(0);
     callbackOutputChannels.store(0);
     saxInputLevel.store(0.0f);
@@ -512,6 +579,14 @@ void EcosystemEngine::audioDeviceIOCallbackWithContext(
     float* const* outputChannelData, int numOutputChannels, int numSamples,
     const juce::AudioIODeviceCallbackContext&)
 {
+    const auto callbackStart = juce::Time::getHighResolutionTicks();
+#if JUCE_LINUX
+    static thread_local const auto realtimeState
+        = enableRealtimeAudioScheduling();
+    realtimeSchedulingStatus.store(realtimeState, std::memory_order_relaxed);
+#else
+    realtimeSchedulingStatus.store(1, std::memory_order_relaxed);
+#endif
     juce::ScopedNoDenormals noDenormals;
     callbackInputChannels.store(numInputChannels);
     callbackOutputChannels.store(numOutputChannels);
@@ -630,6 +705,23 @@ void EcosystemEngine::audioDeviceIOCallbackWithContext(
                     std::abs(outputChannelData[channel][sample]));
     saxOutputLevel.store(juce::jmax(
         saxPeak, saxOutputLevel.load() * 0.86f));
+
+    if (dspWarmupCallbacksRemaining > 0)
+        --dspWarmupCallbacksRemaining;
+    else
+    {
+        const auto elapsed = juce::Time::highResolutionTicksToSeconds(
+            juce::Time::getHighResolutionTicks() - callbackStart);
+        const auto deadline = sampleRate > 0.0
+            ? static_cast<double>(numSamples) / sampleRate : 0.0;
+        const auto currentLoad = deadline > 0.0
+            ? static_cast<float>(elapsed / deadline) : 0.0f;
+        if (currentLoad >= 0.90f)
+            dspNearOverloadCount.fetch_add(1, std::memory_order_relaxed);
+        const auto previousLoad = dspLoad.load(std::memory_order_relaxed);
+        dspLoad.store(juce::jmax(currentLoad, previousLoad * 0.92f),
+                      std::memory_order_relaxed);
+    }
 }
 
 void EcosystemEngine::applyScenarioIfNeeded()
@@ -651,7 +743,8 @@ void EcosystemEngine::applyScenarioIfNeeded()
     saxProcessor.setPatch(texturedSax);
     if (saxKeyboardWillBeEnabled)
     {
-        saxLoopKeyboardProcessor.setPatch(texturedSax);
+        saxLoopKeyboardProcessor.setPatch(
+            makeSaxKeyboardTreatment(texturedSax));
         activeSaxLoopKeyboardPatch = scenario.saxLoopKeyboard;
     }
     if (scenarioChanged
@@ -1151,6 +1244,8 @@ void EcosystemEngine::renderSaxLoopKeyboard(juce::AudioBuffer<float>& output,
         1.0, static_cast<double>(loopLength - crossfadeSamples));
     const auto pitchSmoothing = 1.0 - std::exp(
         -1.0 / juce::jmax(1.0, sampleRate * 0.005));
+    const auto velocitySmoothing = 1.0f - std::exp(
+        -1.0f / juce::jmax(1.0f, static_cast<float>(sampleRate * 0.008)));
     const auto polyphonyAttenuationSmoothing = 1.0f - std::exp(
         -1.0f / juce::jmax(1.0f, static_cast<float>(sampleRate * 0.002)));
     const auto polyphonyRecoverySmoothing = 1.0f - std::exp(
@@ -1159,6 +1254,7 @@ void EcosystemEngine::renderSaxLoopKeyboard(juce::AudioBuffer<float>& output,
     const auto renderVoices = [this, &output, loopLength, crossfadeSamples,
                                attackStep, releaseStep, grainLength,
                                halfGrainLength, wrappedSpan, pitchSmoothing,
+                               velocitySmoothing,
                                polyphonyAttenuationSmoothing,
                                polyphonyRecoverySmoothing](int start, int length)
     {
@@ -1196,6 +1292,8 @@ void EcosystemEngine::renderSaxLoopKeyboard(juce::AudioBuffer<float>& output,
 
                 voice.pitchRatio += pitchSmoothing
                     * (voice.targetPitchRatio - voice.pitchRatio);
+                voice.velocity += velocitySmoothing
+                    * (voice.targetVelocity - voice.velocity);
 
                 const auto voiceGain = voice.envelope * voice.velocity
                                      * activeSaxLoopKeyboardPatch.level
@@ -1298,6 +1396,30 @@ void EcosystemEngine::handleSaxLoopKeyboardMessage(
         if (audioMemory.loopLength <= 1)
             return;
 
+        const auto note = juce::jlimit(0, 127, message.getNoteNumber());
+        const auto noteAge = ++saxLoopVoiceAge;
+        auto& heldCount = saxLoopHeldNoteCounts[static_cast<std::size_t>(note)];
+        if (heldCount < 255)
+            ++heldCount;
+        saxLoopHeldVelocities[static_cast<std::size_t>(note)]
+            = message.getFloatVelocity();
+        saxLoopHeldAges[static_cast<std::size_t>(note)] = noteAge;
+
+        // SAX TASTIERA is a monophonic, last-note instrument. During legato,
+        // keep both grains and the envelope running and glide only their read
+        // ratio; restarting the captured phrase at every key was one of the
+        // main sources of the metallic/cacophonic result.
+        auto& legatoVoice = saxLoopVoices.front();
+        if (legatoVoice.active && ! legatoVoice.releasing)
+        {
+            legatoVoice.keyDown = true;
+            legatoVoice.midiNote = note;
+            legatoVoice.targetVelocity = message.getFloatVelocity();
+            legatoVoice.age = noteAge;
+            updateSaxLoopVoicePitches();
+            return;
+        }
+
         SaxLoopVoice* chosen = nullptr;
         for (auto& voice : saxLoopVoices)
         {
@@ -1334,9 +1456,10 @@ void EcosystemEngine::handleSaxLoopKeyboardMessage(
         *chosen = {};
         chosen->active = true;
         chosen->keyDown = true;
-        chosen->midiNote = message.getNoteNumber();
+        chosen->midiNote = note;
         chosen->velocity = message.getFloatVelocity();
-        chosen->age = ++saxLoopVoiceAge;
+        chosen->targetVelocity = chosen->velocity;
+        chosen->age = noteAge;
         chosen->declickOffset = stolenResidual;
         if (stolenResidual[0] != 0.0f || stolenResidual[1] != 0.0f)
             chosen->declickSamplesRemaining = chosen->declickSamplesTotal
@@ -1363,10 +1486,39 @@ void EcosystemEngine::handleSaxLoopKeyboardMessage(
 
     if (message.isNoteOff())
     {
+        const auto releasedNote = juce::jlimit(
+            0, 127, message.getNoteNumber());
+        auto& heldCount = saxLoopHeldNoteCounts[
+            static_cast<std::size_t>(releasedNote)];
+        if (heldCount > 0)
+            --heldCount;
         for (auto& voice : saxLoopVoices)
         {
-            if (! voice.active || voice.midiNote != message.getNoteNumber())
+            if (! voice.active || voice.midiNote != releasedNote)
                 continue;
+
+            auto previousNote = -1;
+            uint64_t newestAge = 0;
+            for (int candidate = 0; candidate < 128; ++candidate)
+                if (saxLoopHeldNoteCounts[static_cast<std::size_t>(candidate)] > 0
+                    && saxLoopHeldAges[static_cast<std::size_t>(candidate)]
+                        >= newestAge)
+                {
+                    previousNote = candidate;
+                    newestAge = saxLoopHeldAges[
+                        static_cast<std::size_t>(candidate)];
+                }
+            if (previousNote >= 0)
+            {
+                voice.midiNote = previousNote;
+                voice.targetVelocity = saxLoopHeldVelocities[
+                    static_cast<std::size_t>(previousNote)];
+                voice.age = newestAge;
+                voice.keyDown = true;
+                voice.releasing = false;
+                updateSaxLoopVoicePitches();
+                continue;
+            }
             voice.keyDown = false;
             if (! saxLoopSustain)
                 voice.releasing = true;
@@ -1402,11 +1554,14 @@ void EcosystemEngine::handleSaxLoopKeyboardMessage(
     }
 
     if (message.isAllNotesOff())
+    {
+        saxLoopHeldNoteCounts.fill(0);
         for (auto& voice : saxLoopVoices)
         {
             voice.keyDown = false;
             voice.releasing = voice.active;
         }
+    }
 }
 
 void EcosystemEngine::updateSaxLoopVoicePitches() noexcept
@@ -1457,6 +1612,14 @@ void EcosystemEngine::beginSaxLoopKeyboardFadeOut(
         return;
     }
 
+    // MIDI 5 is handed back to the live bass outside COSMOS, so its later
+    // note-offs no longer reach this sampler. Preserve the audible release,
+    // but forget the keyboard stack now to avoid resurrecting held notes when
+    // COSMOS is selected again during the tail.
+    saxLoopHeldNoteCounts.fill(0);
+    saxLoopHeldVelocities.fill(0.0f);
+    saxLoopHeldAges.fill(0);
+
     auto activeVoiceCount = 0;
     for (const auto& voice : saxLoopVoices)
         activeVoiceCount += voice.active ? 1 : 0;
@@ -1482,6 +1645,9 @@ void EcosystemEngine::resetSaxLoopKeyboardVoices() noexcept
 {
     for (auto& voice : saxLoopVoices)
         voice = {};
+    saxLoopHeldNoteCounts.fill(0);
+    saxLoopHeldVelocities.fill(0.0f);
+    saxLoopHeldAges.fill(0);
     saxLoopPitchBendSemitones = 0.0f;
     saxLoopSustain = false;
     saxLoopVoiceAge = 0;
@@ -1658,7 +1824,8 @@ void EcosystemEngine::renderAudioMemory(
             cosmosCrossfades[head] = juce::jmin(
                 static_cast<int>(cosmosHeadLengths[head] / 4),
                 juce::jmax(4, static_cast<int>(std::round(
-                    sampleRate * (0.010 + 0.003 * head)))));
+                    sampleRate * (0.010 + 0.003
+                        * static_cast<double>(head))))));
             cosmosWrappedSpans[head] = juce::jmax(
                 1.0, static_cast<double>(
                     cosmosHeadLengths[head] - cosmosCrossfades[head]));

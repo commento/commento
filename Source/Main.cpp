@@ -1,15 +1,34 @@
 #include <JuceHeader.h>
 #include "MainComponent.h"
 
+#if JUCE_LINUX
+ #include <cerrno>
+ #include <cstdio>
+ #include <cstring>
+ #include <sys/mman.h>
+#endif
+
 class CommentoApplication final : public juce::JUCEApplication
 {
 public:
     const juce::String getApplicationName() override    { return "Commento"; }
-    const juce::String getApplicationVersion() override { return "0.1.1"; }
+    const juce::String getApplicationVersion() override { return "0.1.2"; }
     bool moreThanOneInstanceAllowed() override          { return false; }
 
     void initialise(const juce::String& commandLine) override
     {
+#if JUCE_LINUX
+        // The systemd kiosk unit provides an unlimited memlock allowance.
+        // Keeping the audio loop and delay pages resident prevents a page
+        // fault from stealing part of a 512-sample callback. Manual launches
+        // without that allowance simply continue unlocked.
+        if (mlockall(MCL_CURRENT | MCL_FUTURE) == 0)
+            std::fputs("Commento: memoria audio residente attiva\n", stderr);
+        else
+            std::fprintf(stderr,
+                "Commento: memoria audio residente non attiva: %s\n",
+                std::strerror(errno));
+#endif
         mainWindow = std::make_unique<MainWindow>(
             getApplicationName(), ! commandLine.contains("--windowed"));
     }
@@ -49,4 +68,3 @@ private:
 };
 
 START_JUCE_APPLICATION(CommentoApplication)
-
