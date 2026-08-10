@@ -183,6 +183,13 @@ int main()
                      "i preset non devono imporre code eccessivamente lunghe");
     passed &= expect(allFactoryBassPatchesAreDry,
                      "il fast-path del basso richiede patch fabbrica asciutte");
+    {
+        EcosystemEngine defaultEngine;
+        passed &= expect(! defaultEngine.isLoopEvolutionEnabled(),
+                         "DERIVA deve partire spenta");
+        passed &= expect(defaultEngine.isSaxStereoInput(),
+                         "RESPIRO deve partire in stereo sugli ingressi 7/8");
+    }
     passed &= expect(CommentoScenarios::wrapIndex(-1)
                              == CommentoScenarios::count - 1
                          && CommentoScenarios::wrapIndex(
@@ -594,6 +601,438 @@ int main()
                          && std::abs(loopEngine.getLengthSeconds(1) - loopLength) < 0.0001,
                      "cambiare scenario non deve cancellare o alterare i loop MIDI");
 
+    // DERIVA is deliberately rare, so exercise it on a low sample-rate clock:
+    // the musical delays remain measured in seconds while the test stays fast.
+    // Two enabled engines must make exactly the same choices, while a third
+    // engine left at the default OFF state is the unaltered acoustic reference.
+    {
+        constexpr auto evolutionSampleRate = 8000.0;
+        constexpr auto evolutionBlockSize = 400;
+        constexpr auto evolutionMemory = 2;
+        constexpr auto evolutionChannel = 3;
+        constexpr auto evolutionNote = 60;
+        constexpr auto companionNote = 67;
+
+        EcosystemEngine evolutionEngine;
+        EcosystemEngine evolutionTwin;
+        EcosystemEngine evolutionOffReference;
+        std::array<EcosystemEngine*, 3> evolutionEngines {
+            &evolutionEngine, &evolutionTwin, &evolutionOffReference
+        };
+        for (auto* engine : evolutionEngines)
+        {
+            engine->setScenarioIndex(1); // GOCCE: short release, clear spectrum
+            engine->setDelayLevel(evolutionMemory, 0.0f);
+            engine->prepare(evolutionSampleRate, evolutionBlockSize);
+        }
+        evolutionOffReference.setLoopEvolutionEnabled(false);
+
+        OutputBlock<EcosystemEngine::logicalOutputBusCount> evolutionOutput(
+            evolutionBlockSize);
+        OutputBlock<EcosystemEngine::logicalOutputBusCount> evolutionTwinOutput(
+            evolutionBlockSize);
+        OutputBlock<EcosystemEngine::logicalOutputBusCount> evolutionOffOutput(
+            evolutionBlockSize);
+        std::array<OutputBlock<EcosystemEngine::logicalOutputBusCount>*, 3>
+            evolutionOutputs {
+                &evolutionOutput, &evolutionTwinOutput, &evolutionOffOutput
+            };
+
+        const auto renderEvolutionEngine = [](EcosystemEngine& engine,
+                                               auto& output)
+        {
+            output.clear();
+            process(engine, nullptr, 0, output.pointers.data(),
+                    EcosystemEngine::logicalOutputBusCount,
+                    evolutionBlockSize);
+        };
+        const auto recordEvolutionLoop = [&](EcosystemEngine& engine,
+                                              auto& output)
+        {
+            engine.toggleRecording(evolutionMemory);
+            engine.enqueueMidiMessage(juce::MidiMessage::noteOn(
+                evolutionChannel, evolutionNote, 0.80f));
+            engine.enqueueMidiMessage(juce::MidiMessage::noteOn(
+                evolutionChannel, companionNote, 0.62f));
+            renderEvolutionEngine(engine, output);
+            engine.enqueueMidiMessage(juce::MidiMessage::noteOff(
+                evolutionChannel, evolutionNote));
+            engine.enqueueMidiMessage(juce::MidiMessage::noteOff(
+                evolutionChannel, companionNote));
+            renderEvolutionEngine(engine, output);
+            engine.toggleRecording(evolutionMemory);
+            renderEvolutionEngine(engine, output);
+        };
+        for (std::size_t index = 0; index < evolutionEngines.size(); ++index)
+            recordEvolutionLoop(*evolutionEngines[index],
+                                *evolutionOutputs[index]);
+
+        const auto originalEventCount = evolutionEngine.getEventCount(
+            evolutionMemory);
+        const auto originalLoopLength = evolutionEngine.getLengthSeconds(
+            evolutionMemory);
+        auto defaultOffMaximumDifference = 0.0f;
+        auto defaultOffStayedNormal = true;
+        for (int block = 0; block < 8; ++block)
+        {
+            for (std::size_t index = 0; index < evolutionEngines.size(); ++index)
+                renderEvolutionEngine(*evolutionEngines[index],
+                                      *evolutionOutputs[index]);
+            for (int channel = EcosystemEngine::ambientLeftBus;
+                 channel <= EcosystemEngine::ambientRightBus; ++channel)
+                for (int sample = 0; sample < evolutionBlockSize; ++sample)
+                {
+                    const auto reference = evolutionOffOutput.storage[
+                        static_cast<std::size_t>(channel)][
+                            static_cast<std::size_t>(sample)];
+                    defaultOffMaximumDifference = std::max(
+                        defaultOffMaximumDifference,
+                        std::abs(evolutionOutput.storage[
+                                     static_cast<std::size_t>(channel)][
+                                         static_cast<std::size_t>(sample)]
+                                 - reference));
+                    defaultOffMaximumDifference = std::max(
+                        defaultOffMaximumDifference,
+                        std::abs(evolutionTwinOutput.storage[
+                                     static_cast<std::size_t>(channel)][
+                                         static_cast<std::size_t>(sample)]
+                                 - reference));
+                }
+            for (int memory = 1; memory < EcosystemEngine::midiMemoryCount;
+                 ++memory)
+                defaultOffStayedNormal &= evolutionEngine.getLoopEvolution(memory)
+                        == EcosystemEngine::LoopEvolution::normal
+                    && evolutionTwin.getLoopEvolution(memory)
+                        == EcosystemEngine::LoopEvolution::normal
+                    && evolutionOffReference.getLoopEvolution(memory)
+                        == EcosystemEngine::LoopEvolution::normal;
+        }
+        passed &= expect(originalEventCount == 4
+                             && originalLoopLength > 0.0
+                             && defaultOffStayedNormal
+                             && defaultOffMaximumDifference < 0.000001f,
+                         "DERIVA spenta non deve alterare eventi, stato o audio");
+
+        evolutionEngine.setLoopEvolutionEnabled(true);
+        evolutionTwin.setLoopEvolutionEnabled(true);
+        auto choicesStayedDeterministic = true;
+        auto onlyOneEvolutionOwner = true;
+        auto originalLoopStayedIntact = true;
+        auto evolutionStayedFinite = true;
+        auto sawOctaveUp = false;
+        auto sawReverse = false;
+        auto renderedReverseGhost = false;
+        auto octaveSpectrumMeasured = false;
+        auto octaveUpPower = 0.0;
+        auto hypotheticalOctaveDownPower = 0.0;
+
+        const auto spectralPower = [](const auto& samples, double frequency)
+        {
+            auto real = 0.0;
+            auto imaginary = 0.0;
+            for (int sample = 0; sample < evolutionBlockSize; ++sample)
+            {
+                const auto phase = juce::MathConstants<double>::twoPi
+                    * frequency * static_cast<double>(sample)
+                    / evolutionSampleRate;
+                const auto window = 0.5 - 0.5 * std::cos(
+                    juce::MathConstants<double>::twoPi
+                    * static_cast<double>(sample)
+                    / static_cast<double>(evolutionBlockSize - 1));
+                const auto value = static_cast<double>(samples[
+                    static_cast<std::size_t>(sample)]) * window;
+                real += value * std::cos(phase);
+                imaginary -= value * std::sin(phase);
+            }
+            return real * real + imaginary * imaginary;
+        };
+
+        // The first event is due after 8-12 seconds and the second after the
+        // global 18-35 second cooldown. 36 seconds covers the deterministic
+        // +12 then REVERSE sequence for this memory.
+        constexpr auto maximumEvolutionBlocks = 720;
+        for (int block = 0; block < maximumEvolutionBlocks; ++block)
+        {
+            const auto stateBefore = evolutionEngine.getLoopEvolution(
+                evolutionMemory);
+            const auto phaseBefore = evolutionEngine.getPhase(evolutionMemory);
+            renderEvolutionEngine(evolutionEngine, evolutionOutput);
+            renderEvolutionEngine(evolutionTwin, evolutionTwinOutput);
+            renderEvolutionEngine(evolutionOffReference, evolutionOffOutput);
+
+            evolutionStayedFinite &= evolutionOutput.finite(
+                evolutionBlockSize)
+                && evolutionTwinOutput.finite(evolutionBlockSize)
+                && evolutionOffOutput.finite(evolutionBlockSize);
+            auto enabledTwinMaximumDifference = 0.0f;
+            for (int channel = EcosystemEngine::ambientLeftBus;
+                 channel <= EcosystemEngine::ambientRightBus; ++channel)
+                for (int sample = 0; sample < evolutionBlockSize; ++sample)
+                    enabledTwinMaximumDifference = std::max(
+                        enabledTwinMaximumDifference,
+                        std::abs(evolutionOutput.storage[
+                                     static_cast<std::size_t>(channel)][
+                                         static_cast<std::size_t>(sample)]
+                                 - evolutionTwinOutput.storage[
+                                     static_cast<std::size_t>(channel)][
+                                         static_cast<std::size_t>(sample)]));
+            choicesStayedDeterministic &= enabledTwinMaximumDifference
+                    < 0.000001f;
+
+            auto activeEvolutionOwners = 0;
+            for (int memory = 1; memory < EcosystemEngine::memoryCount; ++memory)
+            {
+                const auto firstState = evolutionEngine.getLoopEvolution(memory);
+                const auto twinState = evolutionTwin.getLoopEvolution(memory);
+                choicesStayedDeterministic &= firstState == twinState;
+                if (firstState != EcosystemEngine::LoopEvolution::normal)
+                    ++activeEvolutionOwners;
+                sawOctaveUp |= firstState
+                    == EcosystemEngine::LoopEvolution::octaveUp;
+                sawReverse |= firstState
+                    == EcosystemEngine::LoopEvolution::reverse;
+            }
+            onlyOneEvolutionOwner &= activeEvolutionOwners <= 1;
+            originalLoopStayedIntact &= evolutionEngine.hasMaterial(
+                    evolutionMemory)
+                && evolutionEngine.getEventCount(evolutionMemory)
+                    == originalEventCount
+                && std::abs(evolutionEngine.getLengthSeconds(evolutionMemory)
+                            - originalLoopLength) < 0.000001;
+
+            // GOCCE's layer 3 has no transpose. Subtracting the perfectly
+            // synchronised OFF engine isolates the ghost voice: its fundamental
+            // must sit at +12, with no corresponding -12 copy.
+            if (! octaveSpectrumMeasured
+                && stateBefore == EcosystemEngine::LoopEvolution::octaveUp
+                && phaseBefore < 0.001)
+            {
+                std::array<float, evolutionBlockSize> ghostDifference {};
+                for (int sample = 0; sample < evolutionBlockSize; ++sample)
+                    ghostDifference[static_cast<std::size_t>(sample)]
+                        = evolutionOutput.storage[
+                            EcosystemEngine::ambientLeftBus][
+                                static_cast<std::size_t>(sample)]
+                        - evolutionOffOutput.storage[
+                            EcosystemEngine::ambientLeftBus][
+                                static_cast<std::size_t>(sample)];
+                const auto midiFrequency = [](int note)
+                {
+                    return 440.0 * std::pow(
+                        2.0, static_cast<double>(note - 69) / 12.0);
+                };
+                octaveUpPower = spectralPower(
+                    ghostDifference, midiFrequency(evolutionNote + 12));
+                hypotheticalOctaveDownPower = spectralPower(
+                    ghostDifference, midiFrequency(evolutionNote - 12));
+                octaveSpectrumMeasured = true;
+            }
+            if (stateBefore == EcosystemEngine::LoopEvolution::reverse
+                && phaseBefore < 0.001)
+                renderedReverseGhost = true;
+            if (sawOctaveUp && sawReverse && renderedReverseGhost
+                && octaveSpectrumMeasured)
+                break;
+        }
+
+        passed &= expect(choicesStayedDeterministic
+                             && sawOctaveUp && sawReverse,
+                         "DERIVA deve produrre deterministicamente +12 e REVERSE");
+        passed &= expect(onlyOneEvolutionOwner,
+                         "DERIVA deve assegnare una sola memoria ghost alla volta");
+        passed &= expect(octaveSpectrumMeasured
+                             && octaveUpPower > 0.000001
+                             && octaveUpPower
+                                    > hypotheticalOctaveDownPower * 8.0,
+                         "la copia DERIVA deve essere solo un'ottava sopra, mai sotto");
+        passed &= expect(originalLoopStayedIntact && evolutionStayedFinite,
+                         "DERIVA non deve riscrivere il loop MIDI originale");
+
+        // Clear while the reversed ghost has already emitted its note-on. Both
+        // the owner channel and its hidden channel must release completely.
+        evolutionEngine.clearMemory(evolutionMemory);
+        renderEvolutionEngine(evolutionEngine, evolutionOutput);
+        auto lateTailPeak = 0.0f;
+        constexpr auto releaseBlocks = 300; // 15 seconds in GOCCE
+        for (int block = 0; block < releaseBlocks; ++block)
+        {
+            renderEvolutionEngine(evolutionEngine, evolutionOutput);
+            if (block >= releaseBlocks - 40)
+                lateTailPeak = std::max(lateTailPeak,
+                    std::max(evolutionOutput.peak(
+                                 EcosystemEngine::ambientLeftBus,
+                                 evolutionBlockSize),
+                             evolutionOutput.peak(
+                                 EcosystemEngine::ambientRightBus,
+                                 evolutionBlockSize)));
+        }
+        passed &= expect(! evolutionEngine.hasMaterial(evolutionMemory)
+                             && evolutionEngine.getEventCount(evolutionMemory) == 0
+                             && evolutionEngine.getLoopEvolution(evolutionMemory)
+                                    == EcosystemEngine::LoopEvolution::normal
+                             && lateTailPeak < 0.00001f,
+                         "il ghost MIDI deve spegnersi senza note bloccate al wrap o al clear");
+    }
+
+    // RESPIRO uses the same rare global scheduler, but evolves a short,
+    // crossfaded reread of the audio loop. Compare it with an identical OFF
+    // engine so onset and release of that added voice can be measured directly.
+    {
+        constexpr auto audioEvolutionSampleRate = 8000.0;
+        constexpr auto audioEvolutionBlockSize = 400;
+        constexpr auto captureBlocks = 80; // four-second seamless loop
+        EcosystemEngine audioEvolutionEngine;
+        EcosystemEngine audioEvolutionReference;
+        for (auto* engine : { &audioEvolutionEngine, &audioEvolutionReference })
+        {
+            engine->setScenarioIndex(1);
+            engine->setSaxPathMode(EcosystemEngine::SaxPathMode::cleanLooper);
+            engine->setDelayLevel(EcosystemEngine::midiMemoryCount, 0.0f);
+            engine->prepare(audioEvolutionSampleRate, audioEvolutionBlockSize);
+        }
+        audioEvolutionReference.setLoopEvolutionEnabled(false);
+
+        std::array<std::vector<float>, 2> evolutionInputStorage;
+        std::array<const float*, 2> evolutionInputs {};
+        constexpr std::array<double, 2> inputFrequencies { 100.0, 140.0 };
+        constexpr std::array<float, 2> inputLevels { 0.16f, 0.12f };
+        for (std::size_t channel = 0; channel < evolutionInputStorage.size();
+             ++channel)
+        {
+            evolutionInputStorage[channel].resize(audioEvolutionBlockSize);
+            for (int sample = 0; sample < audioEvolutionBlockSize; ++sample)
+                evolutionInputStorage[channel][static_cast<std::size_t>(sample)]
+                    = inputLevels[channel] * static_cast<float>(std::sin(
+                        juce::MathConstants<double>::twoPi
+                        * inputFrequencies[channel]
+                        * static_cast<double>(sample)
+                        / audioEvolutionSampleRate));
+            evolutionInputs[channel] = evolutionInputStorage[channel].data();
+        }
+
+        OutputBlock<EcosystemEngine::logicalOutputBusCount> audioEvolutionOutput(
+            audioEvolutionBlockSize);
+        OutputBlock<EcosystemEngine::logicalOutputBusCount> audioReferenceOutput(
+            audioEvolutionBlockSize);
+        const auto renderAudioEvolution = [&](EcosystemEngine& engine,
+                                               auto& output,
+                                               bool withInput)
+        {
+            output.clear();
+            process(engine, withInput ? evolutionInputs.data() : nullptr,
+                    withInput ? 2 : 0, output.pointers.data(),
+                    EcosystemEngine::logicalOutputBusCount,
+                    audioEvolutionBlockSize);
+        };
+        audioEvolutionEngine.toggleRecording(EcosystemEngine::midiMemoryCount);
+        audioEvolutionReference.toggleRecording(EcosystemEngine::midiMemoryCount);
+        for (int block = 0; block < captureBlocks; ++block)
+        {
+            renderAudioEvolution(audioEvolutionEngine, audioEvolutionOutput, true);
+            renderAudioEvolution(audioEvolutionReference, audioReferenceOutput,
+                                 true);
+        }
+        audioEvolutionEngine.toggleRecording(EcosystemEngine::midiMemoryCount);
+        audioEvolutionReference.toggleRecording(EcosystemEngine::midiMemoryCount);
+        renderAudioEvolution(audioEvolutionEngine, audioEvolutionOutput, false);
+        renderAudioEvolution(audioEvolutionReference, audioReferenceOutput, false);
+        const auto capturedAudioLength = audioEvolutionEngine.getLengthSeconds(
+            EcosystemEngine::midiMemoryCount);
+        audioEvolutionEngine.setLoopEvolutionEnabled(true);
+
+        auto audioEvolutionStayedFinite = true;
+        auto audioEvolutionPeak = 0.0f;
+        auto audioEvolutionMaximumStep = 0.0f;
+        std::array<float, 2> previousAudioSamples {};
+        auto sawAudioEvolution = false;
+        auto audioEvolutionFinished = false;
+        auto firstEvolutionDifference = -1.0f;
+        auto lastEvolutionDifference = 0.0f;
+        auto maximumEvolutionDifference = 0.0f;
+        auto postEvolutionDifference = 1.0f;
+
+        constexpr auto maximumAudioEvolutionBlocks = 440; // 22 seconds
+        for (int block = 0; block < maximumAudioEvolutionBlocks; ++block)
+        {
+            const auto stateBefore = audioEvolutionEngine.getLoopEvolution(
+                EcosystemEngine::midiMemoryCount);
+            renderAudioEvolution(audioEvolutionEngine, audioEvolutionOutput,
+                                 false);
+            renderAudioEvolution(audioEvolutionReference, audioReferenceOutput,
+                                 false);
+            const auto stateAfter = audioEvolutionEngine.getLoopEvolution(
+                EcosystemEngine::midiMemoryCount);
+
+            auto squaredDifference = 0.0;
+            for (int channel = EcosystemEngine::saxLeftBus;
+                 channel <= EcosystemEngine::saxRightBus; ++channel)
+            {
+                for (int sample = 0; sample < audioEvolutionBlockSize; ++sample)
+                {
+                    const auto value = audioEvolutionOutput.storage[
+                        static_cast<std::size_t>(channel)][
+                            static_cast<std::size_t>(sample)];
+                    const auto reference = audioReferenceOutput.storage[
+                        static_cast<std::size_t>(channel)][
+                            static_cast<std::size_t>(sample)];
+                    squaredDifference += static_cast<double>(value - reference)
+                        * static_cast<double>(value - reference);
+                    audioEvolutionPeak = std::max(audioEvolutionPeak,
+                                                  std::abs(value));
+                    audioEvolutionMaximumStep = std::max(
+                        audioEvolutionMaximumStep,
+                        std::abs(value - previousAudioSamples[
+                            static_cast<std::size_t>(channel
+                                - EcosystemEngine::saxLeftBus)]));
+                    previousAudioSamples[static_cast<std::size_t>(
+                        channel - EcosystemEngine::saxLeftBus)] = value;
+                }
+            }
+            const auto differenceRms = static_cast<float>(std::sqrt(
+                squaredDifference
+                / static_cast<double>(audioEvolutionBlockSize * 2)));
+            audioEvolutionStayedFinite &= audioEvolutionOutput.finite(
+                    audioEvolutionBlockSize)
+                && audioReferenceOutput.finite(audioEvolutionBlockSize);
+
+            if (stateBefore != EcosystemEngine::LoopEvolution::normal)
+            {
+                if (! sawAudioEvolution)
+                    firstEvolutionDifference = differenceRms;
+                sawAudioEvolution = true;
+                lastEvolutionDifference = differenceRms;
+                maximumEvolutionDifference = std::max(
+                    maximumEvolutionDifference, differenceRms);
+            }
+            else if (sawAudioEvolution
+                     && stateAfter == EcosystemEngine::LoopEvolution::normal)
+            {
+                postEvolutionDifference = differenceRms;
+                audioEvolutionFinished = true;
+                break;
+            }
+        }
+
+        passed &= expect(audioEvolutionEngine.hasMaterial(
+                             EcosystemEngine::midiMemoryCount)
+                             && std::abs(audioEvolutionEngine.getLengthSeconds(
+                                    EcosystemEngine::midiMemoryCount)
+                                        - capturedAudioLength) < 0.000001
+                             && sawAudioEvolution && audioEvolutionFinished,
+                         "DERIVA deve aggiungere una rilettura temporanea a RESPIRO");
+        passed &= expect(audioEvolutionStayedFinite
+                             && audioEvolutionPeak < 0.20f
+                             && audioEvolutionMaximumStep < 0.035f,
+                         "RESPIRO in DERIVA deve restare finito, con headroom e senza click");
+        passed &= expect(maximumEvolutionDifference > 0.0001f
+                             && firstEvolutionDifference
+                                    < maximumEvolutionDifference * 0.12f
+                             && lastEvolutionDifference
+                                    < maximumEvolutionDifference * 0.12f
+                             && postEvolutionDifference < 0.000001f,
+                         "la rilettura RESPIRO deve entrare e uscire con dissolvenze graduali");
+    }
+
     // Exercise the public morph contract on an exactly divisible time base:
     // 80 callbacks cover the declared eight seconds.  The loop is recorded
     // first so every progress observation also guards its event metadata.
@@ -977,6 +1416,46 @@ int main()
                          "GRANA e FUZZ devono restare finite e senza salti macroscopici");
     }
 
+    // At 48 kHz a full-strength GRANA capture changes every eight samples.
+    // Feed those boundaries an alternating signal: the wet high-cut must
+    // round each edge instead of reproducing the bright, unfiltered step.
+    {
+        constexpr auto filterProbeSamples = 64;
+        EcosystemEngine grainFilterEngine;
+        grainFilterEngine.setSaxPathMode(EcosystemEngine::SaxPathMode::direct);
+        grainFilterEngine.setSaxStereoInput(false);
+        grainFilterEngine.setTextureAmount(1.0f);
+        grainFilterEngine.setFuzzEnabled(false);
+        grainFilterEngine.prepare(sampleRate, filterProbeSamples);
+
+        std::array<std::vector<float>, 1> filterInputStorage;
+        filterInputStorage[0].resize(filterProbeSamples);
+        for (int sample = 0; sample < filterProbeSamples; ++sample)
+            filterInputStorage[0][static_cast<std::size_t>(sample)]
+                = ((sample / 8) % 2 == 0) ? 0.25f : -0.25f;
+        std::array<const float*, 1> filterInputs {
+            filterInputStorage[0].data()
+        };
+        OutputBlock<EcosystemEngine::logicalOutputBusCount> filterOutput(
+            filterProbeSamples);
+        process(grainFilterEngine, filterInputs.data(), 1,
+                filterOutput.pointers.data(),
+                EcosystemEngine::logicalOutputBusCount, filterProbeSamples);
+
+        auto maximumFilteredStep = 0.0f;
+        const auto& filteredSax = filterOutput.storage[
+            EcosystemEngine::saxLeftBus];
+        for (int sample = 1; sample < filterProbeSamples; ++sample)
+            maximumFilteredStep = std::max(
+                maximumFilteredStep,
+                std::abs(filteredSax[static_cast<std::size_t>(sample)]
+                         - filteredSax[static_cast<std::size_t>(sample - 1)]));
+
+        passed &= expect(filterOutput.finite(filterProbeSamples)
+                             && maximumFilteredStep < 0.18f,
+                         "il passa-basso GRANA deve smussare le immagini acute");
+    }
+
     // Fill all eight voices on each of the three loopable MIDI layers. This
     // reproduces the worst useful polyphony (24 ambient voices) without a
     // timing assertion that would depend on the build machine. The rendered
@@ -1034,6 +1513,7 @@ int main()
     // Keep the non-loopable performance bass held throughout the worst-case
     // ambient playback.  This catches regressions that are invisible when
     // only the shared stereo pair is inspected.
+    multiLoopEngine.setLoopEvolutionEnabled(true);
     multiLoopEngine.enqueueMidiMessage(
         juce::MidiMessage::noteOn(5, 40, 0.92f));
     float multiLoopPeak = 0.0f;
@@ -1045,11 +1525,23 @@ int main()
     bool multiLoopStayedFinite = true;
     bool multiLoopBassStayedFinite = true;
     int multiLoopProtectedSamples = 0;
-    for (int block = 0; block < 400; ++block)
+    bool multiLoopEvolutionOwnerStayedUnique = true;
+    bool sawMultiLoopEvolution = false;
+    // 1,200 blocks are 12.8 seconds at 48 kHz: enough to cross DERIVA's
+    // deterministic 8-12 second first delay while all three loops and the live
+    // bass are under the same worst-case load.
+    for (int block = 0; block < 1200; ++block)
     {
         multiLoopOutput.clear();
         process(multiLoopEngine, nullptr, 0, multiLoopOutput.pointers.data(),
                 EcosystemEngine::logicalOutputBusCount, blockSize);
+        auto activeEvolutionOwners = 0;
+        for (int memory = 1; memory < EcosystemEngine::memoryCount; ++memory)
+            if (multiLoopEngine.getLoopEvolution(memory)
+                != EcosystemEngine::LoopEvolution::normal)
+                ++activeEvolutionOwners;
+        multiLoopEvolutionOwnerStayedUnique &= activeEvolutionOwners <= 1;
+        sawMultiLoopEvolution |= activeEvolutionOwners == 1;
         multiLoopStayedFinite &= multiLoopOutput.finite(blockSize);
         for (int channel = EcosystemEngine::ambientLeftBus;
              channel <= EcosystemEngine::ambientRightBus; ++channel)
@@ -1093,6 +1585,13 @@ int main()
                      "il basso tenuto con tre loop deve restare finito e con headroom");
     passed &= expect(multiLoopBassMaximumStep < 0.08f,
                      "il basso tenuto con tre loop non deve introdurre crackle");
+    passed &= expect(multiLoopEngine.isLoopEvolutionEnabled()
+                         && sawMultiLoopEvolution
+                         && multiLoopEvolutionOwnerStayedUnique
+                         && multiLoopEngine.getEventCount(1) == 16
+                         && multiLoopEngine.getEventCount(2) == 16
+                         && multiLoopEngine.getEventCount(3) == 16,
+                     "tre loop e basso con DERIVA devono conservare eventi e un solo owner");
 
     EcosystemEngine ambientEngine;
     ambientEngine.prepare(sampleRate, blockSize);

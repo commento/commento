@@ -34,6 +34,8 @@ Il nome **Commento** e' provvisorio.
 - un livello indipendente e anti-click per canale I, MIDI 2/3/4 e sax, richiamato
   selezionando la relativa card;
 - due gesti globali a ingresso e uscita lenti: GRANA/downsample e FUZZ;
+- DERIVA opzionale e rara: una sola ombra reverse oppure +12 alla volta, sempre
+  sommata al loop originale;
 - build macOS e Raspberry Pi OS 64 bit dallo stesso codice.
 
 Questa versione non salva ancora i loop su disco. Salva invece l'ultimo scenario
@@ -123,10 +125,22 @@ durante il collegamento.
 - usare **GRANA** per scegliere `PULITA`, `LEGGERA`, `MEDIA` o `PIENA`; il valore
   iniziale e' PULITA e viene ricordato al riavvio. Oltre a muovere drive,
   rumore, detune e instabilita' degli scenari, ora miscela realmente una
-  riduzione a circa 6 kHz e sei bit. Entra in 1,5 secondi e si ritira in 3
-  secondi, quindi non crea un bordo netto;
+  riduzione a circa 6 kHz e sei bit. Il solo percorso trattato viene addolcito
+  da un passa-basso a circa 4,2 kHz, mentre il dry resta intatto. Entra in 1,5
+  secondi e si ritira in 3 secondi, quindi non crea un bordo netto;
 - usare **FUZZ** per introdurre una saturazione dura ma contenuta. Anche FUZZ
   entra in 1,5 secondi e si dissolve in 3 secondi; riparte spento a ogni avvio;
+- usare **DERIVA: RARA** quando si desiderano variazioni non programmate. Parte
+  spenta: una volta attiva, aggiunge occasionalmente una sola ombra a volume
+  ridotto senza sostituire il materiale originale. Sui loop MIDI segue una
+  sola linea e sceglie fra reverse e una copia esclusivamente `+12` (mai
+  `-12`); su RESPIRO usa un frammento reverse oppure una testina a velocita'
+  doppia, cioe' un'ottava-nastro, con ingresso di 400 ms e uscita di 1 secondo.
+  Il primo evento arriva dopo circa 8-12 secondi, poi lascia 18-35 secondi di
+  respiro fra un evento e il successivo. La card mostra `OMBRA +12` o
+  `OMBRA REVERSE` durante il giro interessato. Spegnendo DERIVA non partono
+  nuovi eventi; l'ombra eventualmente in corso termina con la propria
+  dissolvenza invece di essere troncata;
 - toccare una card per selezionare BASSO LIVE, MAREA, RADICE, SCINTILLA o
   RESPIRO;
 - regolare il grande controllo **LIVELLO** della card selezionata; i cinque
@@ -147,8 +161,9 @@ durante il collegamento.
   **NUTRI / OVERDUB** per aggiungere nuovo suono mentre la memoria precedente
   viene consumata lentamente; questa registrazione parte direttamente dal
   pulsante e non attende una nota MIDI;
-- scegliere nella pagina CONNESSIONI il canale mono o la coppia stereo realmente
-  usata dal sax; il profilo MODEL 12 propone rispettivamente 7 mono o 7/8;
+- il sax parte in stereo dalla coppia configurata; con il profilo MODEL 12 la
+  coppia predefinita e' 7/8. Il pulsante grande di RESPIRO permette comunque di
+  passare a mono dal solo canale sinistro quando si usa un unico ingresso;
 - **PERSISTENZA DEL RESPIRO** decide quanto materiale precedente sopravvive a ogni
   overdub (`1.000` seleziona la persistenza massima; internamente resta un
   margine di sicurezza dello 0,5%, mentre valori inferiori dissolvono piu'

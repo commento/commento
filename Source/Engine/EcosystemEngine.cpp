@@ -45,6 +45,19 @@ namespace
     return std::copysign(protectedMagnitude, sample);
 }
 
+[[nodiscard]] std::uint32_t nextEvolutionRandom(
+    std::uint32_t& state) noexcept
+{
+    // Deterministic, allocation-free randomness: performances keep evolving,
+    // while tests and recordings remain reproducible after a fresh start.
+    if (state == 0)
+        state = 0x9e3779b9u;
+    state ^= state << 13;
+    state ^= state >> 17;
+    state ^= state << 5;
+    return state;
+}
+
 [[nodiscard]] SynthPatch applyTexture(SynthPatch patch, float amount) noexcept
 {
     patch.drive = 1.0f + juce::jmax(0.0f, patch.drive - 1.0f) * amount;
@@ -82,7 +95,10 @@ EcosystemEngine::EcosystemEngine()
     const auto& initialScenario = CommentoScenarios::get(0);
     for (int index = 0; index < midiMemoryCount; ++index)
     {
-        midiMemories[static_cast<size_t>(index)].events.reserve(maximumMidiEvents + 128);
+        auto& memory = midiMemories[static_cast<size_t>(index)];
+        memory.events.reserve(maximumMidiEvents + 128);
+        memory.evolutionRandomState ^= static_cast<std::uint32_t>(
+            0x85ebca6bu * static_cast<std::uint32_t>(index + 1));
         internalSynths[static_cast<size_t>(index)] = std::make_unique<AmbientSynth>(index);
         internalSynths[static_cast<size_t>(index)]->setPatch(
             initialScenario.layers[static_cast<size_t>(index)]);
@@ -207,6 +223,19 @@ int EcosystemEngine::getEventCount(int memoryIndex) const
     if (juce::isPositiveAndBelow(memoryIndex, midiMemoryCount))
         return midiMemories[static_cast<size_t>(memoryIndex)].eventCount.load();
     return 0;
+}
+
+EcosystemEngine::LoopEvolution EcosystemEngine::getLoopEvolution(
+    int memoryIndex) const noexcept
+{
+    if (juce::isPositiveAndBelow(memoryIndex, midiMemoryCount))
+        return static_cast<LoopEvolution>(midiMemories[
+            static_cast<std::size_t>(memoryIndex)].evolutionForDisplay.load(
+                std::memory_order_relaxed));
+    if (memoryIndex == midiMemoryCount)
+        return static_cast<LoopEvolution>(
+            audioMemory.evolutionForDisplay.load(std::memory_order_relaxed));
+    return LoopEvolution::normal;
 }
 
 int EcosystemEngine::getMidiChannelForMemory(int memoryIndex) const
@@ -334,6 +363,17 @@ void EcosystemEngine::setFuzzEnabled(bool shouldBeEnabled) noexcept
 bool EcosystemEngine::isFuzzEnabled() const noexcept
 {
     return fuzzEnabled.load(std::memory_order_relaxed);
+}
+
+void EcosystemEngine::setLoopEvolutionEnabled(
+    bool shouldBeEnabled) noexcept
+{
+    loopEvolutionEnabled.store(shouldBeEnabled, std::memory_order_relaxed);
+}
+
+bool EcosystemEngine::isLoopEvolutionEnabled() const noexcept
+{
+    return loopEvolutionEnabled.load(std::memory_order_relaxed);
 }
 
 void EcosystemEngine::setBassEnabled(bool shouldBeEnabled)
@@ -509,14 +549,54 @@ void EcosystemEngine::prepare(double newSampleRate, int maximumBlockSize)
         fuzzEnabled.load(std::memory_order_relaxed) ? 1.0f : 0.0f);
     activeGrainEffectTarget = grainEffectMix.getCurrentValue();
     activeFuzzEffectTarget = fuzzEffectMix.getCurrentValue();
+    evolutionSampleClock = 0;
+    nextEvolutionSample = 0;
+    evolutionWasEnabled = false;
+    activeMidiEvolutionMemory = -1;
+    for (auto& memory : midiMemories)
+    {
+        memory.evolution = LoopEvolution::normal;
+        memory.evolutionForDisplay.store(
+            static_cast<int>(LoopEvolution::normal),
+            std::memory_order_relaxed);
+    }
+    audioMemory.evolution = LoopEvolution::normal;
+    audioMemory.evolutionForDisplay.store(
+        static_cast<int>(LoopEvolution::normal),
+        std::memory_order_relaxed);
+    audioMemory.evolutionStartPosition = 0;
+    audioMemory.evolutionDurationSamples = 0;
+    audioMemory.evolutionSourcePosition = 0.0;
     grainHeldSamples.fill(0.0f);
+    grainFilteredSamples.fill(0.0f);
+    // A gentle one-pole low-pass removes the bright images produced by the
+    // 6 kHz sample-and-hold without making the useful midrange opaque.  Its
+    // coefficient is prepared off the audio thread and remains valid for
+    // unusual device sample rates as well as the Model 12's usual 48 kHz.
+    constexpr auto grainLowPassCutoffHz = 4200.0;
+    const auto safeGrainCutoff = juce::jmin(
+        grainLowPassCutoffHz, sampleRate * 0.40);
+    grainLowPassCoefficient = static_cast<float>(1.0 - std::exp(
+        -juce::MathConstants<double>::twoPi * safeGrainCutoff / sampleRate));
     grainHoldCounter = 0;
+    grainFilterNeedsPrime = true;
+    audioEvolutionFilteredSamples.fill(0.0f);
+    constexpr auto audioEvolutionCutoffHz = 6000.0;
+    const auto safeEvolutionCutoff = juce::jmin(
+        audioEvolutionCutoffHz, sampleRate * 0.40);
+    audioEvolutionLowPassCoefficient = static_cast<float>(1.0 - std::exp(
+        -juce::MathConstants<double>::twoPi * safeEvolutionCutoff
+        / sampleRate));
     blockMidiOutput.ensureSize(128 * 1024);
     for (auto& midi : layerMidiBuffers)
         midi.ensureSize(64 * 1024);
     for (int index = 0; index < midiMemoryCount; ++index)
     {
         auto& synth = internalSynths[static_cast<std::size_t>(index)];
+        // A device reopen resets DERIVA ownership. Hard-stop every internal
+        // channel first so a ghost voice cannot survive without its later
+        // boundary note-off.
+        synth->allNotesOff();
         synth->setDelayLevel(getDelayLevel(index));
         synth->prepare(sampleRate, maximumBlockSize);
     }
@@ -662,6 +742,21 @@ void EcosystemEngine::audioDeviceIOCallbackWithContext(
     for (int channel = 0; channel < numOutputChannels; ++channel)
         if (outputChannelData[channel] != nullptr)
             juce::FloatVectorOperations::clear(outputChannelData[channel], numSamples);
+
+    evolutionSampleClock += juce::jmax(0, numSamples);
+    const auto evolutionEnabledNow = loopEvolutionEnabled.load(
+        std::memory_order_relaxed);
+    if (evolutionEnabledNow && ! evolutionWasEnabled)
+    {
+        const auto firstDelaySeconds = 8u
+            + nextEvolutionRandom(audioMemory.evolutionRandomState) % 5u;
+        nextEvolutionSample = evolutionSampleClock
+            + static_cast<int64_t>(std::round(
+                sampleRate * static_cast<double>(firstDelaySeconds)));
+    }
+    else if (! evolutionEnabledNow)
+        nextEvolutionSample = 0;
+    evolutionWasEnabled = evolutionEnabledNow;
 
     blockMidiOutput.clear();
     if (midiOverflowed.exchange(false))
@@ -926,7 +1021,11 @@ void EcosystemEngine::updatePerformanceEffectTargets() noexcept
         grainEffectMix.setTargetValue(grainTarget);
         activeGrainEffectTarget = grainTarget;
         if (grainTarget > current)
+        {
             grainHoldCounter = 0;
+            if (current <= 0.0001f)
+                grainFilterNeedsPrime = true;
+        }
     }
 
     const auto fuzzTarget = fuzzEnabled.load(std::memory_order_relaxed)
@@ -957,10 +1056,11 @@ void EcosystemEngine::processPerformanceEffects(
         return;
 
     // GRANA is deliberately fixed and cheap: a 6 kHz sample-and-hold at
-    // 48 kHz followed by roughly six-bit quantisation. Its wet amount is the
-    // slowly-smoothed GRANA control, so changing strength never moves a read
-    // head or introduces a discontinuity. FUZZ uses no transcendental maths
-    // and is level-contained before the existing per-bus safety protection.
+    // 48 kHz followed by roughly six-bit quantisation and a gentle one-pole
+    // high cut. The filter only colours the wet path; the slowly-smoothed
+    // GRANA amount brings both in and out together without touching the dry
+    // signal. FUZZ uses no transcendental maths and is level-contained before
+    // the existing per-bus safety protection.
     constexpr int holdSamples = 8;
     constexpr float quantisationSteps = 64.0f;
     for (int sample = 0; sample < numSamples; ++sample)
@@ -981,6 +1081,13 @@ void EcosystemEngine::processPerformanceEffects(
                     = std::round(input * quantisationSteps)
                       / quantisationSteps;
             }
+            if (grainFilterNeedsPrime)
+            {
+                for (int channel = 0; channel < channels; ++channel)
+                    grainFilteredSamples[static_cast<std::size_t>(channel)]
+                        = grainHeldSamples[static_cast<std::size_t>(channel)];
+                grainFilterNeedsPrime = false;
+            }
             grainHoldCounter = holdSamples;
         }
         --grainHoldCounter;
@@ -991,10 +1098,14 @@ void EcosystemEngine::processPerformanceEffects(
             if (data == nullptr)
                 continue;
 
+            auto& filtered = grainFilteredSamples[
+                static_cast<std::size_t>(channel)];
+            filtered += grainLowPassCoefficient
+                * (grainHeldSamples[static_cast<std::size_t>(channel)]
+                   - filtered);
             const auto dry = std::isfinite(data[sample]) ? data[sample] : 0.0f;
             const auto crushed = dry
-                + (grainHeldSamples[static_cast<std::size_t>(channel)] - dry)
-                    * grain;
+                + (filtered - dry) * grain;
             const auto hardFuzz = juce::jlimit(-1.0f, 1.0f,
                                                crushed * 4.0f) * 0.45f;
             data[sample] = crushed + (hardFuzz - crushed) * fuzz;
@@ -1005,6 +1116,10 @@ void EcosystemEngine::processPerformanceEffects(
 void EcosystemEngine::applyMidiCommands(MidiMemory& memory, int channel,
                                          juce::MidiBuffer& output)
 {
+    const auto memoryIndex = memoryIndexForMidiChannel(channel);
+    const auto ghostChannel = juce::isPositiveAndBelow(
+        memoryIndex, midiMemoryCount)
+        ? evolutionMidiChannels[static_cast<std::size_t>(memoryIndex)] : 0;
     if (memory.clearRequested.exchange(false))
     {
         memory.events.clear();
@@ -1022,7 +1137,17 @@ void EcosystemEngine::applyMidiCommands(MidiMemory& memory, int channel,
         memory.lengthSeconds.store(0.0);
         memory.phase.store(0.0);
         memory.activeRecordedNotes.fill(false);
+        memory.evolutionNote = -1;
+        memory.evolutionVelocity = 0.25f;
+        memory.evolution = LoopEvolution::normal;
+        memory.evolutionForDisplay.store(
+            static_cast<int>(LoopEvolution::normal),
+            std::memory_order_relaxed);
         output.addEvent(juce::MidiMessage::allNotesOff(channel), 0);
+        if (ghostChannel > 0)
+            output.addEvent(juce::MidiMessage::allNotesOff(ghostChannel), 0);
+        if (activeMidiEvolutionMemory == memoryIndex)
+            activeMidiEvolutionMemory = -1;
     }
 
     const auto shouldRecord = memory.recordingRequested.load();
@@ -1034,9 +1159,13 @@ void EcosystemEngine::applyMidiCommands(MidiMemory& memory, int channel,
     memory.waitingForFirstNote = shouldRecord;
     memory.waitingForFirstNoteForDisplay.store(shouldRecord);
     output.addEvent(juce::MidiMessage::allNotesOff(channel), 0);
+    if (ghostChannel > 0)
+        output.addEvent(juce::MidiMessage::allNotesOff(ghostChannel), 0);
 
     if (shouldRecord)
     {
+        if (activeMidiEvolutionMemory == memoryIndex)
+            activeMidiEvolutionMemory = -1;
         memory.events.clear();
         memory.recordPosition = 0;
         memory.playbackPosition = 0;
@@ -1046,6 +1175,12 @@ void EcosystemEngine::applyMidiCommands(MidiMemory& memory, int channel,
         memory.lengthSeconds.store(0.0);
         memory.phase.store(0.0);
         memory.activeRecordedNotes.fill(false);
+        memory.evolutionNote = -1;
+        memory.evolutionVelocity = 0.25f;
+        memory.evolution = LoopEvolution::normal;
+        memory.evolutionForDisplay.store(
+            static_cast<int>(LoopEvolution::normal),
+            std::memory_order_relaxed);
     }
     else
     {
@@ -1066,6 +1201,15 @@ void EcosystemEngine::applyMidiCommands(MidiMemory& memory, int channel,
         memory.containsMaterial.store(usable);
         memory.eventCount.store(static_cast<int>(memory.events.size()));
         memory.lengthSeconds.store(usable ? static_cast<double>(memory.loopLength) / sampleRate : 0.0);
+        if (usable)
+            chooseMidiEvolution(memory, memoryIndex);
+        else
+        {
+            memory.evolution = LoopEvolution::normal;
+            memory.evolutionForDisplay.store(
+                static_cast<int>(LoopEvolution::normal),
+                std::memory_order_relaxed);
+        }
     }
 }
 
@@ -1113,6 +1257,10 @@ void EcosystemEngine::applyAudioCommands()
             audioMemory.clearAfterGainTransition = false;
             audioMemory.containsMaterial.store(false);
             audioMemory.lengthSeconds.store(0.0);
+            audioMemory.evolution = LoopEvolution::normal;
+            audioMemory.evolutionForDisplay.store(
+                static_cast<int>(LoopEvolution::normal),
+                std::memory_order_relaxed);
             resetCosmosHeads();
         }
     }
@@ -1137,6 +1285,7 @@ void EcosystemEngine::finishInitialAudioCapture() noexcept
         // the sax level at a block boundary.
         audioMemory.playbackGain = 0.0f;
         beginAudioMemoryGainTransition(1.0f, 0.125, false);
+        chooseAudioEvolution();
     }
     else
     {
@@ -1199,6 +1348,13 @@ void EcosystemEngine::finishAudioMemoryClear() noexcept
     audioMemory.gainTransitionSamplesRemaining = 0;
     audioMemory.gainTransitionSamplesTotal = 0;
     audioMemory.clearAfterGainTransition = false;
+    audioMemory.evolution = LoopEvolution::normal;
+    audioMemory.evolutionForDisplay.store(
+        static_cast<int>(LoopEvolution::normal),
+        std::memory_order_relaxed);
+    audioMemory.evolutionStartPosition = 0;
+    audioMemory.evolutionDurationSamples = 0;
+    audioMemory.evolutionSourcePosition = 0.0;
     resetCosmosHeads();
 }
 
@@ -1308,9 +1464,24 @@ void EcosystemEngine::recordIncomingMidi(int numSamples, juce::MidiBuffer& liveM
                 memory.events.push_back(
                     { message, memory.recordPosition + relativeOffset });
                 if (message.isNoteOn())
-                    memory.activeRecordedNotes[static_cast<size_t>(message.getNoteNumber())] = true;
+                {
+                    auto& active = memory.activeRecordedNotes[
+                        static_cast<size_t>(message.getNoteNumber())];
+                    active = true;
+                    if (memory.evolutionNote < 0)
+                    {
+                        memory.evolutionNote = message.getNoteNumber();
+                        memory.evolutionVelocity = juce::jlimit(
+                            0.12f, 0.42f,
+                            message.getFloatVelocity() * 0.38f);
+                    }
+                }
                 else if (message.isNoteOff())
-                    memory.activeRecordedNotes[static_cast<size_t>(message.getNoteNumber())] = false;
+                {
+                    auto& active = memory.activeRecordedNotes[
+                        static_cast<size_t>(message.getNoteNumber())];
+                    active = false;
+                }
             }
         }
     };
@@ -1352,7 +1523,9 @@ void EcosystemEngine::renderInternalSynths(float* const* outputs, int outputChan
         layerMidi.clear();
         for (const auto metadata : midi)
             if (metadata.getMessage().getChannel()
-                == midiChannels[static_cast<size_t>(layer)])
+                    == midiChannels[static_cast<size_t>(layer)]
+                || metadata.getMessage().getChannel()
+                    == evolutionMidiChannels[static_cast<size_t>(layer)])
                 layerMidi.addEvent(metadata.getMessage(), metadata.samplePosition);
 
         if (layer == bassLayerIndex)
@@ -1475,6 +1648,115 @@ void EcosystemEngine::resetCosmosHeads() noexcept
     cosmosModulationPhase = 0.0;
 }
 
+void EcosystemEngine::chooseMidiEvolution(MidiMemory& memory,
+                                           int memoryIndex) noexcept
+{
+    auto next = LoopEvolution::normal;
+    const auto validMemory = memoryIndex > bassLayerIndex
+        && memoryIndex < midiMemoryCount;
+    if (activeMidiEvolutionMemory == memoryIndex)
+        activeMidiEvolutionMemory = -1;
+
+    // At most one of the three memories grows an extra voice, and only the
+    // first recorded line is shadowed. This keeps the evolution sparse and
+    // avoids recreating the 24+ voice condition that used to crackle on Pi.
+    if (loopEvolutionEnabled.load(std::memory_order_relaxed)
+        && validMemory && activeMidiEvolutionMemory < 0
+        && audioMemory.evolution == LoopEvolution::normal
+        && memory.evolutionNote >= 0
+        && nextEvolutionSample > 0
+        && evolutionSampleClock >= nextEvolutionSample)
+    {
+        const auto random = nextEvolutionRandom(memory.evolutionRandomState);
+        if (random % 100u < 55u && memory.evolutionNote <= 115)
+            next = LoopEvolution::octaveUp;
+        else
+            next = LoopEvolution::reverse;
+        if (next != LoopEvolution::normal)
+        {
+            activeMidiEvolutionMemory = memoryIndex;
+            const auto cooldownSeconds = 18u + (random >> 8) % 18u;
+            nextEvolutionSample = evolutionSampleClock
+                + static_cast<int64_t>(std::round(sampleRate
+                    * static_cast<double>(cooldownSeconds)));
+        }
+    }
+    memory.evolution = next;
+    memory.evolutionForDisplay.store(static_cast<int>(next),
+                                     std::memory_order_relaxed);
+}
+
+void EcosystemEngine::chooseAudioEvolution() noexcept
+{
+    auto next = LoopEvolution::normal;
+    audioEvolutionFilteredSamples.fill(0.0f);
+    audioMemory.evolutionStartPosition = 0;
+    audioMemory.evolutionDurationSamples = 0;
+    audioMemory.evolutionSourcePosition = 0.0;
+    if (loopEvolutionEnabled.load(std::memory_order_relaxed)
+        && activeMidiEvolutionMemory < 0
+        && audioMemory.loopLength > 0
+        && nextEvolutionSample > 0
+        && evolutionSampleClock >= nextEvolutionSample)
+    {
+        const auto random = nextEvolutionRandom(
+            audioMemory.evolutionRandomState);
+        if (random % 100u < 55u)
+            next = LoopEvolution::octaveUp;
+        else
+            next = LoopEvolution::reverse;
+
+        if (next != LoopEvolution::normal)
+        {
+            const auto desiredDuration = static_cast<int64_t>(std::round(
+                sampleRate * (2.5 + static_cast<double>((random >> 8) % 350u)
+                                         * 0.01)));
+            // A +12 tape head consumes two source samples for every rendered
+            // sample. Reverse consumes one. Keep the random fragment wholly
+            // inside the recorded material so neither mode has to wrap at a
+            // discontinuous loop edge.
+            const auto maximumDuration = next == LoopEvolution::octaveUp
+                ? juce::jmax<int64_t>(1,
+                    (audioMemory.loopLength + 1) / 2)
+                : audioMemory.loopLength;
+            audioMemory.evolutionDurationSamples = juce::jmin(
+                maximumDuration, juce::jmax<int64_t>(1, desiredDuration));
+            // The global scheduler already makes the event unpredictable.
+            // Starting at the wrap keeps ownership bounded to 2-6 seconds
+            // even when RESPIRO itself lasts two minutes.
+            audioMemory.evolutionStartPosition = 0;
+            const auto sourceRandom = nextEvolutionRandom(
+                audioMemory.evolutionRandomState);
+            if (next == LoopEvolution::octaveUp)
+            {
+                const auto lastOffset = 2 * juce::jmax<int64_t>(
+                    0, audioMemory.evolutionDurationSamples - 1);
+                const auto possibleStarts = juce::jmax<int64_t>(
+                    1, audioMemory.loopLength - lastOffset);
+                audioMemory.evolutionSourcePosition = static_cast<double>(
+                    sourceRandom % static_cast<std::uint32_t>(possibleStarts));
+            }
+            else
+            {
+                const auto minimumStart = juce::jmax<int64_t>(
+                    0, audioMemory.evolutionDurationSamples - 1);
+                const auto possibleStarts = juce::jmax<int64_t>(
+                    1, audioMemory.loopLength - minimumStart);
+                audioMemory.evolutionSourcePosition = static_cast<double>(
+                    minimumStart + sourceRandom
+                        % static_cast<std::uint32_t>(possibleStarts));
+            }
+            const auto cooldownSeconds = 18u + (random >> 8) % 18u;
+            nextEvolutionSample = evolutionSampleClock
+                + static_cast<int64_t>(std::round(sampleRate
+                    * static_cast<double>(cooldownSeconds)));
+        }
+    }
+    audioMemory.evolution = next;
+    audioMemory.evolutionForDisplay.store(static_cast<int>(next),
+                                          std::memory_order_relaxed);
+}
+
 void EcosystemEngine::renderMidiMemories(int numSamples, juce::MidiBuffer& output)
 {
     for (int index = 1; index < midiMemoryCount; ++index)
@@ -1491,17 +1773,92 @@ void EcosystemEngine::renderMidiMemories(int numSamples, juce::MidiBuffer& outpu
                 remaining, memory.loopLength - memory.playbackPosition));
             renderMidiSegment(memory, memory.playbackPosition, untilWrap,
                               outputOffset, output);
+            renderMidiEvolutionSegment(memory, index, memory.playbackPosition,
+                                       untilWrap, outputOffset, output);
             memory.playbackPosition += untilWrap;
             remaining -= untilWrap;
             outputOffset += untilWrap;
 
             if (memory.playbackPosition >= memory.loopLength)
             {
+                if (memory.evolution != LoopEvolution::normal)
+                    output.addEvent(juce::MidiMessage::allNotesOff(
+                        evolutionMidiChannels[static_cast<std::size_t>(index)]),
+                        juce::jlimit(0, numSamples - 1, outputOffset));
                 memory.playbackPosition = 0;
+                chooseMidiEvolution(memory, index);
             }
         }
         memory.phase.store(static_cast<double>(memory.playbackPosition)
                            / static_cast<double>(memory.loopLength));
+    }
+}
+
+void EcosystemEngine::renderMidiEvolutionSegment(
+    const MidiMemory& memory, int memoryIndex, int64_t segmentStart,
+    int segmentLength,
+    int outputOffset, juce::MidiBuffer& output)
+{
+    if (memory.evolution == LoopEvolution::normal
+        || segmentLength <= 0 || memory.loopLength <= 0
+        || memory.evolutionNote < 0
+        || ! juce::isPositiveAndBelow(memoryIndex, midiMemoryCount))
+        return;
+
+    const auto segmentEnd = segmentStart + segmentLength;
+    const auto ghostChannel = evolutionMidiChannels[
+        static_cast<std::size_t>(memoryIndex)];
+    if (memory.evolution == LoopEvolution::octaveUp)
+    {
+        for (const auto& event : memory.events)
+        {
+            if (event.samplePosition < segmentStart)
+                continue;
+            if (event.samplePosition >= segmentEnd)
+                break;
+
+            const auto& message = event.message;
+            if (! message.isNoteOnOrOff()
+                || message.getNoteNumber() != memory.evolutionNote
+                || message.getNoteNumber() > 115)
+                continue;
+            const auto transformed = message.isNoteOn()
+                ? juce::MidiMessage::noteOn(
+                    ghostChannel, message.getNoteNumber() + 12,
+                    memory.evolutionVelocity)
+                : juce::MidiMessage::noteOff(
+                    ghostChannel, message.getNoteNumber() + 12);
+            output.addEvent(transformed,
+                outputOffset + static_cast<int>(
+                    event.samplePosition - segmentStart));
+        }
+        return;
+    }
+
+    // Reversing raw note events would put note-offs before note-ons. Iterating
+    // backward and swapping their roles mirrors each complete note interval.
+    for (auto iterator = memory.events.rbegin();
+         iterator != memory.events.rend(); ++iterator)
+    {
+        const auto reversePosition = memory.loopLength - 1
+                                   - iterator->samplePosition;
+        if (reversePosition < segmentStart)
+            continue;
+        if (reversePosition >= segmentEnd)
+            break;
+
+        const auto& message = iterator->message;
+        if (! message.isNoteOnOrOff()
+            || message.getNoteNumber() != memory.evolutionNote)
+            continue;
+        const auto transformed = message.isNoteOff()
+            ? juce::MidiMessage::noteOn(ghostChannel,
+                                        message.getNoteNumber(),
+                                        memory.evolutionVelocity)
+            : juce::MidiMessage::noteOff(ghostChannel,
+                                         message.getNoteNumber());
+        output.addEvent(transformed,
+            outputOffset + static_cast<int>(reversePosition - segmentStart));
     }
 }
 
@@ -1562,6 +1919,10 @@ void EcosystemEngine::renderAudioMemory(
     std::array<double, 4> cosmosWrappedSpans {};
     const auto renderFourHead = juce::jmax(fourHeadMixBlockStart,
                                             fourHeadMixBlockEnd) > 0.00001f;
+    const auto evolutionFadeInLimit = static_cast<int64_t>(
+        std::round(sampleRate * 0.40));
+    const auto evolutionFadeOutLimit = static_cast<int64_t>(
+        std::round(sampleRate * 1.0));
     bool closedInitialCaptureAtLimit = false;
     if (renderFourHead && audioMemory.loopLength > 0)
         for (std::size_t head = 0; head < cosmosHeadPositions.size(); ++head)
@@ -1662,6 +2023,52 @@ void EcosystemEngine::renderAudioMemory(
         }
 
         const auto bufferPosition = static_cast<int>(audioMemory.playbackPosition);
+        const auto evolutionRelativePosition
+            = audioMemory.playbackPosition
+                - audioMemory.evolutionStartPosition;
+        if (audioMemory.evolution != LoopEvolution::normal
+            && audioMemory.evolutionDurationSamples > 0
+            && evolutionRelativePosition
+                >= audioMemory.evolutionDurationSamples)
+        {
+            audioMemory.evolution = LoopEvolution::normal;
+            audioMemory.evolutionForDisplay.store(
+                static_cast<int>(LoopEvolution::normal),
+                std::memory_order_relaxed);
+        }
+        const auto renderEvolution
+            = audioMemory.evolution != LoopEvolution::normal
+                && evolutionRelativePosition >= 0
+                && evolutionRelativePosition
+                    < audioMemory.evolutionDurationSamples;
+        auto evolutionGain = 0.0f;
+        auto evolutionPlaybackRate = 0.0;
+        auto evolutionPosition = audioMemory.evolutionSourcePosition;
+        if (renderEvolution)
+        {
+            const auto duration = juce::jmax<int64_t>(
+                1, audioMemory.evolutionDurationSamples);
+            const auto fadeIn = juce::jmax<int64_t>(
+                1, juce::jmin<int64_t>(duration / 3,
+                                       evolutionFadeInLimit));
+            const auto fadeOut = juce::jmax<int64_t>(
+                1, juce::jmin<int64_t>(duration / 2,
+                                       evolutionFadeOutLimit));
+            const auto fadeInGain = juce::jlimit(
+                0.0f, 1.0f, static_cast<float>(evolutionRelativePosition)
+                    / static_cast<float>(fadeIn));
+            const auto fadeOutGain = juce::jlimit(
+                0.0f, 1.0f,
+                static_cast<float>(duration - evolutionRelativePosition)
+                    / static_cast<float>(fadeOut));
+            evolutionGain = juce::jmin(fadeInGain, fadeOutGain);
+            evolutionGain = evolutionGain * evolutionGain
+                * (3.0f - 2.0f * evolutionGain);
+            evolutionGain *= 0.16f * (1.0f - fourHeadMix);
+            evolutionPlaybackRate
+                = audioMemory.evolution == LoopEvolution::octaveUp
+                    ? 2.0 : -1.0;
+        }
         for (int channel = 0; channel < 2; ++channel)
         {
             const auto memoryChannel = channel;
@@ -1694,12 +2101,63 @@ void EcosystemEngine::renderAudioMemory(
                 fourHeadSample *= 0.72f;
                 loopSample += (fourHeadSample - loopSample) * fourHeadMix;
             }
+
+            if (renderEvolution)
+            {
+                auto evolutionSample = 0.0f;
+                if (audioMemory.evolution == LoopEvolution::octaveUp)
+                {
+                    // A five-tap binomial low-pass runs on the source before
+                    // the 2:1 tape read. Unlike an output high-cut, this
+                    // suppresses frequencies that would otherwise fold back
+                    // into the audible band during the octave-up decimation.
+                    constexpr std::array<float, 5> antiAliasWeights {
+                        1.0f / 16.0f, 4.0f / 16.0f, 6.0f / 16.0f,
+                        4.0f / 16.0f, 1.0f / 16.0f
+                    };
+                    const auto centre = static_cast<int64_t>(
+                        std::llround(evolutionPosition));
+                    for (int tap = -2; tap <= 2; ++tap)
+                    {
+                        const auto source = juce::jlimit<int64_t>(
+                            0, audioMemory.loopLength - 1,
+                            centre + static_cast<int64_t>(tap));
+                        evolutionSample += audioMemory.buffer.getSample(
+                            memoryChannel, static_cast<int>(source))
+                            * antiAliasWeights[static_cast<std::size_t>(tap + 2)];
+                    }
+                    auto& filtered = audioEvolutionFilteredSamples[
+                        static_cast<std::size_t>(channel)];
+                    filtered += audioEvolutionLowPassCoefficient
+                        * (evolutionSample - filtered);
+                    evolutionSample = filtered;
+                }
+                else
+                    evolutionSample = readAudioMemorySample(
+                        memoryChannel, evolutionPosition,
+                        audioMemory.loopLength);
+                loopSample += evolutionSample * evolutionGain;
+            }
             saxRenderBuffer.addSample(channel, sample,
                                       loopSample * 0.72f * loopPlaybackGain);
         }
 
-        audioMemory.playbackPosition = (audioMemory.playbackPosition + 1)
-                                       % audioMemory.loopLength;
+        if (renderEvolution)
+        {
+            audioMemory.evolutionSourcePosition = juce::jlimit(
+                0.0,
+                static_cast<double>(juce::jmax<int64_t>(
+                    0, audioMemory.loopLength - 1)),
+                audioMemory.evolutionSourcePosition
+                    + evolutionPlaybackRate);
+        }
+
+        ++audioMemory.playbackPosition;
+        if (audioMemory.playbackPosition >= audioMemory.loopLength)
+        {
+            audioMemory.playbackPosition = 0;
+            chooseAudioEvolution();
+        }
         if (renderFourHead)
         {
             const auto modulationSin = static_cast<double>(

@@ -37,9 +37,11 @@ bool hasContiguousChannels(const juce::BigInteger& channels, int count)
 }
 
 const std::array<juce::Colour, EcosystemEngine::memoryCount> memoryColours {
-    juce::Colour(0xff69d2e7), juce::Colour(0xffa7dbd8),
-    juce::Colour(0xffe0e4cc), juce::Colour(0xfff38630),
-    juce::Colour(0xffff4e50)
+    juce::Colour(0xff58d68d), // BASSO LIVE: verde
+    juce::Colour(0xffff9f43), // MAREA: arancione
+    juce::Colour(0xffffd166), // RADICE: giallo
+    juce::Colour(0xffff5c5c), // SCINTILLA: rosso
+    juce::Colour(0xff58a6ff)  // RESPIRO: blu
 };
 
 constexpr std::array<const char*, EcosystemEngine::memoryCount>
@@ -180,6 +182,15 @@ public:
             detail = index < EcosystemEngine::midiMemoryCount
                 ? "VUOTA  /  MIDI " + juce::String(engine.getMidiChannelForMemory(index))
                 : "VUOTA  /  INGRESSO CONFIGURATO";
+
+        if (material && ! captureActive)
+        {
+            const auto evolution = engine.getLoopEvolution(index);
+            if (evolution == EcosystemEngine::LoopEvolution::octaveUp)
+                detail += "  /  OMBRA +12";
+            else if (evolution == EcosystemEngine::LoopEvolution::reverse)
+                detail += "  /  OMBRA REVERSE";
+        }
 
         graphics.setColour(captureActive ? juce::Colours::white
                                          : juce::Colour(quietText));
@@ -400,6 +411,7 @@ MainComponent::MainComponent()
     styleButton(settingsButton, juce::Colour(0xff6a7c91));
     styleButton(textureButton, juce::Colour(0xffc18a55));
     styleButton(fuzzButton, juce::Colour(0xffb75b52));
+    styleButton(evolutionButton, juce::Colour(0xff9b7ed9));
     styleButton(applyAudioButton, juce::Colour(0xff5da8a1));
     styleButton(rescanAudioButton, juce::Colour(0xff7895b8));
     styleButton(keyStepRoutingButton, juce::Colour(0xff8aa6d6));
@@ -413,6 +425,7 @@ MainComponent::MainComponent()
     addAndMakeVisible(settingsButton);
     addAndMakeVisible(textureButton);
     addAndMakeVisible(fuzzButton);
+    addAndMakeVisible(evolutionButton);
     addChildComponent(applyAudioButton);
     addChildComponent(rescanAudioButton);
     addChildComponent(keyStepRoutingButton);
@@ -488,6 +501,11 @@ MainComponent::MainComponent()
     fuzzButton.onClick = [this]
     {
         engine.setFuzzEnabled(! engine.isFuzzEnabled());
+        updateControls();
+    };
+    evolutionButton.onClick = [this]
+    {
+        engine.setLoopEvolutionEnabled(! engine.isLoopEvolutionEnabled());
         updateControls();
     };
     previousScenarioButton.onClick = [this] { changeScenario(-1); };
@@ -2005,6 +2023,15 @@ void MainComponent::selectMemory(int index)
 
 void MainComponent::updateControls()
 {
+    const auto selectedColour = memoryColours[
+        static_cast<size_t>(selectedMemory)];
+    recordButton.setColour(juce::TextButton::buttonColourId,
+                           selectedColour.withAlpha(0.18f));
+    recordButton.setColour(juce::TextButton::buttonOnColourId,
+                           selectedColour.withAlpha(0.42f));
+    recordButton.setColour(juce::TextButton::textColourOffId,
+                           selectedColour.brighter(0.7f));
+
     const auto isBass = EcosystemEngine::isLiveBassLayer(selectedMemory);
     const auto isMidiLoopMemory = juce::isPositiveAndBelow(
         selectedMemory, EcosystemEngine::midiMemoryCount);
@@ -2046,6 +2073,10 @@ void MainComponent::updateControls()
                                  ? "FUZZ: ATTIVO" : "FUZZ: SPENTO");
     fuzzButton.setToggleState(engine.isFuzzEnabled(),
                               juce::dontSendNotification);
+    evolutionButton.setButtonText(engine.isLoopEvolutionEnabled()
+                                      ? "DERIVA: RARA" : "DERIVA: SPENTA");
+    evolutionButton.setToggleState(engine.isLoopEvolutionEnabled(),
+                                   juce::dontSendNotification);
 
     const auto type = waitingForFirstNote
         ? "LOOP MIDI " + juce::String(engine.getMidiChannelForMemory(selectedMemory))
@@ -2098,6 +2129,7 @@ void MainComponent::toggleSettings()
         && ! EcosystemEngine::isLiveBassLayer(selectedMemory));
     textureButton.setVisible(! settingsVisible);
     fuzzButton.setVisible(! settingsVisible);
+    evolutionButton.setVisible(! settingsVisible);
     decaySlider.setVisible(! settingsVisible
         && selectedMemory == EcosystemEngine::midiMemoryCount);
     decayLabel.setVisible(decaySlider.isVisible());
@@ -2147,10 +2179,11 @@ void MainComponent::resized()
     statusLabel.setBounds(header.reduced(6, 0));
 
     auto footer = bounds.removeFromBottom(108);
-    settingsButton.setBounds(footer.removeFromLeft(205).reduced(4, 14));
+    settingsButton.setBounds(footer.removeFromLeft(190).reduced(4, 14));
     textureButton.setBounds(footer.removeFromLeft(170).reduced(4, 14));
     fuzzButton.setBounds(footer.removeFromLeft(150).reduced(4, 14));
-    clearButton.setBounds(footer.removeFromRight(225).reduced(4, 14));
+    evolutionButton.setBounds(footer.removeFromLeft(180).reduced(4, 14));
+    clearButton.setBounds(footer.removeFromRight(210).reduced(4, 14));
     recordButton.setBounds(footer.withSizeKeepingCentre(400, 78));
 
     if (settingsVisible)

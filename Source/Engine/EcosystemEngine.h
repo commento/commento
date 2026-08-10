@@ -30,6 +30,13 @@ public:
         sax
     };
 
+    enum class LoopEvolution : int
+    {
+        normal = 0,
+        octaveUp,
+        reverse
+    };
+
     static constexpr int midiMemoryCount = 4;
     static constexpr int memoryCount = 5;
     static constexpr int bassLayerIndex = 0;
@@ -54,6 +61,7 @@ public:
     [[nodiscard]] double getPhase(int memoryIndex) const;
     [[nodiscard]] double getLengthSeconds(int memoryIndex) const;
     [[nodiscard]] int getEventCount(int memoryIndex) const;
+    [[nodiscard]] LoopEvolution getLoopEvolution(int memoryIndex) const noexcept;
     [[nodiscard]] int getMidiChannelForMemory(int memoryIndex) const;
     [[nodiscard]] bool isAudioRunning() const;
     // -1 while no callback has run, 0 when Linux refused realtime scheduling,
@@ -81,6 +89,8 @@ public:
     [[nodiscard]] float getTextureAmount() const;
     void setFuzzEnabled(bool shouldBeEnabled) noexcept;
     [[nodiscard]] bool isFuzzEnabled() const noexcept;
+    void setLoopEvolutionEnabled(bool shouldBeEnabled) noexcept;
+    [[nodiscard]] bool isLoopEvolutionEnabled() const noexcept;
     void setBassEnabled(bool shouldBeEnabled);
     [[nodiscard]] bool isBassEnabled() const;
     void setPerformanceLevel(int memoryIndex, float linearGain) noexcept;
@@ -138,6 +148,13 @@ private:
         int64_t playbackPosition = 0;
         int64_t loopLength = 0;
         std::array<bool, 128> activeRecordedNotes {};
+        int evolutionNote = -1;
+        float evolutionVelocity = 0.25f;
+        std::uint32_t evolutionRandomState = 0x9e3779b9u;
+        LoopEvolution evolution = LoopEvolution::normal;
+        std::atomic<int> evolutionForDisplay {
+            static_cast<int>(LoopEvolution::normal)
+        };
     };
 
     struct AudioMemory
@@ -160,12 +177,23 @@ private:
         int64_t gainTransitionSamplesRemaining = 0;
         int64_t gainTransitionSamplesTotal = 0;
         bool clearAfterGainTransition = false;
+        std::uint32_t evolutionRandomState = 0xa341316cu;
+        LoopEvolution evolution = LoopEvolution::normal;
+        std::atomic<int> evolutionForDisplay {
+            static_cast<int>(LoopEvolution::normal)
+        };
+        int64_t evolutionStartPosition = 0;
+        int64_t evolutionDurationSamples = 0;
+        double evolutionSourcePosition = 0.0;
     };
 
     static constexpr int incomingCapacity = 512;
     static constexpr int maximumMidiEvents = 8192;
     static constexpr double maximumAudioSeconds = 120.0;
     static constexpr std::array<int, midiMemoryCount> midiChannels { 5, 2, 3, 4 };
+    static constexpr std::array<int, midiMemoryCount> evolutionMidiChannels {
+        0, 12, 13, 14
+    };
 
     [[nodiscard]] static int memoryIndexForMidiChannel(int midiChannel);
 
@@ -185,6 +213,11 @@ private:
     void renderMidiMemories(int numSamples, juce::MidiBuffer& output);
     void renderMidiSegment(MidiMemory& memory, int64_t segmentStart,
                            int segmentLength, int outputOffset, juce::MidiBuffer& output);
+    void renderMidiEvolutionSegment(const MidiMemory& memory, int memoryIndex,
+                                    int64_t segmentStart, int segmentLength,
+                                    int outputOffset, juce::MidiBuffer& output);
+    void chooseMidiEvolution(MidiMemory& memory, int memoryIndex) noexcept;
+    void chooseAudioEvolution() noexcept;
     void renderAudioMemory(const float* const* inputs, int inputChannels,
                            float* const* outputs, int outputChannels, int numSamples);
     void renderInternalSynths(float* const* outputs, int outputChannels,
@@ -219,7 +252,9 @@ private:
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> bassMuteGain;
     std::atomic<float> audioDecay { 0.985f };
     std::atomic<uint32_t> audioDecayManualRevision { 0 };
-    std::atomic<bool> saxStereoInput { false };
+    // Model 12 profile captures the sax from the configured 7/8 pair. Mono
+    // remains available from the large RESPIRO button when only input 7 is used.
+    std::atomic<bool> saxStereoInput { true };
     std::atomic<int> saxPathMode { static_cast<int>(SaxPathMode::sceneEffects) };
     std::atomic<int> diagnosticToneBus {
         static_cast<int>(DiagnosticToneBus::off)
@@ -249,6 +284,7 @@ private:
     std::atomic<float> scenarioMorphProgress { 1.0f };
     std::atomic<float> requestedTexture { 0.0f };
     std::atomic<bool> fuzzEnabled { false };
+    std::atomic<bool> loopEvolutionEnabled { false };
     std::atomic<bool> bassEnabled { true };
     bool fourHeadSaxLoopPlaybackActive = false;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear>
@@ -257,6 +293,8 @@ private:
     float fourHeadMixBlockEnd = 0.0f;
     std::array<double, 4> cosmosHeadPositions {};
     double cosmosModulationPhase = 0.0;
+    std::array<float, 2> audioEvolutionFilteredSamples {};
+    float audioEvolutionLowPassCoefficient = 1.0f;
     int64_t scenarioMorphElapsedSamples = 0;
     int64_t scenarioMorphTotalSamples = 0;
     float scenarioMorphDecaySource = 0.985f;
@@ -269,10 +307,17 @@ private:
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear>
         fuzzEffectMix;
     std::array<float, logicalOutputBusCount> grainHeldSamples {};
+    std::array<float, logicalOutputBusCount> grainFilteredSamples {};
+    float grainLowPassCoefficient = 1.0f;
     float activeGrainEffectTarget = -1.0f;
     float activeFuzzEffectTarget = -1.0f;
     int grainHoldCounter = 0;
+    bool grainFilterNeedsPrime = true;
     bool bassWasEnabled = true;
+    int activeMidiEvolutionMemory = -1;
+    int64_t evolutionSampleClock = 0;
+    int64_t nextEvolutionSample = 0;
+    bool evolutionWasEnabled = false;
     int64_t saxDangerSamples = 0;
     int64_t saxRecoverySamples = 0;
     float saxSafetyGain = 1.0f;
