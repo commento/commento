@@ -94,6 +94,89 @@ void advancePhase(double& phase, double increment)
     phase -= twoPi * std::floor(phase / twoPi);
 }
 
+float smoothMorph(float amount) noexcept
+{
+    const auto position = juce::jlimit(0.0f, 1.0f, amount);
+    return position * position * (3.0f - 2.0f * position);
+}
+
+float linearMorph(float source, float target, float amount) noexcept
+{
+    return source + (target - source) * amount;
+}
+
+float logarithmicMorph(float source, float target, float amount) noexcept
+{
+    constexpr auto minimum = 1.0e-5f;
+    if (source <= minimum || target <= minimum)
+        return linearMorph(source, target, amount);
+
+    return std::exp(linearMorph(std::log(source), std::log(target), amount));
+}
+
+float gainMorph(float source, float target, float amount) noexcept
+{
+    constexpr auto floorGain = 0.0001f;
+    const auto sourceDb = juce::Decibels::gainToDecibels(
+        juce::jmax(floorGain, source), -80.0f);
+    const auto targetDb = juce::Decibels::gainToDecibels(
+        juce::jmax(floorGain, target), -80.0f);
+    return juce::Decibels::decibelsToGain(
+        linearMorph(sourceDb, targetDb, amount), -80.0f);
+}
+
+SynthPatch interpolatePatch(const SynthPatch& source,
+                            const SynthPatch& target,
+                            float amount) noexcept
+{
+    SynthPatch result = target;
+
+    // Model, transpose and the displayed name deliberately belong to the
+    // destination. AmbientVoice only latches the structural fields at the
+    // next note-on, while all values below move continuously.
+    result.detuneCents = linearMorph(source.detuneCents,
+                                     target.detuneCents, amount);
+    result.attackSeconds = logarithmicMorph(source.attackSeconds,
+                                             target.attackSeconds, amount);
+    result.decaySeconds = logarithmicMorph(source.decaySeconds,
+                                            target.decaySeconds, amount);
+    result.sustain = linearMorph(source.sustain, target.sustain, amount);
+    result.releaseSeconds = logarithmicMorph(source.releaseSeconds,
+                                              target.releaseSeconds, amount);
+    result.cutoffHz = logarithmicMorph(source.cutoffHz,
+                                       target.cutoffHz, amount);
+    result.keyTrack = linearMorph(source.keyTrack, target.keyTrack, amount);
+    result.drive = linearMorph(source.drive, target.drive, amount);
+    result.harmonicMix = linearMorph(source.harmonicMix,
+                                     target.harmonicMix, amount);
+    result.noiseMix = linearMorph(source.noiseMix, target.noiseMix, amount);
+    result.pulseWidth = linearMorph(source.pulseWidth,
+                                    target.pulseWidth, amount);
+    result.lfoRateHz = logarithmicMorph(source.lfoRateHz,
+                                        target.lfoRateHz, amount);
+    result.lfoDepth = linearMorph(source.lfoDepth, target.lfoDepth, amount);
+    result.pan = linearMorph(source.pan, target.pan, amount);
+    result.level = gainMorph(source.level, target.level, amount);
+    // Delay time itself is not read from this interpolated value. The effect
+    // uses two fixed taps and crossfades them, avoiding Doppler pitch sweeps.
+    // Keeping a representative value here makes an interrupted morph start
+    // close to its current perceptual position.
+    result.delayMilliseconds = linearMorph(source.delayMilliseconds,
+                                            target.delayMilliseconds, amount);
+    result.delaySpread = linearMorph(source.delaySpread,
+                                     target.delaySpread, amount);
+    result.delayFeedback = linearMorph(source.delayFeedback,
+                                       target.delayFeedback, amount);
+    result.delayMix = linearMorph(source.delayMix, target.delayMix, amount);
+    result.reverbSize = linearMorph(source.reverbSize,
+                                    target.reverbSize, amount);
+    result.reverbDamping = linearMorph(source.reverbDamping,
+                                       target.reverbDamping, amount);
+    result.reverbWet = linearMorph(source.reverbWet,
+                                   target.reverbWet, amount);
+    return result;
+}
+
 class AmbientSound final : public juce::SynthesiserSound
 {
 public:
@@ -111,17 +194,36 @@ public:
         return dynamic_cast<AmbientSound*>(sound) != nullptr;
     }
 
-    void setPatch(const SynthPatch& newPatch)
+    void setPatchImmediate(const SynthPatch& newPatch)
     {
         patch = newPatch;
+        nextNotePatch = newPatch;
+        activeModel = newPatch.model;
+        activeTransposeSemitones = newPatch.transposeSemitones;
         secondaryDetuneRatio = std::pow(2.0,
                                         static_cast<double>(patch.detuneCents) / 1200.0);
-        const auto ratios = secondaryRatios(patch.model);
+        const auto ratios = secondaryRatios(activeModel);
         secondaryRatioA = ratios[0];
         secondaryRatioB = ratios[1];
-        updateEnvelope();
+        updateEnvelope(newPatch);
         if (currentMidiNote >= 0)
             targetFrequency = noteFrequency(currentMidiNote);
+    }
+
+    void setMorphPatch(const SynthPatch& continuousPatch,
+                       const SynthPatch& destinationPatch)
+    {
+        patch = continuousPatch;
+        nextNotePatch = continuousPatch;
+        nextNotePatch.model = destinationPatch.model;
+        nextNotePatch.transposeSemitones
+            = destinationPatch.transposeSemitones;
+        secondaryDetuneRatio = std::pow(
+            2.0, static_cast<double>(patch.detuneCents) / 1200.0);
+        // Do not touch activeModel, activeTransposeSemitones or the current
+        // ADSR. Held notes keep their oscillator family, register and natural
+        // envelope; the next note captures the destination structure and the
+        // envelope values reached by the morph at that instant.
     }
 
     void startNote(int midiNoteNumber, float velocity,
@@ -135,10 +237,19 @@ public:
         const auto continuingRestart = pendingVoiceRestart
             && envelope.isActive();
         pendingVoiceRestart = false;
+        const auto previousModel = activeModel;
+        const auto previousTranspose = activeTransposeSemitones;
+        activeModel = nextNotePatch.model;
+        activeTransposeSemitones = nextNotePatch.transposeSemitones;
+        const auto ratios = secondaryRatios(activeModel);
+        secondaryRatioA = ratios[0];
+        secondaryRatioB = ratios[1];
         currentMidiNote = midiNoteNumber;
         pitchBend = (static_cast<float>(pitchWheelPosition) - 8192.0f) / 8192.0f;
         targetFrequency = noteFrequency(midiNoteNumber);
         const auto continuingLegato = continuingRestart && glides;
+        const auto structureChanged = previousModel != activeModel
+            || previousTranspose != activeTransposeSemitones;
         if (! continuingLegato || currentFrequency <= 0.0)
         {
             if (continuingRestart && ! glides)
@@ -167,10 +278,21 @@ public:
             lfoPhase = 0.0;
             filterStateA = filterStateB = 0.0f;
         }
+        else if (structureChanged)
+        {
+            // A monophonic bass can receive the first destination note while
+            // its previous note is still legato. Bridge that structural
+            // change without resetting its phase or envelope.
+            declickOffsetLeft = lastOutputLeft;
+            declickOffsetRight = lastOutputRight;
+            declickSamplesTotal = juce::jmax(32, static_cast<int>(
+                std::round(getSampleRate() * 0.005)));
+            declickSamplesRemaining = declickSamplesTotal;
+        }
 
-        velocityLevel = velocity * patch.level;
+        velocityLevel = velocity;
         noiseState ^= static_cast<uint32_t>(midiNoteNumber) * 2654435761u;
-        updateEnvelope();
+        updateEnvelope(nextNotePatch);
         envelope.noteOn();
     }
 
@@ -287,8 +409,8 @@ public:
             const auto baseFrequency = currentFrequency * bendRatio;
             const auto deltaA = twoPi * baseFrequency / getSampleRate();
 
-            const auto a = oscillator(phaseA, deltaA, patch.model);
-            const auto b = secondaryOscillator(baseFrequency, patch.model);
+            const auto a = oscillator(phaseA, deltaA, activeModel);
+            const auto b = secondaryOscillator(baseFrequency, activeModel);
             const auto noise = nextNoise();
             auto tone = a * (1.0f - patch.harmonicMix)
                       + b * patch.harmonicMix + noise * patch.noiseMix;
@@ -300,7 +422,7 @@ public:
             const auto movement = 1.0f - patch.lfoDepth
                 + patch.lfoDepth * (0.5f + 0.5f * lfo);
             const auto expression = 0.84f + pressure * 0.28f;
-            const auto sample = filterStateB * velocityLevel * movement
+            const auto sample = filterStateB * velocityLevel * patch.level * movement
                               * expression * envelope.getNextSample();
             auto outputLeft = sample * leftGain;
             auto outputRight = sample * rightGain;
@@ -341,20 +463,22 @@ public:
     }
 
 private:
-    void updateEnvelope()
+    void updateEnvelope(const SynthPatch& envelopePatch)
     {
         juce::ADSR::Parameters parameters;
-        parameters.attack = juce::jmax(0.001f, patch.attackSeconds);
-        parameters.decay = juce::jmax(0.001f, patch.decaySeconds);
-        parameters.sustain = juce::jlimit(0.0f, 1.0f, patch.sustain);
-        parameters.release = juce::jmax(0.005f, patch.releaseSeconds);
+        parameters.attack = juce::jmax(0.001f, envelopePatch.attackSeconds);
+        parameters.decay = juce::jmax(0.001f, envelopePatch.decaySeconds);
+        parameters.sustain = juce::jlimit(0.0f, 1.0f,
+                                          envelopePatch.sustain);
+        parameters.release = juce::jmax(0.005f,
+                                         envelopePatch.releaseSeconds);
         envelope.setParameters(parameters);
     }
 
     double noteFrequency(int midiNote) const
     {
         const auto transposed = juce::jlimit(0, 127,
-            midiNote + patch.transposeSemitones);
+            midiNote + activeTransposeSemitones);
         return juce::MidiMessage::getMidiNoteInHertz(transposed);
     }
 
@@ -413,6 +537,8 @@ private:
             case OscillatorModel::cloud: return sine * 0.72f + nextNoise() * 0.16f;
             case OscillatorModel::pulse:
                 return bandLimitedPulse(phase, phaseIncrement, patch.pulseWidth);
+            case OscillatorModel::dualSquare:
+                return bandLimitedPulse(phase, phaseIncrement, 0.5f);
             case OscillatorModel::bell:  return sine;
             case OscillatorModel::air:   return sine * 0.52f + nextNoise() * 0.30f;
         }
@@ -428,6 +554,7 @@ private:
             case OscillatorModel::bell:  return { 2.01, 3.99 };
             case OscillatorModel::reed:  return { 2.0, 0.0 };
             case OscillatorModel::pulse: return { 2.0, 0.0 };
+            case OscillatorModel::dualSquare: return { 1.0, 0.0 };
             case OscillatorModel::warm:
             case OscillatorModel::pluck:
             case OscillatorModel::cloud:
@@ -456,6 +583,13 @@ private:
     {
         const auto firstGain = partialGain(
             baseFrequency * secondaryDetuneRatio * secondaryRatioA);
+        if (model == OscillatorModel::dualSquare)
+        {
+            const auto increment = juce::MathConstants<double>::twoPi
+                * baseFrequency * secondaryDetuneRatio * secondaryRatioA
+                / getSampleRate();
+            return bandLimitedPulse(phaseB, increment, 0.5f) * firstGain;
+        }
         if (model == OscillatorModel::bell)
         {
             const auto secondGain = partialGain(
@@ -468,7 +602,10 @@ private:
     }
 
     SynthPatch patch;
+    SynthPatch nextNotePatch;
     const bool glides = false;
+    OscillatorModel activeModel = OscillatorModel::warm;
+    int activeTransposeSemitones = 0;
     int currentMidiNote = -1;
     double phaseA = 0.0;
     double phaseB = 0.0;
@@ -517,6 +654,7 @@ float readDelaySample(const juce::AudioBuffer<float>& buffer, int channel,
 }
 
 AmbientSynth::AmbientSynth(int layerStyle)
+    : processesAmbientEffects(layerStyle != 0)
 {
     synthesiser.addSound(new AmbientSound());
     const auto voiceCount = layerStyle == 0 ? 1 : 8;
@@ -539,6 +677,12 @@ void AmbientSynth::prepare(double sampleRate, int maximumBlockSize)
     delayLevel.setCurrentAndTargetValue(requestedDelayLevel);
     reverb.setSampleRate(currentSampleRate);
     reverb.reset();
+    morphSourcePatch = patch;
+    morphTargetPatch = patch;
+    morphElapsedSamples = 0;
+    morphTotalSamples = 0;
+    blockMorphStart = blockMorphEnd = 1.0f;
+    morphActive = false;
     prepared = true;
     updateEffectTargets(true);
 }
@@ -546,10 +690,55 @@ void AmbientSynth::prepare(double sampleRate, int maximumBlockSize)
 void AmbientSynth::setPatch(const SynthPatch& newPatch)
 {
     patch = newPatch;
+    morphSourcePatch = newPatch;
+    morphTargetPatch = newPatch;
+    morphElapsedSamples = 0;
+    morphTotalSamples = 0;
+    blockMorphStart = blockMorphEnd = 1.0f;
+    morphActive = false;
     for (int index = 0; index < synthesiser.getNumVoices(); ++index)
         if (auto* voice = dynamic_cast<AmbientVoice*>(synthesiser.getVoice(index)))
-            voice->setPatch(patch);
-    updateEffectTargets(! prepared);
+            voice->setPatchImmediate(patch);
+    updateEffectTargets(true);
+}
+
+void AmbientSynth::beginPatchMorph(const SynthPatch& targetPatch,
+                                   double durationSeconds)
+{
+    if (! prepared || ! std::isfinite(durationSeconds)
+        || durationSeconds <= 0.0)
+    {
+        setPatch(targetPatch);
+        return;
+    }
+
+    morphSourcePatch = patch;
+    morphTargetPatch = targetPatch;
+    morphElapsedSamples = 0;
+    morphTotalSamples = juce::jmax<int64_t>(
+        1, static_cast<int64_t>(std::llround(
+            juce::jmin(durationSeconds, 120.0) * currentSampleRate)));
+    blockMorphStart = blockMorphEnd = 0.0f;
+    morphActive = true;
+
+    const auto sourceDelay = juce::jmax(
+        1.0f, morphSourcePatch.delayMilliseconds * 0.001f
+              * static_cast<float>(currentSampleRate));
+    const auto targetDelay = juce::jmax(
+        1.0f, morphTargetPatch.delayMilliseconds * 0.001f
+              * static_cast<float>(currentSampleRate));
+    delayMorphSourceSamples = {
+        sourceDelay,
+        sourceDelay * morphSourcePatch.delaySpread
+    };
+    delayMorphTargetSamples = {
+        targetDelay,
+        targetDelay * morphTargetPatch.delaySpread
+    };
+
+    // Destination structural fields are available immediately, but a voice
+    // captures them only at its next note-on. Held notes remain undisturbed.
+    applyMorphPatchToVoices();
 }
 
 void AmbientSynth::setDelayLevel(float newLevel) noexcept
@@ -566,25 +755,69 @@ void AmbientSynth::allNotesOff()
 
 void AmbientSynth::updateEffectTargets(bool immediately)
 {
-    const auto resetValue = [this, immediately](juce::SmoothedValue<float>& value,
-                                                 float target)
-    {
-        if (immediately)
-            value.setCurrentAndTargetValue(target);
-        else
-        {
-            value.reset(currentSampleRate, 0.75);
-            value.setTargetValue(target);
-        }
-    };
-
+    juce::ignoreUnused(immediately);
     const auto baseDelay = patch.delayMilliseconds * 0.001f
                          * static_cast<float>(currentSampleRate);
-    resetValue(delaySamplesLeft, juce::jmax(1.0f, baseDelay));
-    resetValue(delaySamplesRight,
-               juce::jmax(1.0f, baseDelay * patch.delaySpread));
-    resetValue(delayFeedback, juce::jlimit(0.0f, 0.78f, patch.delayFeedback));
-    resetValue(delayMix, juce::jlimit(0.0f, 0.75f, patch.delayMix));
+    const auto leftDelay = juce::jmax(1.0f, baseDelay);
+    const auto rightDelay = juce::jmax(1.0f,
+                                       baseDelay * patch.delaySpread);
+    delayMorphSourceSamples = { leftDelay, rightDelay };
+    delayMorphTargetSamples = delayMorphSourceSamples;
+    updateReverbParameters();
+}
+
+void AmbientSynth::prepareMorphBlock(int numSamples)
+{
+    if (! morphActive || morphTotalSamples <= 0)
+    {
+        blockMorphStart = blockMorphEnd = 1.0f;
+        return;
+    }
+
+    const auto startPosition = static_cast<float>(morphElapsedSamples)
+        / static_cast<float>(morphTotalSamples);
+    const auto blockEndSamples = juce::jmin<int64_t>(
+        morphTotalSamples, morphElapsedSamples + numSamples);
+    const auto endPosition = static_cast<float>(blockEndSamples)
+        / static_cast<float>(morphTotalSamples);
+    blockMorphStart = smoothMorph(startPosition);
+    blockMorphEnd = smoothMorph(endPosition);
+    patch = interpolatePatch(morphSourcePatch, morphTargetPatch,
+                             blockMorphEnd);
+    morphElapsedSamples = blockEndSamples;
+    applyMorphPatchToVoices();
+    updateReverbParameters();
+}
+
+void AmbientSynth::finishMorphBlock()
+{
+    if (! morphActive || morphElapsedSamples < morphTotalSamples)
+        return;
+
+    patch = morphTargetPatch;
+    morphSourcePatch = patch;
+    morphTargetPatch = patch;
+    delayMorphSourceSamples = delayMorphTargetSamples;
+    delayMorphTargetSamples = delayMorphSourceSamples;
+    morphElapsedSamples = 0;
+    morphTotalSamples = 0;
+    blockMorphStart = blockMorphEnd = 1.0f;
+    morphActive = false;
+    applyMorphPatchToVoices();
+}
+
+void AmbientSynth::applyMorphPatchToVoices()
+{
+    for (int index = 0; index < synthesiser.getNumVoices(); ++index)
+        if (auto* voice = dynamic_cast<AmbientVoice*>(
+                synthesiser.getVoice(index)))
+            voice->setMorphPatch(patch, morphTargetPatch);
+}
+
+void AmbientSynth::updateReverbParameters()
+{
+    // This changes coefficients without resetting or reallocating the JUCE
+    // reverb network, so the old tail is allowed to become the new one.
 
     juce::Reverb::Parameters parameters;
     parameters.roomSize = juce::jlimit(0.0f, 1.0f, patch.reverbSize);
@@ -604,21 +837,53 @@ void AmbientSynth::processEffects(int numSamples)
     auto* left = renderBuffer.getWritePointer(0);
     auto* right = renderBuffer.getWritePointer(1);
     const auto maximumDelay = static_cast<float>(delayBuffer.getNumSamples() - 2);
+    const auto leftUsesTwoTaps = std::abs(delayMorphSourceSamples[0]
+                                          - delayMorphTargetSamples[0]) > 0.5f;
+    const auto rightUsesTwoTaps = std::abs(delayMorphSourceSamples[1]
+                                           - delayMorphTargetSamples[1]) > 0.5f;
     for (int sample = 0; sample < numSamples; ++sample)
     {
         const auto dryLeft = left[sample];
         const auto dryRight = right[sample];
-        const auto delayLeft = juce::jlimit(1.0f, maximumDelay,
-                                            delaySamplesLeft.getNextValue());
-        const auto delayRight = juce::jlimit(1.0f, maximumDelay,
-                                             delaySamplesRight.getNextValue());
-        const auto wetLeft = readDelaySample(delayBuffer, 0, delayWritePosition,
-                                             delayLeft);
-        const auto wetRight = readDelaySample(delayBuffer, 1, delayWritePosition,
-                                              delayRight);
+        const auto fraction = numSamples > 1
+            ? static_cast<float>(sample) / static_cast<float>(numSamples - 1)
+            : 1.0f;
+        const auto morph = linearMorph(blockMorphStart, blockMorphEnd,
+                                        fraction);
+        // The taps often contain correlated drones. A constant-sum crossfade
+        // avoids the +3 dB midpoint of an equal-power curve and removes two
+        // table lookups per sample during a morph.
+        const auto sourceGain = 1.0f - morph;
+        const auto targetGain = morph;
+        const auto sourceLeft = readDelaySample(
+            delayBuffer, 0, delayWritePosition,
+            juce::jlimit(1.0f, maximumDelay, delayMorphSourceSamples[0]));
+        const auto sourceRight = readDelaySample(
+            delayBuffer, 1, delayWritePosition,
+            juce::jlimit(1.0f, maximumDelay, delayMorphSourceSamples[1]));
+        const auto wetLeft = leftUsesTwoTaps
+            ? sourceLeft * sourceGain
+                + readDelaySample(
+                    delayBuffer, 0, delayWritePosition,
+                    juce::jlimit(1.0f, maximumDelay,
+                                 delayMorphTargetSamples[0])) * targetGain
+            : sourceLeft;
+        const auto wetRight = rightUsesTwoTaps
+            ? sourceRight * sourceGain
+                + readDelaySample(
+                    delayBuffer, 1, delayWritePosition,
+                    juce::jlimit(1.0f, maximumDelay,
+                                 delayMorphTargetSamples[1])) * targetGain
+            : sourceRight;
         const auto amount = delayLevel.getNextValue();
-        const auto feedback = delayFeedback.getNextValue() * amount;
-        const auto mix = delayMix.getNextValue() * amount;
+        const auto feedback = juce::jlimit(
+            0.0f, 0.78f,
+            linearMorph(morphSourcePatch.delayFeedback,
+                        morphTargetPatch.delayFeedback, morph)) * amount;
+        const auto mix = juce::jlimit(
+            0.0f, 0.75f,
+            linearMorph(morphSourcePatch.delayMix,
+                        morphTargetPatch.delayMix, morph)) * amount;
         delayBuffer.setSample(0, delayWritePosition, softProtect(
             dryLeft + wetLeft * feedback + wetRight * feedback * 0.12f));
         delayBuffer.setSample(1, delayWritePosition, softProtect(
@@ -638,13 +903,24 @@ void AmbientSynth::render(juce::AudioBuffer<float>& output,
     if (numSamples <= 0 || renderBuffer.getNumSamples() < numSamples)
         return;
 
+    prepareMorphBlock(numSamples);
     renderBuffer.clear(0, numSamples);
     synthesiser.renderNextBlock(renderBuffer, midi, 0, numSamples);
     for (int index = 0; index < synthesiser.getNumVoices(); ++index)
         if (auto* voice = dynamic_cast<AmbientVoice*>(
                 synthesiser.getVoice(index)))
             voice->finishRenderBlock();
-    processEffects(numSamples);
+    if (processesAmbientEffects)
+        processEffects(numSamples);
+    else
+    {
+        // Every factory bass patch is deliberately dry and its UI delay is
+        // disabled. JUCE Reverb's dry path used to multiply this signal by
+        // two, so preserve that exact gain while skipping a complete stereo
+        // delay plus 8 comb/4 all-pass filters per channel on every callback.
+        renderBuffer.applyGain(0, numSamples, 2.0f);
+    }
+    finishMorphBlock();
 
     const auto channels = juce::jmin(2, output.getNumChannels());
     for (int channel = 0; channel < channels; ++channel)

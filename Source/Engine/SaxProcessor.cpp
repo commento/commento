@@ -1,4 +1,5 @@
 #include "SaxProcessor.h"
+#include "FastSine.h"
 
 #include <cstddef>
 #include <cmath>
@@ -58,7 +59,46 @@ void SaxProcessor::prepare(double newSampleRate, int maximumBlockSize)
 void SaxProcessor::setPatch(const SaxPatch& newPatch)
 {
     patch = newPatch;
+    delayMorphActive = false;
     updateTargets(! prepared);
+}
+
+void SaxProcessor::beginPatchMorph(const SaxPatch& newPatch,
+                                   double durationSeconds)
+{
+    if (! prepared || durationSeconds <= 0.0)
+    {
+        setPatch(newPatch);
+        return;
+    }
+
+    const auto duration = juce::jlimit(0.05, 30.0, durationSeconds);
+    const auto oldProgress = delayMorphActive
+        ? delayMorphProgress.getCurrentValue() : 1.0f;
+    delayMorphFromLeft = delayMorphActive
+        ? juce::jmap(oldProgress, delayMorphFromLeft, delayMorphToLeft)
+        : delaySamplesLeft.getCurrentValue();
+    delayMorphFromRight = delayMorphActive
+        ? juce::jmap(oldProgress, delayMorphFromRight, delayMorphToRight)
+        : delaySamplesRight.getCurrentValue();
+
+    const auto baseDelay = newPatch.delayMilliseconds * 0.001f
+                         * static_cast<float>(sampleRate);
+    delayMorphToLeft = juce::jmax(1.0f, baseDelay);
+    delayMorphToRight = juce::jmax(1.0f, baseDelay * newPatch.delaySpread);
+    delayMorphProgress.reset(sampleRate, duration);
+    delayMorphProgress.setCurrentAndTargetValue(0.0f);
+    delayMorphProgress.setTargetValue(1.0f);
+    delayMorphActive = std::abs(delayMorphFromLeft - delayMorphToLeft) > 0.5f
+                    || std::abs(delayMorphFromRight - delayMorphToRight) > 0.5f;
+
+    patch = newPatch;
+    updateTargets(false, duration);
+    // The tap position is crossfaded explicitly below. Keeping the ordinary
+    // smoothers at the destination prevents a second, Doppler-producing ramp
+    // after the crossfade has finished.
+    delaySamplesLeft.setCurrentAndTargetValue(delayMorphToLeft);
+    delaySamplesRight.setCurrentAndTargetValue(delayMorphToRight);
 }
 
 void SaxProcessor::setDelayLevel(float newLevel) noexcept
@@ -68,16 +108,18 @@ void SaxProcessor::setDelayLevel(float newLevel) noexcept
         delayLevel.setTargetValue(requestedDelayLevel);
 }
 
-void SaxProcessor::updateTargets(bool immediately)
+void SaxProcessor::updateTargets(bool immediately, double transitionSeconds)
 {
-    const auto setTarget = [this, immediately](juce::SmoothedValue<float>& value,
-                                                float target)
+    const auto setTarget = [this, immediately, transitionSeconds](
+                               juce::SmoothedValue<float>& value, float target)
     {
         if (immediately)
             value.setCurrentAndTargetValue(target);
         else
         {
-            value.reset(sampleRate, 1.0);
+            const auto current = value.getCurrentValue();
+            value.reset(sampleRate, juce::jmax(0.001, transitionSeconds));
+            value.setCurrentAndTargetValue(current);
             value.setTargetValue(target);
         }
     };
@@ -99,17 +141,32 @@ void SaxProcessor::updateTargets(bool immediately)
     setTarget(modulationDepthSamples,
               patch.modulationDepthMilliseconds * 0.001f
               * static_cast<float>(sampleRate));
+    setTarget(modulationRateHz, juce::jmax(0.0f, patch.modulationRateHz));
     setTarget(tremoloDepth, juce::jlimit(0.0f, 0.65f, patch.tremoloDepth));
+    setTarget(tremoloRateHz, juce::jmax(0.0f, patch.tremoloRateHz));
     setTarget(outputGain, juce::jlimit(0.1f, 0.8f, patch.outputGain));
+    setTarget(reverbSize, juce::jlimit(0.0f, 1.0f, patch.reverbSize));
+    setTarget(reverbDamping, juce::jlimit(0.0f, 1.0f, patch.reverbDamping));
+    setTarget(reverbWet, juce::jlimit(0.0f, 0.7f, patch.reverbWet));
+    updateReverbParameters(0);
+}
 
+void SaxProcessor::updateReverbParameters(int numSamples)
+{
     juce::Reverb::Parameters parameters;
-    parameters.roomSize = juce::jlimit(0.0f, 1.0f, patch.reverbSize);
-    parameters.damping = juce::jlimit(0.0f, 1.0f, patch.reverbDamping);
-    parameters.wetLevel = juce::jlimit(0.0f, 0.7f, patch.reverbWet);
+    parameters.roomSize = reverbSize.getCurrentValue();
+    parameters.damping = reverbDamping.getCurrentValue();
+    parameters.wetLevel = reverbWet.getCurrentValue();
     parameters.dryLevel = 1.0f - parameters.wetLevel * 0.38f;
     parameters.width = 1.0f;
     parameters.freezeMode = 0.0f;
     reverb.setParameters(parameters);
+    if (numSamples > 0)
+    {
+        reverbSize.skip(numSamples);
+        reverbDamping.skip(numSamples);
+        reverbWet.skip(numSamples);
+    }
 }
 
 float SaxProcessor::readDelay(int channel, float delayInSamples) const
@@ -155,6 +212,7 @@ void SaxProcessor::process(juce::AudioBuffer<float>& buffer, int numSamples)
     }
 
     juce::ScopedNoDenormals noDenormals;
+    updateReverbParameters(numSamples);
     auto* left = buffer.getWritePointer(0);
     auto* right = buffer.getWritePointer(1);
     const auto maximumDelay = static_cast<float>(delayBuffer.getNumSamples() - 2);
@@ -181,14 +239,42 @@ void SaxProcessor::process(juce::AudioBuffer<float>& buffer, int numSamples)
                 lowPassState[static_cast<std::size_t>(channel)], saturation);
         }
 
-        const auto modulation = static_cast<float>(std::sin(modulationPhase))
+        const auto modulation = CommentoDsp::fastSine(modulationPhase)
                               * modulationDepthSamples.getNextValue();
-        const auto leftDelay = juce::jlimit(1.0f, maximumDelay,
-            delaySamplesLeft.getNextValue() + modulation);
-        const auto rightDelay = juce::jlimit(1.0f, maximumDelay,
-            delaySamplesRight.getNextValue() - modulation);
-        const auto echoLeft = readDelay(0, leftDelay);
-        const auto echoRight = readDelay(1, rightDelay);
+        auto echoLeft = 0.0f;
+        auto echoRight = 0.0f;
+        if (delayMorphActive)
+        {
+            const auto progress = juce::jlimit(
+                0.0f, 1.0f, delayMorphProgress.getNextValue());
+            // Sax loops are strongly correlated between taps. Constant-sum
+            // gains keep the midpoint from becoming a +3 dB transient.
+            const auto oldGain = 1.0f - progress;
+            const auto newGain = progress;
+            const auto oldLeft = juce::jlimit(
+                1.0f, maximumDelay, delayMorphFromLeft + modulation);
+            const auto oldRight = juce::jlimit(
+                1.0f, maximumDelay, delayMorphFromRight - modulation);
+            const auto newLeft = juce::jlimit(
+                1.0f, maximumDelay, delayMorphToLeft + modulation);
+            const auto newRight = juce::jlimit(
+                1.0f, maximumDelay, delayMorphToRight - modulation);
+            echoLeft = readDelay(0, oldLeft) * oldGain
+                     + readDelay(0, newLeft) * newGain;
+            echoRight = readDelay(1, oldRight) * oldGain
+                      + readDelay(1, newRight) * newGain;
+            if (! delayMorphProgress.isSmoothing())
+                delayMorphActive = false;
+        }
+        else
+        {
+            const auto leftDelay = juce::jlimit(1.0f, maximumDelay,
+                delaySamplesLeft.getNextValue() + modulation);
+            const auto rightDelay = juce::jlimit(1.0f, maximumDelay,
+                delaySamplesRight.getNextValue() - modulation);
+            echoLeft = readDelay(0, leftDelay);
+            echoRight = readDelay(1, rightDelay);
+        }
         const auto amount = delayLevel.getNextValue();
         const auto feedbackAmount = feedback.getNextValue() * amount;
         const auto crossAmount = crossFeedback.getNextValue();
@@ -203,10 +289,11 @@ void SaxProcessor::process(juce::AudioBuffer<float>& buffer, int numSamples)
 
         const auto wet = delayMix.getNextValue() * amount;
         const auto tremolo = tremoloDepth.getNextValue();
+        const auto tremoloWave = CommentoDsp::fastSine(tremoloPhase);
         const auto leftMovement = 1.0f - tremolo
-            + tremolo * (0.5f + 0.5f * static_cast<float>(std::sin(tremoloPhase)));
+            + tremolo * (0.5f + 0.5f * tremoloWave);
         const auto rightMovement = 1.0f - tremolo
-            + tremolo * (0.5f - 0.5f * static_cast<float>(std::sin(tremoloPhase)));
+            + tremolo * (0.5f - 0.5f * tremoloWave);
         const auto gain = outputGain.getNextValue();
         left[sample] = (filtered[0] * (1.0f - wet * 0.28f) + echoLeft * wet)
                      * leftMovement * gain;
@@ -215,9 +302,9 @@ void SaxProcessor::process(juce::AudioBuffer<float>& buffer, int numSamples)
 
         writePosition = (writePosition + 1) % delayBuffer.getNumSamples();
         modulationPhase += juce::MathConstants<double>::twoPi
-                         * patch.modulationRateHz / sampleRate;
+                         * modulationRateHz.getNextValue() / sampleRate;
         tremoloPhase += juce::MathConstants<double>::twoPi
-                      * patch.tremoloRateHz / sampleRate;
+                      * tremoloRateHz.getNextValue() / sampleRate;
         if (modulationPhase >= juce::MathConstants<double>::twoPi)
             modulationPhase -= juce::MathConstants<double>::twoPi;
         if (tremoloPhase >= juce::MathConstants<double>::twoPi)
@@ -234,6 +321,39 @@ void SaxProcessor::process(juce::AudioBuffer<float>& buffer, int numSamples)
         for (int sample = 0; sample < numSamples; ++sample)
             samples[sample] = applyConditionalCeiling(samples[sample],
                                                        0.90f, 0.98f);
+    }
+}
+
+void SaxProcessor::advanceMorph(int numSamples) noexcept
+{
+    if (! prepared || numSamples <= 0)
+        return;
+
+    const auto advance = [numSamples](juce::SmoothedValue<float>& value)
+    {
+        value.skip(numSamples);
+    };
+    advance(toneCoefficient);
+    advance(drive);
+    advance(delaySamplesLeft);
+    advance(delaySamplesRight);
+    advance(feedback);
+    advance(crossFeedback);
+    advance(delayMix);
+    advance(delayLevel);
+    advance(modulationDepthSamples);
+    advance(modulationRateHz);
+    advance(tremoloDepth);
+    advance(tremoloRateHz);
+    advance(outputGain);
+    advance(reverbSize);
+    advance(reverbDamping);
+    advance(reverbWet);
+    if (delayMorphActive)
+    {
+        delayMorphProgress.skip(numSamples);
+        if (! delayMorphProgress.isSmoothing())
+            delayMorphActive = false;
     }
 }
 

@@ -39,10 +39,7 @@ public:
     static constexpr int saxLeftBus = 3;
     static constexpr int saxRightBus = 4;
     static constexpr int logicalOutputBusCount = 5;
-    // The source is a monophonic sax phrase and MIDI 5 is normally played as
-    // a live line. Keeping this instrument monophonic avoids transposed phrase
-    // clusters and leaves considerably more headroom on Raspberry Pi.
-    static constexpr int saxLoopKeyboardVoiceCount = 1;
+    static constexpr double scenarioMorphSeconds = 8.0;
     static_assert(PerformanceLevels::count == memoryCount);
 
     EcosystemEngine();
@@ -64,6 +61,8 @@ public:
     [[nodiscard]] int getRealtimeSchedulingStatus() const noexcept;
     [[nodiscard]] float getDspLoad() const noexcept;
     [[nodiscard]] int getDspNearOverloadCount() const noexcept;
+    [[nodiscard]] float getCallbackIntervalLoad() const noexcept;
+    [[nodiscard]] int getLateCallbackCount() const noexcept;
     [[nodiscard]] int getCallbackInputChannelCount() const;
     [[nodiscard]] int getCallbackOutputChannelCount() const;
     [[nodiscard]] float getSaxInputLevel() const;
@@ -73,12 +72,15 @@ public:
     [[nodiscard]] bool isSaxSafetyMuted() const;
     [[nodiscard]] int getDroppedMidiMessageCount() const;
     [[nodiscard]] static bool isLiveBassLayer(int memoryIndex);
-    [[nodiscard]] bool isSaxLoopKeyboardEnabled() const;
-
     void setScenarioIndex(int index);
     [[nodiscard]] int getScenarioIndex() const;
+    [[nodiscard]] int getScenarioMorphSourceIndex() const noexcept;
+    [[nodiscard]] int getScenarioMorphDestinationIndex() const noexcept;
+    [[nodiscard]] float getScenarioMorphProgress() const noexcept;
     void setTextureAmount(float amount);
     [[nodiscard]] float getTextureAmount() const;
+    void setFuzzEnabled(bool shouldBeEnabled) noexcept;
+    [[nodiscard]] bool isFuzzEnabled() const noexcept;
     void setBassEnabled(bool shouldBeEnabled);
     [[nodiscard]] bool isBassEnabled() const;
     void setPerformanceLevel(int memoryIndex, float linearGain) noexcept;
@@ -152,38 +154,16 @@ private:
         int64_t writePosition = 0;
         int64_t playbackPosition = 0;
         int64_t loopLength = 0;
-    };
-
-    struct SaxLoopGrain
-    {
-        double readPosition = 0.0;
-        int age = 0;
-    };
-
-    struct SaxLoopVoice
-    {
-        bool active = false;
-        bool releasing = false;
-        bool keyDown = false;
-        int midiNote = -1;
-        double transportPosition = 0.0;
-        double pitchRatio = 1.0;
-        double targetPitchRatio = 1.0;
-        float envelope = 0.0f;
-        float velocity = 0.0f;
-        float targetVelocity = 0.0f;
-        float playbackFilterPole = 0.0f;
-        std::array<SaxLoopGrain, 2> grains;
-        std::array<float, 2> filterState {};
-        std::array<float, 2> declickOffset {};
-        int declickSamplesRemaining = 0;
-        int declickSamplesTotal = 0;
-        uint64_t age = 0;
+        float playbackGain = 1.0f;
+        float playbackGainStart = 1.0f;
+        float playbackGainTarget = 1.0f;
+        int64_t gainTransitionSamplesRemaining = 0;
+        int64_t gainTransitionSamplesTotal = 0;
+        bool clearAfterGainTransition = false;
     };
 
     static constexpr int incomingCapacity = 512;
     static constexpr int maximumMidiEvents = 8192;
-    static constexpr int granularWindowSize = 2048;
     static constexpr double maximumAudioSeconds = 120.0;
     static constexpr std::array<int, midiMemoryCount> midiChannels { 5, 2, 3, 4 };
 
@@ -191,7 +171,16 @@ private:
 
     void applyMidiCommands(MidiMemory& memory, int channel, juce::MidiBuffer& output);
     void applyAudioCommands();
+    void finishInitialAudioCapture() noexcept;
+    void beginAudioMemoryGainTransition(float targetGain, double seconds,
+                                        bool clearWhenFinished) noexcept;
+    void advanceAudioMemoryGainTransition() noexcept;
+    void finishAudioMemoryClear() noexcept;
     void applyScenarioIfNeeded();
+    void advanceScenarioMorph(int numSamples) noexcept;
+    void updatePerformanceEffectTargets() noexcept;
+    void processPerformanceEffects(float* const* outputs, int outputChannels,
+                                   int numSamples) noexcept;
     void recordIncomingMidi(int numSamples, juce::MidiBuffer& liveMidi);
     void renderMidiMemories(int numSamples, juce::MidiBuffer& output);
     void renderMidiSegment(MidiMemory& memory, int64_t segmentStart,
@@ -200,13 +189,6 @@ private:
                            float* const* outputs, int outputChannels, int numSamples);
     void renderInternalSynths(float* const* outputs, int outputChannels,
                               int numSamples, const juce::MidiBuffer& midi);
-    void renderSaxLoopKeyboard(juce::AudioBuffer<float>& output,
-                               const juce::MidiBuffer& midi, int numSamples);
-    void handleSaxLoopKeyboardMessage(const juce::MidiMessage& message);
-    void updateSaxLoopVoicePitches() noexcept;
-    [[nodiscard]] int getSaxLoopGrainLengthSamples() const noexcept;
-    void beginSaxLoopKeyboardFadeOut(bool sourceWillDisappear = false) noexcept;
-    void resetSaxLoopKeyboardVoices() noexcept;
     void resetCosmosHeads() noexcept;
     [[nodiscard]] float readAudioMemorySample(int channel,
                                               double position,
@@ -215,8 +197,6 @@ private:
                                                   double position,
                                                   int64_t length,
                                                   int crossfadeSamples) const noexcept;
-    [[nodiscard]] static double wrapSaxLoopReadPosition(
-        double position, int64_t length, int crossfadeSamples) noexcept;
     void renderDiagnosticTone(float* const* outputs, int outputChannels,
                               int numSamples);
 
@@ -224,7 +204,6 @@ private:
     std::array<std::unique_ptr<AmbientSynth>, midiMemoryCount> internalSynths;
     AudioMemory audioMemory;
     SaxProcessor saxProcessor;
-    SaxProcessor saxLoopKeyboardProcessor;
 
     std::array<IncomingMidiEvent, incomingCapacity> incomingMessages;
     juce::AbstractFifo incomingFifo { incomingCapacity };
@@ -234,12 +213,12 @@ private:
     juce::AudioBuffer<float> ambientSynthBuffer;
     juce::AudioBuffer<float> bassSynthBuffer;
     juce::AudioBuffer<float> layerSynthBuffer;
-    juce::AudioBuffer<float> saxLoopTailBuffer;
     juce::AudioBuffer<float> saxRenderBuffer;
     PerformanceLevels performanceLevels;
     std::array<std::atomic<float>, memoryCount> delayLevels;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> bassMuteGain;
     std::atomic<float> audioDecay { 0.985f };
+    std::atomic<uint32_t> audioDecayManualRevision { 0 };
     std::atomic<bool> saxStereoInput { false };
     std::atomic<int> saxPathMode { static_cast<int>(SaxPathMode::sceneEffects) };
     std::atomic<int> diagnosticToneBus {
@@ -249,7 +228,12 @@ private:
     std::atomic<int> realtimeSchedulingStatus { -1 };
     std::atomic<float> dspLoad { 0.0f };
     std::atomic<int> dspNearOverloadCount { 0 };
+    std::atomic<float> callbackIntervalLoad { 0.0f };
+    std::atomic<int> lateCallbackCount { 0 };
     int dspWarmupCallbacksRemaining = 0;
+    int callbackTimingWarmupRemaining = 0;
+    juce::int64 previousAudioCallbackTick = 0;
+    double previousAudioCallbackPeriod = 0.0;
     std::atomic<int> callbackInputChannels { 0 };
     std::atomic<int> callbackOutputChannels { 0 };
     std::atomic<float> saxInputLevel { 0.0f };
@@ -261,32 +245,33 @@ private:
     std::atomic<int> droppedMidiMessages { 0 };
     std::atomic<int> requestedScenario { 0 };
     std::atomic<int> activeScenario { -1 };
+    std::atomic<int> scenarioMorphSource { 0 };
+    std::atomic<float> scenarioMorphProgress { 1.0f };
     std::atomic<float> requestedTexture { 0.0f };
+    std::atomic<bool> fuzzEnabled { false };
     std::atomic<bool> bassEnabled { true };
-    SaxLoopKeyboardPatch activeSaxLoopKeyboardPatch;
-    bool saxLoopKeyboardModeActive = false;
-    bool saxLoopKeyboardTailActive = false;
-    int64_t saxLoopKeyboardTailSamplesRemaining = 0;
-    std::array<SaxLoopVoice, saxLoopKeyboardVoiceCount> saxLoopVoices;
-    std::array<uint8_t, 128> saxLoopHeldNoteCounts {};
-    std::array<float, 128> saxLoopHeldVelocities {};
-    std::array<uint64_t, 128> saxLoopHeldAges {};
+    bool fourHeadSaxLoopPlaybackActive = false;
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear>
+        fourHeadSaxLoopMix;
+    float fourHeadMixBlockStart = 0.0f;
+    float fourHeadMixBlockEnd = 0.0f;
     std::array<double, 4> cosmosHeadPositions {};
     double cosmosModulationPhase = 0.0;
-    float saxLoopPitchBendSemitones = 0.0f;
-    bool saxLoopSustain = false;
-    uint64_t saxLoopVoiceAge = 0;
-    std::array<float, granularWindowSize> saxLoopGranularWindow {};
-    float saxLoopPolyphonyGain = 1.0f;
-    std::array<float, 2> saxLoopLastOutput {};
-    std::array<float, 2> saxLoopClearFadeOffset {};
-    int saxLoopClearFadeSamplesRemaining = 0;
-    int saxLoopClearFadeSamplesTotal = 0;
-    std::array<float, 2> channelOneLastOutput {};
-    std::array<float, 2> channelOneTransitionOffset {};
-    int channelOneTransitionSamplesRemaining = 0;
-    int channelOneTransitionSamplesTotal = 0;
+    int64_t scenarioMorphElapsedSamples = 0;
+    int64_t scenarioMorphTotalSamples = 0;
+    float scenarioMorphDecaySource = 0.985f;
+    float scenarioMorphDecayTarget = 0.985f;
+    uint32_t scenarioMorphDecayRevision = 0;
+    bool scenarioMorphDecayActive = false;
     float activeTexture = -1.0f;
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear>
+        grainEffectMix;
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear>
+        fuzzEffectMix;
+    std::array<float, logicalOutputBusCount> grainHeldSamples {};
+    float activeGrainEffectTarget = -1.0f;
+    float activeFuzzEffectTarget = -1.0f;
+    int grainHoldCounter = 0;
     bool bassWasEnabled = true;
     int64_t saxDangerSamples = 0;
     int64_t saxRecoverySamples = 0;

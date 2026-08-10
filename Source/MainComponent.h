@@ -88,6 +88,7 @@ private:
     juce::TextButton clearButton { "DIMENTICA" };
     juce::TextButton settingsButton { "CONNESSIONI" };
     juce::TextButton textureButton { "GRANA: PULITA" };
+    juce::TextButton fuzzButton { "FUZZ: SPENTO" };
     juce::TextButton applyAudioButton { "APPLICA AUDIO" };
     juce::TextButton rescanAudioButton { "RILEGGI DISPOSITIVI" };
     juce::TextButton keyStepRoutingButton { "RIPROVA KEYSTEP PRO" };

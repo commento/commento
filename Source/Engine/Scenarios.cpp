@@ -19,6 +19,7 @@ float calibratedBassLevel(OscillatorModel model) noexcept
         case OscillatorModel::warm:  return 0.240f;
         case OscillatorModel::pluck: return 0.215f;
         case OscillatorModel::pulse: return 0.192f;
+        case OscillatorModel::dualSquare: return 0.197f;
         case OscillatorModel::glass:
         case OscillatorModel::reed:
         case OscillatorModel::cloud:
@@ -52,6 +53,21 @@ SynthPatch makeBass(const char* name, OscillatorModel model, int transpose,
     patch.reverbSize = 0.35f;
     patch.reverbDamping = 0.72f;
     patch.reverbWet = 0.0f;
+    return patch;
+}
+
+SynthPatch makeCosmosBass()
+{
+    auto patch = makeBass("DUE QUADRE", OscillatorModel::dualSquare, -12,
+                          2450.0f, 0.005f, 0.34f, 1.48f);
+    patch.detuneCents = 6.5f;
+    patch.decaySeconds = 0.34f;
+    patch.sustain = 0.72f;
+    patch.keyTrack = 0.22f;
+    patch.harmonicMix = 0.47f;
+    patch.pulseWidth = 0.5f;
+    patch.lfoRateHz = 0.0f;
+    patch.lfoDepth = 0.0f;
     return patch;
 }
 
@@ -488,8 +504,7 @@ const std::array<SoundScenario, CommentoScenarios::count> scenarios {{
     {
         "COSMOS", "anelli armonici e respiro sospeso",
         {{
-            makeBass("RESPIRO TONALE", OscillatorModel::reed, -12, 1900.0f,
-                     0.012f, 0.42f, 1.18f),
+            makeCosmosBass(),
             makeCosmosRing("ANELLO BASSO", -12, 1550.0f, -0.31f,
                            610.0f, false),
             makeCosmosRing("ANELLO ALTO", 0, 3450.0f, 0.25f,
@@ -499,7 +514,7 @@ const std::array<SoundScenario, CommentoScenarios::count> scenarios {{
         makeSax("ALONE COSMOS", 3900.0f, 0.98f, 1150.0f, 1.29f, 0.36f, 0.38f,
                 0.28f, 0.027f, 2.2f, 0.86f, 0.68f, 0.31f, 0.013f, 0.07f,
                 0.54f, 0.972f),
-        { true, 60, 0.035f, 0.320f, 0.46f, 104.0f }
+        true
     }
 }};
 }

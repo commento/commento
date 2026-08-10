@@ -76,62 +76,6 @@ struct OutputBlock
     std::array<float*, Channels> pointers {};
 };
 
-double estimateEnvelopeRate(const std::vector<float>& samples,
-                            double sampleRate)
-{
-    const auto rmsWindow = juce::jmax(
-        1, static_cast<int>(std::round(sampleRate * 0.010)));
-    const auto frameCount = samples.size()
-        / static_cast<std::size_t>(rmsWindow);
-    if (frameCount < 32)
-        return 0.0;
-
-    std::vector<double> envelope(frameCount, 0.0);
-    auto mean = 0.0;
-    for (std::size_t frame = 0; frame < frameCount; ++frame)
-    {
-        auto sum = 0.0;
-        for (int sample = 0; sample < rmsWindow; ++sample)
-        {
-            const auto value = samples[
-                frame * static_cast<std::size_t>(rmsWindow)
-                + static_cast<std::size_t>(sample)];
-            sum += static_cast<double>(value) * value;
-        }
-        envelope[frame] = std::sqrt(sum / static_cast<double>(rmsWindow));
-        mean += envelope[frame];
-    }
-    mean /= static_cast<double>(frameCount);
-
-    auto bestRate = 0.0;
-    auto bestPower = 0.0;
-    for (auto rate = 1.5; rate <= 5.0; rate += 0.02)
-    {
-        auto real = 0.0;
-        auto imaginary = 0.0;
-        for (std::size_t frame = 0; frame < frameCount; ++frame)
-        {
-            const auto hann = 0.5 - 0.5 * std::cos(
-                juce::MathConstants<double>::twoPi
-                * static_cast<double>(frame)
-                / static_cast<double>(frameCount - 1));
-            const auto time = (static_cast<double>(frame) + 0.5)
-                * static_cast<double>(rmsWindow) / sampleRate;
-            const auto phase = juce::MathConstants<double>::twoPi
-                * rate * time;
-            const auto value = (envelope[frame] - mean) * hann;
-            real += value * std::cos(phase);
-            imaginary -= value * std::sin(phase);
-        }
-        const auto power = real * real + imaginary * imaginary;
-        if (power > bestPower)
-        {
-            bestPower = power;
-            bestRate = rate;
-        }
-    }
-    return bestRate;
-}
 }
 
 int main()
@@ -145,19 +89,25 @@ int main()
     std::set<int> ambientDelayBuckets;
     float longestAmbientDelay = 0.0f;
     float longestSaxDelay = 0.0f;
-    int saxLoopKeyboardScenarioCount = 0;
-    int saxLoopKeyboardScenarioIndex = -1;
+    int fourHeadSaxLoopScenarioCount = 0;
+    int fourHeadSaxLoopScenarioIndex = -1;
     int droneScenarioIndex = -1;
     int noiseScenarioIndex = -1;
     int metalScenarioIndex = -1;
+    bool allFactoryBassPatchesAreDry = true;
     for (int index = 0; index < CommentoScenarios::count; ++index)
     {
         scenarioNames.insert(CommentoScenarios::get(index).name);
         const auto& scenario = CommentoScenarios::get(index);
-        if (scenario.saxLoopKeyboard.enabled)
+        const auto& bassPatch = scenario.layers[
+            static_cast<std::size_t>(EcosystemEngine::bassLayerIndex)];
+        allFactoryBassPatchesAreDry &= bassPatch.delayMix == 0.0f
+            && bassPatch.delayFeedback == 0.0f
+            && bassPatch.reverbWet == 0.0f;
+        if (scenario.useFourHeadSaxLoopPlayback)
         {
-            ++saxLoopKeyboardScenarioCount;
-            saxLoopKeyboardScenarioIndex = index;
+            ++fourHeadSaxLoopScenarioCount;
+            fourHeadSaxLoopScenarioIndex = index;
         }
 
         int droneLayers = 0;
@@ -203,22 +153,19 @@ int main()
                      "ogni scenario deve avere un nome distinto");
     const auto& cosmosScenario = CommentoScenarios::get(
         CommentoScenarios::count - 1);
-    passed &= expect(saxLoopKeyboardScenarioCount == 1
-                         && saxLoopKeyboardScenarioIndex
+    passed &= expect(fourHeadSaxLoopScenarioCount == 1
+                         && fourHeadSaxLoopScenarioIndex
                                 == CommentoScenarios::count - 1
                          && std::string(cosmosScenario.name) == "COSMOS"
-                         && cosmosScenario.saxLoopKeyboard.enabled,
-                     "solo COSMOS, ultimo scenario, deve abilitare il sax MIDI 5");
-    passed &= expect(cosmosScenario.saxLoopKeyboard.rootNote == 60
-                         && cosmosScenario.saxLoopKeyboard.attackSeconds > 0.0f
-                         && cosmosScenario.saxLoopKeyboard.releaseSeconds > 0.0f
-                         && cosmosScenario.saxLoopKeyboard.level > 0.0f
-                         && cosmosScenario.saxLoopKeyboard.level <= 1.0f
-                         && cosmosScenario.saxLoopKeyboard.grainMilliseconds
-                                >= 24.0f
-                         && cosmosScenario.saxLoopKeyboard.grainMilliseconds
-                                <= 120.0f,
-                     "COSMOS deve dichiarare root e grana del pitch shifter");
+                         && cosmosScenario.useFourHeadSaxLoopPlayback,
+                     "solo COSMOS deve rileggere RESPIRO con quattro testine");
+    const auto& cosmosBass = cosmosScenario.layers[
+        static_cast<std::size_t>(EcosystemEngine::bassLayerIndex)];
+    passed &= expect(cosmosBass.model == OscillatorModel::dualSquare
+                         && cosmosBass.detuneCents >= 3.0f
+                         && cosmosBass.detuneCents <= 12.0f
+                         && cosmosBass.harmonicMix >= 0.35f,
+                     "COSMOS deve dichiarare due onde quadre leggermente detunate");
     passed &= expect(droneScenarioIndex >= legacyScenarioCount,
                      "le nuove scene devono includere un vero assetto drone");
     passed &= expect(noiseScenarioIndex >= legacyScenarioCount,
@@ -234,6 +181,8 @@ int main()
     passed &= expect(longestAmbientDelay < 2300.0f
                          && longestSaxDelay < 2500.0f,
                      "i preset non devono imporre code eccessivamente lunghe");
+    passed &= expect(allFactoryBassPatchesAreDry,
+                     "il fast-path del basso richiede patch fabbrica asciutte");
     passed &= expect(CommentoScenarios::wrapIndex(-1)
                              == CommentoScenarios::count - 1
                          && CommentoScenarios::wrapIndex(
@@ -295,14 +244,13 @@ int main()
     int calibratedBassScenarioCount = 0;
     for (int scenario = 0; scenario < CommentoScenarios::count; ++scenario)
     {
-        if (CommentoScenarios::get(scenario).saxLoopKeyboard.enabled)
-            continue;
-
         ++calibratedBassScenarioCount;
         EcosystemEngine scenarioBassEngine;
-        scenarioBassEngine.prepare(sampleRate, blockSize);
         scenarioBassEngine.setScenarioIndex(scenario);
         scenarioBassEngine.setTextureAmount(1.0f);
+        // A saved startup scene is applied immediately; runtime scene changes
+        // deliberately take eight seconds and are covered separately below.
+        scenarioBassEngine.prepare(sampleRate, blockSize);
         OutputBlock<EcosystemEngine::logicalOutputBusCount> scenarioBassOutput(
             blockSize);
         float scenarioPeak = 0.0f;
@@ -338,9 +286,8 @@ int main()
         loudestBassScenarioPeak = std::max(loudestBassScenarioPeak,
                                            scenarioPeak);
     }
-    passed &= expect(calibratedBassScenarioCount
-                             == CommentoScenarios::count - 1,
-                     "solo COSMOS deve essere escluso dalla calibrazione basso");
+    passed &= expect(calibratedBassScenarioCount == CommentoScenarios::count,
+                     "ogni scenario, incluso COSMOS, deve avere il basso MIDI 5");
     passed &= expect(quietestBassScenarioPeak >= 0.24f
                          && loudestBassScenarioPeak <= 0.32f,
                      "ogni scena basso synth deve restare espressiva con headroom");
@@ -348,11 +295,9 @@ int main()
                          <= quietestBassScenarioPeak * 1.08f,
                      "i livelli di fabbrica del basso devono essere coerenti");
 
-    // COSMOS replaces the MIDI-5 oscillator with a polyphonic reader of the
-    // captured sax memory. A deterministic, amplitude-modulated tone proves
-    // that sound comes from that memory, reaches only the dedicated MIDI-5 bus
-    // and obeys
-    // the configured release and clear commands.
+    // COSMOS keeps MIDI 5 as the same dedicated live-bass path used by every
+    // other scenario. Its only special audio behaviour is the independent
+    // four-head rereading of the captured RESPIRO loop on the sax bus.
     {
         constexpr auto cosmosCaptureSamples = 24000;
         EcosystemEngine cosmosEngine;
@@ -360,25 +305,24 @@ int main()
         cosmosEngine.setSaxPathMode(EcosystemEngine::SaxPathMode::cleanLooper);
         cosmosEngine.setSaxStereoInput(true);
         cosmosEngine.setPerformanceLevel(EcosystemEngine::bassLayerIndex, 1.0f);
-        cosmosEngine.setPerformanceLevel(EcosystemEngine::midiMemoryCount, 0.0f);
-        cosmosEngine.setDelayLevel(EcosystemEngine::bassLayerIndex, 0.0f);
+        cosmosEngine.setPerformanceLevel(EcosystemEngine::midiMemoryCount, 1.0f);
         cosmosEngine.prepare(sampleRate, cosmosCaptureSamples);
         OutputBlock<EcosystemEngine::logicalOutputBusCount> cosmosOutput(
             cosmosCaptureSamples);
 
-        cosmosEngine.enqueueMidiMessage(juce::MidiMessage::noteOn(
-            5, cosmosScenario.saxLoopKeyboard.rootNote, 1.0f));
-        process(cosmosEngine, nullptr, 0, cosmosOutput.pointers.data(),
-                EcosystemEngine::logicalOutputBusCount, blockSize);
-        passed &= expect(cosmosEngine.isSaxLoopKeyboardEnabled()
-                             && cosmosOutput.silent(
-                                 EcosystemEngine::bassBus, blockSize),
-                         "COSMOS senza cattura non deve ripiegare sul synth basso");
         cosmosEngine.enqueueMidiMessage(
-            juce::MidiMessage::controllerEvent(5, 120, 0));
-        cosmosOutput.clear();
+            juce::MidiMessage::noteOn(5, 48, 1.0f));
         process(cosmosEngine, nullptr, 0, cosmosOutput.pointers.data(),
                 EcosystemEngine::logicalOutputBusCount, blockSize);
+        passed &= expect(
+            cosmosOutput.peak(EcosystemEngine::bassBus, blockSize) > 0.0001f
+                && cosmosOutput.silent(EcosystemEngine::ambientLeftBus,
+                                       blockSize)
+                && cosmosOutput.silent(EcosystemEngine::ambientRightBus,
+                                       blockSize)
+                && cosmosOutput.silent(EcosystemEngine::saxLeftBus, blockSize)
+                && cosmosOutput.silent(EcosystemEngine::saxRightBus, blockSize),
+            "il basso due-quadre COSMOS deve usare solo il bus dedicato");
 
         std::array<std::vector<float>, 2> cosmosInputStorage;
         std::array<const float*, 2> cosmosInputs {};
@@ -387,18 +331,11 @@ int main()
         {
             cosmosInputStorage[channel].resize(cosmosCaptureSamples);
             for (int sample = 0; sample < cosmosCaptureSamples; ++sample)
-            {
-                const auto envelope = 0.060f + 0.045f
-                    * static_cast<float>(std::cos(
+                cosmosInputStorage[channel][static_cast<std::size_t>(sample)]
+                    = 0.18f * static_cast<float>(std::sin(
                         juce::MathConstants<double>::twoPi
-                        * static_cast<double>(sample)
-                        / static_cast<double>(cosmosCaptureSamples)));
-                const auto tone = envelope * static_cast<float>(std::sin(
-                    juce::MathConstants<double>::twoPi * 220.0
-                    * static_cast<double>(sample) / sampleRate));
-                cosmosInputStorage[channel][static_cast<std::size_t>(sample)] =
-                    channel == 0 ? tone : tone * 0.75f;
-            }
+                        * (220.0 + 37.0 * static_cast<double>(channel))
+                        * static_cast<double>(sample) / sampleRate));
             cosmosInputs[channel] = cosmosInputStorage[channel].data();
         }
 
@@ -411,329 +348,14 @@ int main()
         cosmosOutput.clear();
         process(cosmosEngine, nullptr, 0, cosmosOutput.pointers.data(),
                 EcosystemEngine::logicalOutputBusCount, blockSize);
-        passed &= expect(cosmosEngine.hasMaterial(
-                             EcosystemEngine::midiMemoryCount)
-                             && std::abs(cosmosEngine.getLengthSeconds(
-                                 EcosystemEngine::midiMemoryCount) - 0.5)
-                                    < 0.0001,
-                         "COSMOS deve chiudere una cattura sax libera di 500 ms");
-
-        // Re-preparing at the same sample rate resets voices and effect tails
-        // but deliberately preserves the recorded audio memory. Count stable
-        // positive crossings so the chromatic contract is tested without
-        // depending on an exact phase or sample amplitude.
-        const auto measureCosmosPitch = [&](int midiNote, float& outputPeak,
-                                             float& meterPeak,
-                                             bool& stayedFinite,
-                                             bool& ambientStayedSilent,
-                                             std::vector<float>& timingSamples)
-        {
-            cosmosEngine.prepare(sampleRate, blockSize);
-            cosmosEngine.enqueueMidiMessage(
-                juce::MidiMessage::noteOn(5, midiNote, 1.0f));
-            outputPeak = 0.0f;
-            meterPeak = 0.0f;
-            stayedFinite = true;
-            ambientStayedSilent = true;
-            int positiveCrossings = 0;
-            int measuredSamples = 0;
-            float previousSample = 0.0f;
-            bool hasPreviousSample = false;
-            constexpr auto warmupBlocks = 12;
-            constexpr auto measurementBlocks = 375;
-            timingSamples.clear();
-            timingSamples.reserve(
-                static_cast<std::size_t>(measurementBlocks * blockSize));
-            for (int block = 0;
-                 block < warmupBlocks + measurementBlocks; ++block)
-            {
-                cosmosOutput.clear();
-                process(cosmosEngine, nullptr, 0,
-                        cosmosOutput.pointers.data(),
-                        EcosystemEngine::logicalOutputBusCount, blockSize);
-                outputPeak = std::max(outputPeak,
-                    cosmosOutput.peak(EcosystemEngine::bassBus, blockSize));
-                meterPeak = std::max(meterPeak,
-                                     cosmosEngine.getBassOutputLevel());
-                stayedFinite &= cosmosOutput.finite(blockSize);
-                ambientStayedSilent &= cosmosOutput.silent(
-                    EcosystemEngine::ambientLeftBus, blockSize)
-                    && cosmosOutput.silent(
-                        EcosystemEngine::ambientRightBus, blockSize);
-
-                if (block < warmupBlocks)
-                    continue;
-                timingSamples.insert(
-                    timingSamples.end(),
-                    cosmosOutput.storage[EcosystemEngine::bassBus].begin(),
-                    cosmosOutput.storage[EcosystemEngine::bassBus].begin()
-                        + blockSize);
-                for (int sampleIndex = 0; sampleIndex < blockSize;
-                     ++sampleIndex)
-                {
-                    const auto sample = cosmosOutput.storage[
-                        EcosystemEngine::bassBus][sampleIndex];
-                    if (hasPreviousSample
-                        && previousSample <= 0.0f && sample > 0.0f)
-                        ++positiveCrossings;
-                    previousSample = sample;
-                    hasPreviousSample = true;
-                    ++measuredSamples;
-                }
-            }
-            cosmosEngine.enqueueMidiMessage(
-                juce::MidiMessage::controllerEvent(5, 120, 0));
-            cosmosOutput.clear();
-            process(cosmosEngine, nullptr, 0, cosmosOutput.pointers.data(),
-                    EcosystemEngine::logicalOutputBusCount, blockSize);
-            return measuredSamples > 0
-                ? static_cast<double>(positiveCrossings) * sampleRate
-                    / static_cast<double>(measuredSamples)
-                : 0.0;
-        };
-
-        float cosmosRootPeak = 0.0f;
-        float cosmosRootMeterPeak = 0.0f;
-        bool cosmosRootStayedFinite = true;
-        bool cosmosAmbientStayedSilent = true;
-        std::vector<float> cosmosRootTimingSamples;
-        const auto cosmosRootFrequency = measureCosmosPitch(
-            cosmosScenario.saxLoopKeyboard.rootNote, cosmosRootPeak,
-            cosmosRootMeterPeak, cosmosRootStayedFinite,
-            cosmosAmbientStayedSilent, cosmosRootTimingSamples);
-        float cosmosOctavePeak = 0.0f;
-        float cosmosOctaveMeterPeak = 0.0f;
-        bool cosmosOctaveStayedFinite = true;
-        bool cosmosOctaveAmbientStayedSilent = true;
-        std::vector<float> cosmosOctaveTimingSamples;
-        const auto cosmosOctaveFrequency = measureCosmosPitch(
-            cosmosScenario.saxLoopKeyboard.rootNote + 12, cosmosOctavePeak,
-            cosmosOctaveMeterPeak, cosmosOctaveStayedFinite,
-            cosmosOctaveAmbientStayedSilent, cosmosOctaveTimingSamples);
-        const auto cosmosRootEnvelopeRate = estimateEnvelopeRate(
-            cosmosRootTimingSamples, sampleRate);
-        const auto cosmosOctaveEnvelopeRate = estimateEnvelopeRate(
-            cosmosOctaveTimingSamples, sampleRate);
-        passed &= expect(cosmosRootPeak > 0.0001f
-                             && cosmosOctavePeak > 0.0001f
-                             && cosmosRootStayedFinite
-                             && cosmosOctaveStayedFinite,
-                         "root e ottava COSMOS devono produrre audio finito");
-        passed &= expect(cosmosRootFrequency > 190.0
-                             && cosmosRootFrequency < 250.0
-                             && cosmosOctaveFrequency
-                                    > cosmosRootFrequency * 1.75
-                             && cosmosOctaveFrequency
-                                    < cosmosRootFrequency * 2.25,
-                         "MIDI 5 +12 deve raddoppiare la frequenza COSMOS");
-        passed &= expect(cosmosRootEnvelopeRate > 1.7
-                             && cosmosRootEnvelopeRate < 2.4
-                             && cosmosOctaveEnvelopeRate
-                                    > cosmosRootEnvelopeRate * 0.82
-                             && cosmosOctaveEnvelopeRate
-                                    < cosmosRootEnvelopeRate * 1.18,
-                         "+12 deve cambiare il pitch senza accelerare il loop");
-        passed &= expect(cosmosAmbientStayedSilent
-                             && cosmosOctaveAmbientStayedSilent,
-                         "la tastiera sax COSMOS non deve contaminare AMBIENTE");
-
-        // The sax-derived keyboard is intentionally monophonic: the source is
-        // already a moving phrase, so stacking transpositions is cacophonic.
-        cosmosEngine.prepare(sampleRate, blockSize);
-        for (int voice = 0;
-             voice < EcosystemEngine::saxLoopKeyboardVoiceCount; ++voice)
-            cosmosEngine.enqueueMidiMessage(juce::MidiMessage::noteOn(
-                5, cosmosScenario.saxLoopKeyboard.rootNote, 1.0f));
-        float cosmosUnisonPeak = 0.0f;
-        float cosmosUnisonMeterPeak = 0.0f;
-        bool cosmosUnisonStayedFinite = true;
-        for (int block = 0; block < 48; ++block)
-        {
-            cosmosOutput.clear();
-            process(cosmosEngine, nullptr, 0, cosmosOutput.pointers.data(),
-                    EcosystemEngine::logicalOutputBusCount, blockSize);
-            cosmosUnisonStayedFinite &= cosmosOutput.finite(blockSize);
-            if (block < 12)
-                continue;
-            cosmosUnisonPeak = std::max(cosmosUnisonPeak,
-                cosmosOutput.peak(EcosystemEngine::bassBus, blockSize));
-            cosmosUnisonMeterPeak = std::max(cosmosUnisonMeterPeak,
-                                             cosmosEngine.getBassOutputLevel());
-        }
-        const auto unisonToRoot = cosmosRootPeak > 0.0f
-            ? cosmosUnisonPeak / cosmosRootPeak : 0.0f;
-        passed &= expect(unisonToRoot > 0.65f && unisonToRoot < 1.45f
-                             && cosmosUnisonStayedFinite,
-                         "SAX TASTIERA COSMOS deve restare monofonico");
-
-        // Retarget the held voice by one octave with a very different
-        // velocity. Pitch and gain must glide without restarting the grains;
-        // releasing the old key must not kill the newer legato note.
-        cosmosEngine.prepare(sampleRate, blockSize);
-        for (int note = 0;
-             note < EcosystemEngine::saxLoopKeyboardVoiceCount; ++note)
-            cosmosEngine.enqueueMidiMessage(juce::MidiMessage::noteOn(
-                5, cosmosScenario.saxLoopKeyboard.rootNote + note, 1.0f));
-        float cosmosChordPeak = 0.0f;
-        float maximumPreProtectionPeak = std::max(
-            { cosmosRootMeterPeak, cosmosOctaveMeterPeak,
-              cosmosUnisonMeterPeak });
-        bool cosmosChordStayedFinite = true;
-        for (int block = 0; block < 36; ++block)
-        {
-            cosmosOutput.clear();
-            process(cosmosEngine, nullptr, 0, cosmosOutput.pointers.data(),
-                    EcosystemEngine::logicalOutputBusCount, blockSize);
-            cosmosChordStayedFinite &= cosmosOutput.finite(blockSize);
-            if (block >= 12)
-                cosmosChordPeak = std::max(cosmosChordPeak,
-                    cosmosOutput.peak(EcosystemEngine::bassBus, blockSize));
-            maximumPreProtectionPeak = std::max(maximumPreProtectionPeak,
-                                                cosmosEngine.getBassOutputLevel());
-        }
-        const auto sampleBeforeSteal = cosmosOutput.storage[
-            EcosystemEngine::bassBus][blockSize - 1];
-        cosmosEngine.enqueueMidiMessage(juce::MidiMessage::noteOn(
-            5, cosmosScenario.saxLoopKeyboard.rootNote + 12, 0.25f));
-        cosmosOutput.clear();
-        process(cosmosEngine, nullptr, 0, cosmosOutput.pointers.data(),
-                EcosystemEngine::logicalOutputBusCount, blockSize);
-        float maximumStealStep = std::abs(cosmosOutput.storage[
-            EcosystemEngine::bassBus][0] - sampleBeforeSteal);
-        for (int sample = 1; sample < blockSize; ++sample)
-            maximumStealStep = std::max(maximumStealStep,
-                std::abs(cosmosOutput.storage[EcosystemEngine::bassBus][sample]
-                    - cosmosOutput.storage[EcosystemEngine::bassBus][sample - 1]));
-        maximumPreProtectionPeak = std::max(maximumPreProtectionPeak,
-                                            cosmosEngine.getBassOutputLevel());
-
-        for (int note = 0;
-             note < EcosystemEngine::saxLoopKeyboardVoiceCount; ++note)
-            cosmosEngine.enqueueMidiMessage(juce::MidiMessage::noteOff(
-                5, cosmosScenario.saxLoopKeyboard.rootNote + note));
-        constexpr auto stolenVoiceWarmupBlocks = 36;
-        constexpr auto stolenVoiceMeasurementBlocks = 48;
-        int stolenVoiceCrossings = 0;
-        int stolenVoiceSamples = 0;
-        float stolenVoicePrevious = 0.0f;
-        bool hasStolenVoicePrevious = false;
-        float stolenVoicePeak = 0.0f;
-        for (int block = 0;
-             block < stolenVoiceWarmupBlocks + stolenVoiceMeasurementBlocks;
-             ++block)
-        {
-            cosmosOutput.clear();
-            process(cosmosEngine, nullptr, 0, cosmosOutput.pointers.data(),
-                    EcosystemEngine::logicalOutputBusCount, blockSize);
-            cosmosChordStayedFinite &= cosmosOutput.finite(blockSize);
-            maximumPreProtectionPeak = std::max(maximumPreProtectionPeak,
-                                                cosmosEngine.getBassOutputLevel());
-            if (block < stolenVoiceWarmupBlocks)
-                continue;
-            stolenVoicePeak = std::max(stolenVoicePeak,
-                cosmosOutput.peak(EcosystemEngine::bassBus, blockSize));
-            for (int sampleIndex = 0; sampleIndex < blockSize;
-                 ++sampleIndex)
-            {
-                const auto sample = cosmosOutput.storage[
-                    EcosystemEngine::bassBus][sampleIndex];
-                if (hasStolenVoicePrevious
-                    && stolenVoicePrevious <= 0.0f && sample > 0.0f)
-                    ++stolenVoiceCrossings;
-                stolenVoicePrevious = sample;
-                hasStolenVoicePrevious = true;
-                ++stolenVoiceSamples;
-            }
-        }
-        const auto stolenVoiceFrequency = stolenVoiceSamples > 0
-            ? static_cast<double>(stolenVoiceCrossings) * sampleRate
-                / static_cast<double>(stolenVoiceSamples)
-            : 0.0;
-        passed &= expect(cosmosChordPeak > 0.0001f
-                             && stolenVoicePeak > 0.0001f
-                             && cosmosChordStayedFinite,
-                         "nota iniziale e legato COSMOS devono restare udibili e finiti");
-        passed &= expect(stolenVoiceFrequency
-                                 > cosmosRootFrequency * 1.65
-                             && stolenVoiceFrequency
-                                 < cosmosRootFrequency * 2.35,
-                         "la nuova nota COSMOS deve sopravvivere al rilascio della precedente");
-        passed &= expect(maximumStealStep < 0.08f,
-                         "il legato COSMOS non deve creare crackle al cambio velocity");
-        passed &= expect(maximumPreProtectionPeak > 0.0001f
-                             && maximumPreProtectionPeak < 0.78f,
-                         "SAX TASTIERA deve conservare headroom prima della protezione");
-
-        // Clear while a held note is sounding. The first post-clear sample
-        // must join the previous one, the explicit 8 ms fade must then reach
-        // silence inside the block, and fresh MIDI must not resurrect a
-        // deleted source while the delay storage is drained incrementally.
-        cosmosEngine.prepare(sampleRate, blockSize);
-        for (int note = 0;
-             note < EcosystemEngine::saxLoopKeyboardVoiceCount; ++note)
-            cosmosEngine.enqueueMidiMessage(juce::MidiMessage::noteOn(
-                5, cosmosScenario.saxLoopKeyboard.rootNote + note, 1.0f));
-        float preClearPeak = 0.0f;
-        float sampleBeforeClear = 0.0f;
-        bool meaningfulClearBoundary = false;
-        for (int block = 0; block < 64; ++block)
-        {
-            cosmosOutput.clear();
-            process(cosmosEngine, nullptr, 0, cosmosOutput.pointers.data(),
-                    EcosystemEngine::logicalOutputBusCount, blockSize);
-            preClearPeak = std::max(preClearPeak,
-                cosmosOutput.peak(EcosystemEngine::bassBus, blockSize));
-            sampleBeforeClear = cosmosOutput.storage[
-                EcosystemEngine::bassBus][blockSize - 1];
-            if (block >= 12 && std::abs(sampleBeforeClear) > 0.001f)
-            {
-                meaningfulClearBoundary = true;
-                break;
-            }
-        }
-        cosmosEngine.clearMemory(EcosystemEngine::midiMemoryCount);
-        cosmosOutput.clear();
-        process(cosmosEngine, nullptr, 0, cosmosOutput.pointers.data(),
-                EcosystemEngine::logicalOutputBusCount, blockSize);
-        float maximumClearStep = std::abs(cosmosOutput.storage[
-            EcosystemEngine::bassBus][0] - sampleBeforeClear);
-        for (int sample = 1; sample < blockSize; ++sample)
-            maximumClearStep = std::max(maximumClearStep,
-                std::abs(cosmosOutput.storage[EcosystemEngine::bassBus][sample]
-                    - cosmosOutput.storage[EcosystemEngine::bassBus][sample - 1]));
-        const auto clearFadeSamples = static_cast<int>(
-            std::ceil(sampleRate * 0.008));
-        float postFadePeak = 0.0f;
-        for (int sample = juce::jlimit(0, blockSize, clearFadeSamples);
-             sample < blockSize; ++sample)
-            postFadePeak = std::max(postFadePeak,
-                std::abs(cosmosOutput.storage[
-                    EcosystemEngine::bassBus][sample]));
-
-        cosmosEngine.enqueueMidiMessage(juce::MidiMessage::noteOn(
-            5, cosmosScenario.saxLoopKeyboard.rootNote, 1.0f));
-        float clearedCosmosPeak = 0.0f;
-        bool clearedCosmosStayedFinite = cosmosOutput.finite(blockSize);
-        for (int block = 0; block < 16; ++block)
-        {
-            cosmosOutput.clear();
-            process(cosmosEngine, nullptr, 0, cosmosOutput.pointers.data(),
-                    EcosystemEngine::logicalOutputBusCount, blockSize);
-            clearedCosmosPeak = std::max(clearedCosmosPeak,
-                cosmosOutput.peak(EcosystemEngine::bassBus, blockSize));
-            clearedCosmosStayedFinite &= cosmosOutput.finite(blockSize);
-        }
-        const auto clearStepLimit = std::max(
-            0.001f, std::abs(sampleBeforeClear) * 0.25f);
-        passed &= expect(meaningfulClearBoundary && preClearPeak > 0.0001f
-                             && maximumClearStep < clearStepLimit,
-                         "clear COSMOS live deve applicare un raccordo anti-click");
-        passed &= expect(! cosmosEngine.hasMaterial(
-                             EcosystemEngine::midiMemoryCount)
-                             && postFadePeak < 0.000001f
-                             && clearedCosmosPeak < 0.000001f
-                             && clearedCosmosStayedFinite,
-                         "clear COSMOS deve diventare rapidamente silenzioso");
+        passed &= expect(
+            cosmosEngine.hasMaterial(EcosystemEngine::midiMemoryCount)
+                && cosmosOutput.peak(EcosystemEngine::saxLeftBus, blockSize)
+                    > 0.0001f
+                && cosmosOutput.peak(EcosystemEngine::bassBus, blockSize)
+                    > 0.0001f
+                && cosmosOutput.finite(blockSize),
+            "le quattro testine COSMOS e il basso MIDI 5 devono restare indipendenti");
     }
 
     EcosystemEngine legatoBassEngine;
@@ -972,6 +594,389 @@ int main()
                          && std::abs(loopEngine.getLengthSeconds(1) - loopLength) < 0.0001,
                      "cambiare scenario non deve cancellare o alterare i loop MIDI");
 
+    // Exercise the public morph contract on an exactly divisible time base:
+    // 80 callbacks cover the declared eight seconds.  The loop is recorded
+    // first so every progress observation also guards its event metadata.
+    {
+        constexpr auto morphSampleRate = 8000.0;
+        constexpr auto morphBlockSize = 800;
+        const auto morphTotalSamples = static_cast<int64_t>(std::llround(
+            EcosystemEngine::scenarioMorphSeconds * morphSampleRate));
+        const auto morphBlockCount = static_cast<int>(
+            morphTotalSamples / morphBlockSize);
+        passed &= expect(morphTotalSamples % morphBlockSize == 0
+                             && morphBlockCount == 80,
+                         "il test morph deve coprire esattamente la durata dichiarata");
+
+        EcosystemEngine morphEngine;
+        morphEngine.prepare(morphSampleRate, morphBlockSize);
+        OutputBlock<EcosystemEngine::logicalOutputBusCount> morphOutput(
+            morphBlockSize);
+        const auto renderMorphBlock = [&]
+        {
+            morphOutput.clear();
+            process(morphEngine, nullptr, 0, morphOutput.pointers.data(),
+                    EcosystemEngine::logicalOutputBusCount, morphBlockSize);
+        };
+
+        morphEngine.toggleRecording(1);
+        morphEngine.enqueueMidiMessage(
+            juce::MidiMessage::noteOn(2, 50, 0.72f));
+        renderMorphBlock();
+        morphEngine.enqueueMidiMessage(juce::MidiMessage::noteOff(2, 50));
+        renderMorphBlock();
+        morphEngine.toggleRecording(1);
+        renderMorphBlock();
+        const auto preservedEventCount = morphEngine.getEventCount(1);
+        const auto preservedLoopLength = morphEngine.getLengthSeconds(1);
+        passed &= expect(morphEngine.hasMaterial(1)
+                             && preservedEventCount == 2
+                             && preservedLoopLength > 0.0,
+                         "il probe morph deve contenere un loop MIDI valido");
+
+        constexpr auto firstMorphTarget = 6;
+        morphEngine.setScenarioIndex(firstMorphTarget);
+        auto previousProgress = -1.0f;
+        auto firstProgress = 1.0f;
+        auto penultimateProgress = 1.0f;
+        bool progressStayedFiniteAndMonotonic = true;
+        bool progressFollowedDeclaredDuration = true;
+        bool loopSurvivedWholeMorph = true;
+        const auto smoothStep = [](float position)
+        {
+            return position * position * (3.0f - 2.0f * position);
+        };
+
+        for (int block = 1; block <= morphBlockCount; ++block)
+        {
+            renderMorphBlock();
+            const auto progress = morphEngine.getScenarioMorphProgress();
+            if (block == 1)
+                firstProgress = progress;
+            if (block == morphBlockCount - 1)
+                penultimateProgress = progress;
+
+            const auto expectedProgress = smoothStep(
+                static_cast<float>(block)
+                    / static_cast<float>(morphBlockCount));
+            progressStayedFiniteAndMonotonic &= std::isfinite(progress)
+                && progress >= 0.0f && progress <= 1.0f
+                && progress + 0.000001f >= previousProgress;
+            progressFollowedDeclaredDuration &= std::abs(
+                progress - expectedProgress) < 0.00001f;
+            loopSurvivedWholeMorph &= morphEngine.hasMaterial(1)
+                && morphEngine.getEventCount(1) == preservedEventCount
+                && std::abs(morphEngine.getLengthSeconds(1)
+                            - preservedLoopLength) < 0.000001;
+            previousProgress = progress;
+        }
+
+        passed &= expect(firstProgress < 0.001f
+                             && penultimateProgress < 1.0f
+                             && std::abs(previousProgress - 1.0f) < 0.000001f
+                             && progressStayedFiniteAndMonotonic
+                             && progressFollowedDeclaredDuration,
+                         "il morph deve avanzare monotono da zero a uno in otto secondi");
+        passed &= expect(morphEngine.getScenarioIndex() == firstMorphTarget
+                             && morphEngine.getScenarioMorphSourceIndex() == 0,
+                         "il morph deve pubblicare sorgente e destinazione corrette");
+        passed &= expect(loopSurvivedWholeMorph,
+                         "il morph non deve modificare eventi o durata del loop MIDI");
+
+        // Queue new requests during an audible, half-completed morph.  The
+        // active two-tap crossfade must continue to its original destination;
+        // only the latest queued request starts on the following callback.
+        morphEngine.enqueueMidiMessage(
+            juce::MidiMessage::noteOn(4, 48, 0.65f));
+        renderMorphBlock();
+        constexpr auto interruptedTarget = 2;
+        morphEngine.setScenarioIndex(interruptedTarget);
+        bool firstHalfStayedFinite = true;
+        for (int block = 0; block < morphBlockCount / 2; ++block)
+        {
+            renderMorphBlock();
+            firstHalfStayedFinite &= morphOutput.finite(morphBlockSize)
+                && std::isfinite(morphEngine.getScenarioMorphProgress());
+        }
+        const auto interruptedProgress = morphEngine.getScenarioMorphProgress();
+        const std::array<float, 2> samplesBeforeRetarget {
+            morphOutput.storage[EcosystemEngine::ambientLeftBus].back(),
+            morphOutput.storage[EcosystemEngine::ambientRightBus].back()
+        };
+
+        constexpr auto supersededQueuedTarget = 10;
+        const auto finalQueuedTarget = CommentoScenarios::count - 1;
+        morphEngine.setScenarioIndex(supersededQueuedTarget);
+        renderMorphBlock();
+        const auto queuedProgress = morphEngine.getScenarioMorphProgress();
+        const auto queuedBoundaryStep = std::max(
+            std::abs(morphOutput.storage[EcosystemEngine::ambientLeftBus].front()
+                     - samplesBeforeRetarget[0]),
+            std::abs(morphOutput.storage[EcosystemEngine::ambientRightBus].front()
+                     - samplesBeforeRetarget[1]));
+        const auto firstQueuedRequestStayedQueued
+            = morphEngine.getScenarioIndex() == supersededQueuedTarget
+            && morphEngine.getScenarioMorphSourceIndex() == firstMorphTarget
+            && morphEngine.getScenarioMorphDestinationIndex()
+                   == interruptedTarget
+            && std::abs(queuedProgress - smoothStep(
+                static_cast<float>(morphBlockCount / 2 + 1)
+                    / static_cast<float>(morphBlockCount))) < 0.00001f;
+
+        morphEngine.setScenarioIndex(finalQueuedTarget);
+        auto originalMorphStayedFiniteAndMonotonic = morphOutput.finite(
+            morphBlockSize) && std::isfinite(queuedProgress);
+        auto originalMorphPreviousProgress = queuedProgress;
+        auto queuedMorphLoopSurvived = morphEngine.hasMaterial(1)
+            && morphEngine.getEventCount(1) == preservedEventCount
+            && std::abs(morphEngine.getLengthSeconds(1)
+                        - preservedLoopLength) < 0.000001;
+        auto latestRequestStayedQueued = true;
+        for (int block = morphBlockCount / 2 + 2;
+             block <= morphBlockCount; ++block)
+        {
+            renderMorphBlock();
+            const auto progress = morphEngine.getScenarioMorphProgress();
+            const auto expectedProgress = smoothStep(
+                static_cast<float>(block)
+                    / static_cast<float>(morphBlockCount));
+            originalMorphStayedFiniteAndMonotonic &= morphOutput.finite(
+                morphBlockSize) && std::isfinite(progress)
+                && progress + 0.000001f >= originalMorphPreviousProgress
+                && std::abs(progress - expectedProgress) < 0.00001f;
+            latestRequestStayedQueued &= morphEngine.getScenarioIndex()
+                    == finalQueuedTarget
+                && morphEngine.getScenarioMorphSourceIndex()
+                    == firstMorphTarget
+                && morphEngine.getScenarioMorphDestinationIndex()
+                    == interruptedTarget;
+            queuedMorphLoopSurvived &= morphEngine.hasMaterial(1)
+                && morphEngine.getEventCount(1) == preservedEventCount
+                && std::abs(morphEngine.getLengthSeconds(1)
+                            - preservedLoopLength) < 0.000001;
+            originalMorphPreviousProgress = progress;
+        }
+
+        const std::array<float, 2> samplesBeforeQueuedMorph {
+            morphOutput.storage[EcosystemEngine::ambientLeftBus].back(),
+            morphOutput.storage[EcosystemEngine::ambientRightBus].back()
+        };
+        renderMorphBlock();
+        const auto queuedMorphFirstProgress
+            = morphEngine.getScenarioMorphProgress();
+        const auto queuedMorphStartBoundaryStep = std::max(
+            std::abs(morphOutput.storage[
+                         EcosystemEngine::ambientLeftBus].front()
+                     - samplesBeforeQueuedMorph[0]),
+            std::abs(morphOutput.storage[
+                         EcosystemEngine::ambientRightBus].front()
+                     - samplesBeforeQueuedMorph[1]));
+        auto queuedMorphStayedFiniteAndMonotonic = morphOutput.finite(
+            morphBlockSize) && std::isfinite(queuedMorphFirstProgress);
+        auto queuedMorphPreviousProgress = queuedMorphFirstProgress;
+        for (int block = 2; block <= morphBlockCount; ++block)
+        {
+            renderMorphBlock();
+            const auto progress = morphEngine.getScenarioMorphProgress();
+            queuedMorphStayedFiniteAndMonotonic &= morphOutput.finite(
+                morphBlockSize) && std::isfinite(progress)
+                && progress + 0.000001f >= queuedMorphPreviousProgress;
+            queuedMorphLoopSurvived &= morphEngine.hasMaterial(1)
+                && morphEngine.getEventCount(1) == preservedEventCount
+                && std::abs(morphEngine.getLengthSeconds(1)
+                            - preservedLoopLength) < 0.000001;
+            queuedMorphPreviousProgress = progress;
+        }
+        morphEngine.enqueueMidiMessage(juce::MidiMessage::noteOff(4, 48));
+
+        passed &= expect(firstHalfStayedFinite
+                             && std::abs(interruptedProgress - 0.5f) < 0.00001f,
+                         "il primo morph deve arrivare finito a meta' corsa");
+        passed &= expect(firstQueuedRequestStayedQueued
+                             && latestRequestStayedQueued
+                             && std::abs(originalMorphPreviousProgress - 1.0f)
+                                    < 0.000001f
+                             && originalMorphStayedFiniteAndMonotonic,
+                         "le richieste accodate non devono interrompere il morph attivo");
+        passed &= expect(morphEngine.getScenarioIndex() == finalQueuedTarget
+                             && morphEngine.getScenarioMorphSourceIndex()
+                                    == interruptedTarget
+                             && morphEngine.getScenarioMorphDestinationIndex()
+                                    == finalQueuedTarget
+                             && std::abs(queuedMorphFirstProgress - firstProgress)
+                                    < 0.00001f
+                             && std::abs(queuedMorphPreviousProgress - 1.0f)
+                                    < 0.000001f
+                             && queuedMorphStayedFiniteAndMonotonic,
+                         "a fine corsa deve partire il morph verso l'ultima richiesta");
+        passed &= expect(queuedBoundaryStep < 0.20f
+                             && queuedMorphStartBoundaryStep < 0.20f,
+                         "accodamento e avvio del morph seguente non devono creare salti macroscopici");
+        passed &= expect(queuedMorphLoopSurvived,
+                         "i morph accodati non devono cancellare o riscrivere il loop MIDI");
+    }
+
+    // Probe the global GRANA/FUZZ gestures through the direct sax path.  This
+    // keeps the dry reference deterministic while still exercising the exact
+    // master-bus ramps used by a performance.
+    {
+        constexpr auto gestureSampleRate = 8000.0;
+        constexpr auto gestureBlockSize = 400;
+        constexpr auto gestureFrequency = 173.0;
+        constexpr auto gestureInputLevel = 0.15f;
+        constexpr auto gestureDryGain = 0.58f;
+        constexpr auto attackBlocks = 30;  // 1.5 seconds
+        constexpr auto releaseBlocks = 60; // 3.0 seconds
+
+        EcosystemEngine gestureEngine;
+        gestureEngine.setSaxPathMode(EcosystemEngine::SaxPathMode::direct);
+        gestureEngine.setSaxStereoInput(false);
+        gestureEngine.setTextureAmount(0.0f);
+        gestureEngine.setFuzzEnabled(false);
+        gestureEngine.prepare(gestureSampleRate, gestureBlockSize);
+
+        std::array<std::vector<float>, 1> gestureInputStorage;
+        gestureInputStorage[0].resize(gestureBlockSize);
+        std::array<const float*, 1> gestureInputs {
+            gestureInputStorage[0].data()
+        };
+        OutputBlock<EcosystemEngine::logicalOutputBusCount> gestureOutput(
+            gestureBlockSize);
+        int64_t gestureSamplePosition = 0;
+        bool gestureOutputStayedFinite = true;
+        const auto renderGestureBlock = [&](bool withInput = true)
+        {
+            for (int sample = 0; sample < gestureBlockSize; ++sample)
+                gestureInputStorage[0][static_cast<std::size_t>(sample)]
+                    = gestureInputLevel * static_cast<float>(std::sin(
+                        juce::MathConstants<double>::twoPi
+                        * gestureFrequency
+                        * static_cast<double>(gestureSamplePosition + sample)
+                        / gestureSampleRate));
+
+            gestureOutput.clear();
+            process(gestureEngine,
+                    withInput ? gestureInputs.data() : nullptr,
+                    withInput ? 1 : 0,
+                    gestureOutput.pointers.data(),
+                    EcosystemEngine::logicalOutputBusCount,
+                    gestureBlockSize);
+            gestureOutputStayedFinite &= gestureOutput.finite(
+                gestureBlockSize);
+            gestureSamplePosition += gestureBlockSize;
+        };
+        const auto differenceFromDry = [&]
+        {
+            auto squaredError = 0.0;
+            for (int sample = 0; sample < gestureBlockSize; ++sample)
+            {
+                const auto expectedDry = gestureInputStorage[0][
+                    static_cast<std::size_t>(sample)] * gestureDryGain;
+                const auto error = gestureOutput.storage[
+                    EcosystemEngine::saxLeftBus][static_cast<std::size_t>(sample)]
+                    - expectedDry;
+                squaredError += static_cast<double>(error) * error;
+            }
+            return static_cast<float>(std::sqrt(
+                squaredError / static_cast<double>(gestureBlockSize)));
+        };
+
+        renderGestureBlock();
+        const auto initialDryError = differenceFromDry();
+
+        gestureEngine.setTextureAmount(1.0f);
+        renderGestureBlock();
+        const auto grainEarlyDifference = differenceFromDry();
+        for (int block = 1; block < attackBlocks; ++block)
+            renderGestureBlock();
+        renderGestureBlock();
+        const auto grainFullDifference = differenceFromDry();
+
+        gestureEngine.setTextureAmount(0.0f);
+        for (int block = 0; block < releaseBlocks; ++block)
+            renderGestureBlock();
+        renderGestureBlock();
+        const auto dryAfterGrainError = differenceFromDry();
+
+        passed &= expect(initialDryError < 0.000001f
+                             && dryAfterGrainError < 0.000001f,
+                         "GRANA spenta deve lasciare invariato il percorso dry");
+        passed &= expect(grainEarlyDifference > 0.0f
+                             && grainEarlyDifference
+                                    < grainFullDifference * 0.10f,
+                         "GRANA deve entrare con una rampa e non istantaneamente");
+        passed &= expect(grainFullDifference > 0.003f,
+                         "GRANA piena deve modificare realmente il segnale");
+
+        gestureEngine.setFuzzEnabled(true);
+        renderGestureBlock();
+        const auto fuzzEarlyDifference = differenceFromDry();
+        for (int block = 1; block < attackBlocks; ++block)
+            renderGestureBlock();
+        renderGestureBlock();
+        const auto fuzzFullDifference = differenceFromDry();
+        const auto sampleBeforeFuzzRelease = gestureOutput.storage[
+            EcosystemEngine::saxLeftBus].back();
+
+        gestureEngine.setFuzzEnabled(false);
+        renderGestureBlock();
+        const auto fuzzReleaseEarlyDifference = differenceFromDry();
+        auto fuzzReleaseMaximumStep = 0.0f;
+        auto previousFuzzReleaseSample = sampleBeforeFuzzRelease;
+        const auto inspectFuzzRelease = [&]
+        {
+            for (const auto sample : gestureOutput.storage[
+                     EcosystemEngine::saxLeftBus])
+            {
+                fuzzReleaseMaximumStep = std::max(
+                    fuzzReleaseMaximumStep,
+                    std::abs(sample - previousFuzzReleaseSample));
+                previousFuzzReleaseSample = sample;
+            }
+        };
+        inspectFuzzRelease();
+        for (int block = 1; block < releaseBlocks / 2; ++block)
+        {
+            renderGestureBlock();
+            inspectFuzzRelease();
+        }
+        const auto fuzzReleaseHalfDifference = differenceFromDry();
+        for (int block = releaseBlocks / 2; block < releaseBlocks; ++block)
+        {
+            renderGestureBlock();
+            inspectFuzzRelease();
+        }
+        const auto fuzzReleaseLateDifference = differenceFromDry();
+        renderGestureBlock();
+        inspectFuzzRelease();
+        const auto finalDryError = differenceFromDry();
+        renderGestureBlock(false);
+        const auto fuzzReturnedToSilence = gestureOutput.silent(
+            EcosystemEngine::saxLeftBus, gestureBlockSize)
+            && gestureOutput.silent(EcosystemEngine::saxRightBus,
+                                    gestureBlockSize);
+
+        passed &= expect(fuzzEarlyDifference > 0.0f
+                             && fuzzEarlyDifference
+                                    < fuzzFullDifference * 0.10f
+                             && fuzzFullDifference > 0.01f,
+                         "FUZZ deve entrare gradualmente e diventare udibile");
+        passed &= expect(fuzzReleaseEarlyDifference
+                                    > fuzzFullDifference * 0.85f
+                             && fuzzReleaseHalfDifference
+                                    > fuzzFullDifference * 0.35f
+                             && fuzzReleaseHalfDifference
+                                    < fuzzFullDifference * 0.65f
+                             && fuzzReleaseLateDifference
+                                    < fuzzFullDifference * 0.03f
+                             && finalDryError < 0.000001f
+                             && fuzzReturnedToSilence,
+                         "FUZZ spenta deve tornare gradualmente al dry e al silenzio");
+        passed &= expect(gestureOutputStayedFinite
+                             && fuzzReleaseMaximumStep < 0.08f,
+                         "GRANA e FUZZ devono restare finite e senza salti macroscopici");
+    }
+
     // Fill all eight voices on each of the three loopable MIDI layers. This
     // reproduces the worst useful polyphony (24 ambient voices) without a
     // timing assertion that would depend on the build machine. The rendered
@@ -1026,10 +1031,19 @@ int main()
                          && multiLoopEngine.getEventCount(3) == 16,
                      "i tre loop di stress devono conservare tutte le note");
 
+    // Keep the non-loopable performance bass held throughout the worst-case
+    // ambient playback.  This catches regressions that are invisible when
+    // only the shared stereo pair is inspected.
+    multiLoopEngine.enqueueMidiMessage(
+        juce::MidiMessage::noteOn(5, 40, 0.92f));
     float multiLoopPeak = 0.0f;
     float multiLoopMaximumStep = 0.0f;
     float previousMultiLoopSample = 0.0f;
+    float multiLoopBassPeak = 0.0f;
+    float multiLoopBassMaximumStep = 0.0f;
+    float previousMultiLoopBassSample = 0.0f;
     bool multiLoopStayedFinite = true;
+    bool multiLoopBassStayedFinite = true;
     int multiLoopProtectedSamples = 0;
     for (int block = 0; block < 400; ++block)
     {
@@ -1054,13 +1068,31 @@ int main()
                 }
             }
         }
+        for (const auto sample : multiLoopOutput.storage[
+                 EcosystemEngine::bassBus])
+        {
+            multiLoopBassStayedFinite &= std::isfinite(sample);
+            multiLoopBassPeak = std::max(multiLoopBassPeak,
+                                         std::abs(sample));
+            multiLoopBassMaximumStep = std::max(
+                multiLoopBassMaximumStep,
+                std::abs(sample - previousMultiLoopBassSample));
+            previousMultiLoopBassSample = sample;
+        }
     }
+    multiLoopEngine.enqueueMidiMessage(juce::MidiMessage::noteOff(5, 40));
     passed &= expect(multiLoopStayedFinite && multiLoopPeak < 0.60f,
                      "tre loop polifonici devono restare finiti e con headroom");
     passed &= expect(multiLoopProtectedSamples == 0,
                      "tre loop polifonici non devono tenere attiva la protezione");
     passed &= expect(multiLoopMaximumStep < 0.08f,
                      "i wrap asincroni dei tre loop non devono creare crackle");
+    passed &= expect(multiLoopBassStayedFinite
+                         && multiLoopBassPeak > 0.0001f
+                         && multiLoopBassPeak < 0.50f,
+                     "il basso tenuto con tre loop deve restare finito e con headroom");
+    passed &= expect(multiLoopBassMaximumStep < 0.08f,
+                     "il basso tenuto con tre loop non deve introdurre crackle");
 
     EcosystemEngine ambientEngine;
     ambientEngine.prepare(sampleRate, blockSize);
@@ -1293,6 +1325,104 @@ int main()
                                                    cleanLoopSamples) > 0.0001f
                          && cleanLooperOutput.finite(cleanLoopSamples),
                      "LOOP PULITO deve registrare e riprodurre un loop finito");
+
+    // Closing a first capture must not add the stored signal at full gain on a
+    // callback boundary. DIMENTICA then fades only that stored component: the
+    // live monitor remains present, and metadata disappears at gain zero.
+    constexpr auto fadeProbeSamples = 512;
+    EcosystemEngine saxFadeEngine;
+    saxFadeEngine.prepare(sampleRate, fadeProbeSamples);
+    saxFadeEngine.setSaxStereoInput(true);
+    saxFadeEngine.setSaxPathMode(EcosystemEngine::SaxPathMode::cleanLooper);
+    std::array<std::vector<float>, 2> fadeInputStorage;
+    std::array<const float*, 2> fadeInputs {};
+    constexpr std::array<float, 2> fadeInputValues { 0.04f, -0.03f };
+    for (std::size_t channel = 0; channel < fadeInputStorage.size(); ++channel)
+    {
+        fadeInputStorage[channel].assign(
+            fadeProbeSamples, fadeInputValues[channel]);
+        fadeInputs[channel] = fadeInputStorage[channel].data();
+    }
+    OutputBlock<EcosystemEngine::logicalOutputBusCount> saxFadeOutput(
+        fadeProbeSamples);
+    saxFadeEngine.toggleRecording(EcosystemEngine::midiMemoryCount);
+    float captureMonitorLast = 0.0f;
+    for (int block = 0; block < 6; ++block)
+    {
+        saxFadeOutput.clear();
+        process(saxFadeEngine, fadeInputs.data(), 2,
+                saxFadeOutput.pointers.data(),
+                EcosystemEngine::logicalOutputBusCount, fadeProbeSamples);
+        captureMonitorLast = saxFadeOutput.storage[
+            EcosystemEngine::saxLeftBus][fadeProbeSamples - 1];
+    }
+
+    saxFadeEngine.toggleRecording(EcosystemEngine::midiMemoryCount);
+    saxFadeOutput.clear();
+    process(saxFadeEngine, fadeInputs.data(), 2,
+            saxFadeOutput.pointers.data(),
+            EcosystemEngine::logicalOutputBusCount, fadeProbeSamples);
+    const auto captureCloseFirst = saxFadeOutput.storage[
+        EcosystemEngine::saxLeftBus][0];
+    const auto captureCloseLast = saxFadeOutput.storage[
+        EcosystemEngine::saxLeftBus][fadeProbeSamples - 1];
+    passed &= expect(std::abs(captureCloseFirst - captureMonitorLast) < 0.00001f
+                         && captureCloseLast > captureCloseFirst
+                         && saxFadeEngine.hasMaterial(
+                             EcosystemEngine::midiMemoryCount),
+                     "chiudere la prima cattura RESPIRO deve inserirla con fade-in");
+
+    // Let the 125 ms fade-in reach unity before probing the one-second clear.
+    for (int block = 0; block < 16; ++block)
+    {
+        saxFadeOutput.clear();
+        process(saxFadeEngine, fadeInputs.data(), 2,
+                saxFadeOutput.pointers.data(),
+                EcosystemEngine::logicalOutputBusCount, fadeProbeSamples);
+    }
+    const auto stableLoopLast = saxFadeOutput.storage[
+        EcosystemEngine::saxLeftBus][fadeProbeSamples - 1];
+
+    saxFadeEngine.clearMemory(EcosystemEngine::midiMemoryCount);
+    saxFadeOutput.clear();
+    process(saxFadeEngine, fadeInputs.data(), 2,
+            saxFadeOutput.pointers.data(),
+            EcosystemEngine::logicalOutputBusCount, fadeProbeSamples);
+    const auto clearFirst = saxFadeOutput.storage[
+        EcosystemEngine::saxLeftBus][0];
+    const auto clearFirstBlockLast = saxFadeOutput.storage[
+        EcosystemEngine::saxLeftBus][fadeProbeSamples - 1];
+    passed &= expect(std::abs(clearFirst - stableLoopLast) < 0.00001f
+                         && clearFirstBlockLast < clearFirst
+                         && saxFadeEngine.hasMaterial(
+                             EcosystemEngine::midiMemoryCount),
+                     "DIMENTICA RESPIRO deve partire senza taglio e tenere la memoria durante il fade");
+
+    // 93 blocks of 512 samples are still just below one second including the
+    // first block above; the following block crosses the exact zero point.
+    for (int block = 1; block < 93; ++block)
+    {
+        saxFadeOutput.clear();
+        process(saxFadeEngine, fadeInputs.data(), 2,
+                saxFadeOutput.pointers.data(),
+                EcosystemEngine::logicalOutputBusCount, fadeProbeSamples);
+    }
+    const auto metadataSurvivedUntilZero = saxFadeEngine.hasMaterial(
+        EcosystemEngine::midiMemoryCount);
+    saxFadeOutput.clear();
+    process(saxFadeEngine, fadeInputs.data(), 2,
+            saxFadeOutput.pointers.data(),
+            EcosystemEngine::logicalOutputBusCount, fadeProbeSamples);
+    const auto expectedLiveMonitor = fadeInputValues[0] * 0.58f;
+    const auto finalMonitorSample = saxFadeOutput.storage[
+        EcosystemEngine::saxLeftBus][fadeProbeSamples - 1];
+    passed &= expect(metadataSurvivedUntilZero
+                         && ! saxFadeEngine.hasMaterial(
+                             EcosystemEngine::midiMemoryCount)
+                         && std::abs(finalMonitorSample - expectedLiveMonitor)
+                                < 0.00001f
+                         && saxFadeOutput.finite(fadeProbeSamples),
+                     "DIMENTICA RESPIRO deve cancellare a zero senza mutare il monitor live");
 
     EcosystemEngine effectsPathEngine;
     effectsPathEngine.prepare(sampleRate, blockSize);

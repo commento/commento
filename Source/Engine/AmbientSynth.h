@@ -2,6 +2,7 @@
 
 #include <JuceHeader.h>
 #include "Scenarios.h"
+#include <cstdint>
 
 class AmbientSynth final
 {
@@ -10,6 +11,8 @@ public:
 
     void prepare(double sampleRate, int maximumBlockSize);
     void setPatch(const SynthPatch& newPatch);
+    void beginPatchMorph(const SynthPatch& targetPatch,
+                         double durationSeconds);
     void setDelayLevel(float newLevel) noexcept;
     void allNotesOff();
     void render(juce::AudioBuffer<float>& output, const juce::MidiBuffer& midi,
@@ -17,6 +20,10 @@ public:
 
 private:
     void updateEffectTargets(bool immediately);
+    void prepareMorphBlock(int numSamples);
+    void finishMorphBlock();
+    void applyMorphPatchToVoices();
+    void updateReverbParameters();
     void processEffects(int numSamples);
 
     juce::Synthesiser synthesiser;
@@ -24,13 +31,19 @@ private:
     juce::AudioBuffer<float> renderBuffer;
     juce::AudioBuffer<float> delayBuffer;
     juce::Reverb reverb;
-    juce::SmoothedValue<float> delaySamplesLeft;
-    juce::SmoothedValue<float> delaySamplesRight;
-    juce::SmoothedValue<float> delayFeedback;
-    juce::SmoothedValue<float> delayMix;
     juce::SmoothedValue<float> delayLevel;
+    SynthPatch morphSourcePatch;
+    SynthPatch morphTargetPatch;
+    std::array<float, 2> delayMorphSourceSamples { 1.0f, 1.0f };
+    std::array<float, 2> delayMorphTargetSamples { 1.0f, 1.0f };
+    int64_t morphElapsedSamples = 0;
+    int64_t morphTotalSamples = 0;
+    float blockMorphStart = 1.0f;
+    float blockMorphEnd = 1.0f;
     float requestedDelayLevel = 1.0f;
     int delayWritePosition = 0;
     double currentSampleRate = 48000.0;
+    bool processesAmbientEffects = true;
+    bool morphActive = false;
     bool prepared = false;
 };
