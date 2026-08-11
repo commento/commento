@@ -55,7 +55,10 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Linux" AND COMMENTO_ALSA_BYPASS_PCM_LINK)
     target_sources(Commento PRIVATE
         Source/Hardware/AlsaPcmLinkBypass.cpp
     )
-    target_link_options(Commento PRIVATE "LINKER:--wrap=snd_pcm_link")
+    target_link_options(Commento PRIVATE
+        "LINKER:--wrap=snd_pcm_link"
+        "LINKER:--wrap=snd_pcm_sw_params_set_start_threshold"
+    )
 endif()
 
 target_link_libraries(Commento PRIVATE

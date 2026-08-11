@@ -405,7 +405,15 @@ aperta una configurazione full-duplex, deve comparire:
 
 ```text
 Commento ALSA: snd_pcm_link bypass attivo; capture e playback partono indipendenti
+Commento ALSA: playback prefill attivo; avvio dopo 2 periodi
 ```
+
+Poiche' i due stream partono indipendenti, Commento porta inoltre la soglia di
+avvio della sola uscita da uno a due periodi. Con un solo periodo, una callback
+piu' pesante di quella iniziale poteva raggiungere il bordo del ring ALSA pur
+mostrando `DSP` basso e `XRUN 0`; il secondo periodo fornisce 10,7 ms di riserva
+a 48 kHz/512. Il costo e' un periodo aggiuntivo di latenza di uscita, senza
+ridurre polifonia o modificare il suono dei loop.
 
 Per una prova A/B, ricompilare la versione JUCE originale in una cartella
 separata disabilitando il workaround:
