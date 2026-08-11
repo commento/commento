@@ -105,10 +105,19 @@ l'apertura di CONNESSIONI interrompe un apprendimento in corso e rilascia un
 pedale rimasto
 premuto, ma non cancella l'associazione gia' salvata.
 
+La pagina **GESTI** ripete i controlli di apprendimento e mostra anche un monitor
+MIDI dedicato. Se una nota compare ma `CC64` non compare mai, la porta USB e il
+software stanno ricevendo correttamente la tastiera e il problema e' nel pedale
+o nella sua configurazione. Quando Commento vede sia il valore alto sia quello
+basso mostra `CICLO 127-0 OK`; questo permette di verificare pressione, rilascio
+e polarita' prima di associare il comando.
+
 Per collegare il pedale sono previste due possibilita':
 
 - **KeyStep Pro:** collegare un pedale momentaneo al jack Sustain prima di
-  accendere la tastiera, senza tenerlo premuto durante l'accensione. Se necessario
+  accendere la tastiera, senza tenerlo premuto durante l'accensione. Il KeyStep
+  rileva la polarita' all'avvio: se il pedale non produce `CC64`, spegnere la
+  tastiera, lasciare il pedale collegato e riaccenderla senza premerlo. Se necessario
   usare la MIDI Console di Arturia MIDI Control Center per verificare che venga
   trasmesso un CC momentaneo, tipicamente con valori 127/0, poi usare
   **IMPARA PEDALE SAX**. Se il firmware espone soltanto comandi MMC/trasporto,
@@ -169,6 +178,10 @@ durante il collegamento.
   secondi e si ritira in 3 secondi, quindi non crea un bordo netto;
 - usare **FUZZ** per introdurre una saturazione dura ma contenuta. Anche FUZZ
   entra in 1,5 secondi e si dissolve in 3 secondi; riparte spento a ogni avvio;
+- aprire **GESTI** per accedere ai trasformatori senza comprimere la pagina
+  delle memorie. La pagina separa trasformazioni globali, pad momentanei e
+  comportamenti automatici; il riquadro BERSAGLIO mostra sempre quale memoria
+  verra' catturata alla pressione;
 - usare **DERIVA: RARA** quando si desiderano variazioni non programmate. Parte
   spenta: una volta attiva, aggiunge occasionalmente una sola ombra a volume
   ridotto senza sostituire il materiale originale. Sui loop MIDI segue una
@@ -208,6 +221,10 @@ durante il collegamento.
   quando il sax live entra, fino a circa 7 dB. BASSO LIVE, RESPIRO e routing
   fisico restano invariati; il follower riusa il meter sax del blocco precedente
   e non aggiunge una seconda analisi dell'ingresso;
+- **GELO** entra in 80 ms e si ritira in 350 ms. Il congelamento riguarda il
+  delay; il riverbero continua a decadere naturalmente, evitando lo switch
+  binario che poteva creare un bordo su code dense. ECO THROW, CODA LIBERA,
+  ASCOLTO e DIRADA conservano le proprie rampe progressive;
 - un controller MIDI configurato sul Keystep puo' inviare `CC80` per GELO,
   `CC81` per ECO THROW, `CC82` per ASCOLTO, `CC83` per CODA LIBERA e `CC84`
   per DIRADA. CC80, CC81 e CC83 sono momentanei (`0-63` rilascia, `64-127`

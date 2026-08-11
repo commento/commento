@@ -1,6 +1,7 @@
 #include <JuceHeader.h>
 #include "Engine/AmbientSynth.h"
 #include "Engine/EcosystemEngine.h"
+#include "Engine/SaxProcessor.h"
 #include "Engine/Scenarios.h"
 #include "Hardware/Model12AudioRouter.h"
 
@@ -11,6 +12,19 @@
 #include <iostream>
 #include <set>
 #include <vector>
+
+struct CommentoFreezeRampProbe
+{
+    [[nodiscard]] static float current(const AmbientSynth& synth) noexcept
+    {
+        return synth.freezeMix.getCurrentValue();
+    }
+
+    [[nodiscard]] static float current(const SaxProcessor& processor) noexcept
+    {
+        return processor.freezeMix.getCurrentValue();
+    }
+};
 
 namespace
 {
@@ -455,6 +469,234 @@ int main()
                              && ! controlEngine.isFreezeEnabled(1)
                              && ! controlEngine.isEchoThrowEnabled(1),
                          "GELO/ECO devono restare finiti, rilasciarsi e non cambiare DELAY");
+    }
+
+    // GELO uses an asymmetric momentary envelope on the delay feedback only:
+    // 80 ms in and 350 ms out. Retargeting that envelope must start from its
+    // exact current value, otherwise a quick release/re-press creates a click.
+    // A low sample rate makes both durations exact multiples of the block and
+    // keeps this signal-level regression test inexpensive.
+    {
+        constexpr auto freezeSampleRate = 8000.0;
+        constexpr auto freezeBlockSize = 80; // 10 ms
+        constexpr auto rampTolerance = 0.002f;
+
+        const auto bufferIsFinite = [](const juce::AudioBuffer<float>& buffer)
+        {
+            for (int channel = 0; channel < buffer.getNumChannels(); ++channel)
+                for (int sample = 0; sample < buffer.getNumSamples(); ++sample)
+                    if (! std::isfinite(buffer.getSample(channel, sample)))
+                        return false;
+            return true;
+        };
+
+        SynthPatch freezeSynthPatch;
+        freezeSynthPatch.model = OscillatorModel::warm;
+        freezeSynthPatch.attackSeconds = 0.001f;
+        freezeSynthPatch.decaySeconds = 0.2f;
+        freezeSynthPatch.sustain = 0.82f;
+        freezeSynthPatch.releaseSeconds = 1.0f;
+        freezeSynthPatch.cutoffHz = 3000.0f;
+        freezeSynthPatch.harmonicMix = 0.12f;
+        freezeSynthPatch.noiseMix = 0.0f;
+        freezeSynthPatch.lfoDepth = 0.0f;
+        freezeSynthPatch.level = 0.11f;
+        freezeSynthPatch.delayMilliseconds = 40.0f;
+        freezeSynthPatch.delaySpread = 1.19f;
+        freezeSynthPatch.delayFeedback = 0.62f;
+        freezeSynthPatch.delayMix = 0.52f;
+        freezeSynthPatch.reverbSize = 0.72f;
+        freezeSynthPatch.reverbDamping = 0.48f;
+        freezeSynthPatch.reverbWet = 0.38f;
+
+        AmbientSynth freezeSynth(1);
+        freezeSynth.setPatch(freezeSynthPatch);
+        freezeSynth.prepare(freezeSampleRate, freezeBlockSize);
+        juce::AudioBuffer<float> freezeSynthOutput(2, freezeBlockSize);
+        juce::MidiBuffer freezeSynthMidi;
+        float previousSynthSample = 0.0f;
+        float maximumSynthBoundaryStep = 0.0f;
+        bool havePreviousSynthSample = false;
+        bool freezeSynthFinite = true;
+        const auto renderFreezeSynth = [&](bool measureBoundary)
+        {
+            freezeSynthOutput.clear();
+            freezeSynth.render(freezeSynthOutput, freezeSynthMidi, 0,
+                               freezeBlockSize);
+            freezeSynthMidi.clear();
+            freezeSynthFinite &= bufferIsFinite(freezeSynthOutput);
+            if (measureBoundary && havePreviousSynthSample)
+                maximumSynthBoundaryStep = std::max(
+                    maximumSynthBoundaryStep,
+                    std::abs(freezeSynthOutput.getSample(0, 0)
+                             - previousSynthSample));
+            previousSynthSample = freezeSynthOutput.getSample(
+                0, freezeBlockSize - 1);
+            havePreviousSynthSample = true;
+        };
+
+        freezeSynthMidi.addEvent(
+            juce::MidiMessage::noteOn(2, 48, 0.72f), 0);
+        renderFreezeSynth(false);
+        for (int block = 0; block < 20; ++block)
+            renderFreezeSynth(false);
+
+        const auto synthBeforeAttack = CommentoFreezeRampProbe::current(
+            freezeSynth);
+        freezeSynth.setFreezeEnabled(true);
+        const auto synthAtAttackBoundary = CommentoFreezeRampProbe::current(
+            freezeSynth);
+        for (int block = 0; block < 4; ++block)
+            renderFreezeSynth(block == 0);
+        const auto synthHalfAttack = CommentoFreezeRampProbe::current(
+            freezeSynth);
+
+        freezeSynth.setFreezeEnabled(false);
+        const auto synthAtReleaseBoundary = CommentoFreezeRampProbe::current(
+            freezeSynth);
+        for (int block = 0; block < 7; ++block)
+            renderFreezeSynth(block == 0);
+        const auto synthDuringRelease = CommentoFreezeRampProbe::current(
+            freezeSynth);
+
+        freezeSynth.setFreezeEnabled(true);
+        const auto synthAtRetriggerBoundary = CommentoFreezeRampProbe::current(
+            freezeSynth);
+        for (int block = 0; block < 4; ++block)
+            renderFreezeSynth(block == 0);
+        const auto synthHalfRetrigger = CommentoFreezeRampProbe::current(
+            freezeSynth);
+        for (int block = 0; block < 4; ++block)
+            renderFreezeSynth(false);
+        const auto synthFullAttack = CommentoFreezeRampProbe::current(
+            freezeSynth);
+
+        freezeSynth.setFreezeEnabled(false);
+        for (int block = 0; block < 35; ++block)
+            renderFreezeSynth(block == 0);
+        const auto synthFullRelease = CommentoFreezeRampProbe::current(
+            freezeSynth);
+
+        passed &= expect(
+            std::abs(synthBeforeAttack) < rampTolerance
+                && std::abs(synthAtAttackBoundary - synthBeforeAttack)
+                    < rampTolerance
+                && std::abs(synthHalfAttack - 0.5f) < rampTolerance
+                && std::abs(synthAtReleaseBoundary - synthHalfAttack)
+                    < rampTolerance
+                && std::abs(synthDuringRelease - 0.4f) < rampTolerance
+                && std::abs(synthAtRetriggerBoundary - synthDuringRelease)
+                    < rampTolerance
+                && std::abs(synthHalfRetrigger - 0.7f) < rampTolerance
+                && std::abs(synthFullAttack - 1.0f) < rampTolerance
+                && std::abs(synthFullRelease) < rampTolerance,
+            "GELO synth deve usare 80/350 ms e retrigger dal valore corrente");
+        passed &= expect(freezeSynthFinite
+                             && maximumSynthBoundaryStep < 0.04f,
+                         "GELO synth deve restare finito e continuo ai boundary");
+
+        SaxPatch freezeSaxPatch;
+        freezeSaxPatch.toneHz = 3000.0f;
+        freezeSaxPatch.drive = 1.0f;
+        freezeSaxPatch.delayMilliseconds = 40.0f;
+        freezeSaxPatch.delaySpread = 1.19f;
+        freezeSaxPatch.feedback = 0.58f;
+        freezeSaxPatch.crossFeedback = 0.42f;
+        freezeSaxPatch.delayMix = 0.52f;
+        freezeSaxPatch.modulationRateHz = 0.0f;
+        freezeSaxPatch.modulationDepthMilliseconds = 0.0f;
+        freezeSaxPatch.reverbSize = 0.72f;
+        freezeSaxPatch.reverbDamping = 0.48f;
+        freezeSaxPatch.reverbWet = 0.38f;
+        freezeSaxPatch.tremoloDepth = 0.0f;
+        freezeSaxPatch.outputGain = 0.58f;
+
+        SaxProcessor freezeSax;
+        freezeSax.setPatch(freezeSaxPatch);
+        freezeSax.prepare(freezeSampleRate, freezeBlockSize);
+        juce::AudioBuffer<float> freezeSaxBuffer(2, freezeBlockSize);
+        int64_t freezeSaxSourceSample = 0;
+        float previousSaxSample = 0.0f;
+        float maximumSaxBoundaryStep = 0.0f;
+        bool havePreviousSaxSample = false;
+        bool freezeSaxFinite = true;
+        const auto processFreezeSax = [&](bool measureBoundary)
+        {
+            for (int sample = 0; sample < freezeBlockSize; ++sample)
+            {
+                const auto phase = juce::MathConstants<double>::twoPi
+                    * 137.0 * static_cast<double>(freezeSaxSourceSample++)
+                    / freezeSampleRate;
+                const auto value = 0.13f
+                    * static_cast<float>(std::sin(phase));
+                freezeSaxBuffer.setSample(0, sample, value);
+                freezeSaxBuffer.setSample(1, sample, value * 0.91f);
+            }
+            freezeSax.process(freezeSaxBuffer, freezeBlockSize);
+            freezeSaxFinite &= bufferIsFinite(freezeSaxBuffer);
+            if (measureBoundary && havePreviousSaxSample)
+                maximumSaxBoundaryStep = std::max(
+                    maximumSaxBoundaryStep,
+                    std::abs(freezeSaxBuffer.getSample(0, 0)
+                             - previousSaxSample));
+            previousSaxSample = freezeSaxBuffer.getSample(
+                0, freezeBlockSize - 1);
+            havePreviousSaxSample = true;
+        };
+
+        for (int block = 0; block < 20; ++block)
+            processFreezeSax(false);
+
+        const auto saxBeforeAttack = CommentoFreezeRampProbe::current(
+            freezeSax);
+        freezeSax.setFreezeEnabled(true);
+        const auto saxAtAttackBoundary = CommentoFreezeRampProbe::current(
+            freezeSax);
+        for (int block = 0; block < 4; ++block)
+            processFreezeSax(block == 0);
+        const auto saxHalfAttack = CommentoFreezeRampProbe::current(freezeSax);
+
+        freezeSax.setFreezeEnabled(false);
+        const auto saxAtReleaseBoundary = CommentoFreezeRampProbe::current(
+            freezeSax);
+        for (int block = 0; block < 7; ++block)
+            processFreezeSax(block == 0);
+        const auto saxDuringRelease = CommentoFreezeRampProbe::current(
+            freezeSax);
+
+        freezeSax.setFreezeEnabled(true);
+        const auto saxAtRetriggerBoundary = CommentoFreezeRampProbe::current(
+            freezeSax);
+        for (int block = 0; block < 4; ++block)
+            processFreezeSax(block == 0);
+        const auto saxHalfRetrigger = CommentoFreezeRampProbe::current(
+            freezeSax);
+        for (int block = 0; block < 4; ++block)
+            processFreezeSax(false);
+        const auto saxFullAttack = CommentoFreezeRampProbe::current(freezeSax);
+
+        freezeSax.setFreezeEnabled(false);
+        for (int block = 0; block < 35; ++block)
+            processFreezeSax(block == 0);
+        const auto saxFullRelease = CommentoFreezeRampProbe::current(freezeSax);
+
+        passed &= expect(
+            std::abs(saxBeforeAttack) < rampTolerance
+                && std::abs(saxAtAttackBoundary - saxBeforeAttack)
+                    < rampTolerance
+                && std::abs(saxHalfAttack - 0.5f) < rampTolerance
+                && std::abs(saxAtReleaseBoundary - saxHalfAttack)
+                    < rampTolerance
+                && std::abs(saxDuringRelease - 0.4f) < rampTolerance
+                && std::abs(saxAtRetriggerBoundary - saxDuringRelease)
+                    < rampTolerance
+                && std::abs(saxHalfRetrigger - 0.7f) < rampTolerance
+                && std::abs(saxFullAttack - 1.0f) < rampTolerance
+                && std::abs(saxFullRelease) < rampTolerance,
+            "GELO sax deve usare 80/350 ms e retrigger dal valore corrente");
+        passed &= expect(freezeSaxFinite
+                             && maximumSaxBoundaryStep < 0.04f,
+                         "GELO sax deve restare finito e continuo ai boundary");
     }
 
     // CODA LIBERA must be a transparent, target-scoped gate on new

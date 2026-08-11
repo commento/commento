@@ -5,6 +5,9 @@
 
 namespace
 {
+constexpr double freezeAttackSeconds = 0.080;
+constexpr double freezeReleaseSeconds = 0.350;
+
 constexpr int sineTableSize = 4096;
 
 // Twenty-four active ambient voices otherwise call libm several million
@@ -675,7 +678,7 @@ void AmbientSynth::prepare(double sampleRate, int maximumBlockSize)
     delayWritePosition = 0;
     delayLevel.reset(currentSampleRate, 0.045);
     delayLevel.setCurrentAndTargetValue(requestedDelayLevel);
-    freezeMix.reset(currentSampleRate, 0.025);
+    freezeMix.reset(currentSampleRate, freezeAttackSeconds);
     freezeMix.setCurrentAndTargetValue(requestedFreeze ? 1.0f : 0.0f);
     excitationGain.reset(currentSampleRate, 0.001);
     excitationGain.setCurrentAndTargetValue(requestedFreeTail ? 0.0f : 1.0f);
@@ -758,9 +761,12 @@ void AmbientSynth::setFreezeEnabled(bool shouldFreeze) noexcept
         return;
 
     requestedFreeze = shouldFreeze;
+    const auto current = freezeMix.getCurrentValue();
+    freezeMix.reset(currentSampleRate,
+                    requestedFreeze ? freezeAttackSeconds
+                                    : freezeReleaseSeconds);
+    freezeMix.setCurrentAndTargetValue(current);
     freezeMix.setTargetValue(requestedFreeze ? 1.0f : 0.0f);
-    if (prepared)
-        updateReverbParameters();
 }
 
 void AmbientSynth::setFreeTailEnabled(bool shouldReleaseTail) noexcept
@@ -853,7 +859,11 @@ void AmbientSynth::updateReverbParameters()
     parameters.wetLevel = juce::jlimit(0.0f, 0.65f, patch.reverbWet);
     parameters.dryLevel = 1.0f - parameters.wetLevel * 0.45f;
     parameters.width = 0.92f;
-    parameters.freezeMode = requestedFreeze ? 1.0f : 0.0f;
+    // GELO belongs exclusively to the explicitly ramped delay feedback path
+    // below. JUCE's reverb freeze is binary, so coupling it to a momentary
+    // gesture would still switch the reverb network abruptly at press and
+    // release boundaries.
+    parameters.freezeMode = 0.0f;
     reverb.setParameters(parameters);
 }
 

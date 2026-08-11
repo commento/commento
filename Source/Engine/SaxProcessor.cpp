@@ -6,6 +6,9 @@
 
 namespace
 {
+constexpr double freezeAttackSeconds = 0.080;
+constexpr double freezeReleaseSeconds = 0.350;
+
 // Exactly transparent below the knee.  The rational curve has unit slope at
 // the knee and approaches the ceiling asymptotically, so it only intervenes
 // when a feedback or reverb peak is genuinely close to full scale.
@@ -50,7 +53,7 @@ void SaxProcessor::prepare(double newSampleRate, int maximumBlockSize)
                         false, true, false);
     delayLevel.reset(sampleRate, 0.045);
     delayLevel.setCurrentAndTargetValue(requestedDelayLevel);
-    freezeMix.reset(sampleRate, 0.025);
+    freezeMix.reset(sampleRate, freezeAttackSeconds);
     freezeMix.setCurrentAndTargetValue(requestedFreeze ? 1.0f : 0.0f);
     excitationGain.reset(sampleRate, 0.001);
     excitationGain.setCurrentAndTargetValue(requestedFreeTail ? 0.0f : 1.0f);
@@ -118,6 +121,11 @@ void SaxProcessor::setFreezeEnabled(bool shouldFreeze) noexcept
         return;
 
     requestedFreeze = shouldFreeze;
+    const auto current = freezeMix.getCurrentValue();
+    freezeMix.reset(sampleRate,
+                    requestedFreeze ? freezeAttackSeconds
+                                    : freezeReleaseSeconds);
+    freezeMix.setCurrentAndTargetValue(current);
     freezeMix.setTargetValue(requestedFreeze ? 1.0f : 0.0f);
 }
 
@@ -184,7 +192,10 @@ void SaxProcessor::updateReverbParameters(int numSamples)
     parameters.wetLevel = reverbWet.getCurrentValue();
     parameters.dryLevel = 1.0f - parameters.wetLevel * 0.38f;
     parameters.width = 1.0f;
-    parameters.freezeMode = requestedFreeze ? 1.0f : 0.0f;
+    // Keep GELO on the continuously-ramped delay matrix. JUCE's reverb
+    // freezeMode is an on/off coefficient switch and would reintroduce a
+    // hard boundary even though freezeMix itself is smooth.
+    parameters.freezeMode = 0.0f;
     reverb.setParameters(parameters);
     if (numSamples > 0)
     {

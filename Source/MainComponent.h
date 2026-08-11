@@ -4,6 +4,8 @@
 #include "Engine/EcosystemEngine.h"
 #include "Hardware/Model12AudioRouter.h"
 #include <array>
+#include <atomic>
+#include <cstdint>
 #include <memory>
 #include <vector>
 
@@ -51,6 +53,9 @@ private:
     void selectMemory(int index);
     void updateControls();
     void toggleSettings();
+    void toggleGestures();
+    void updatePageVisibility();
+    void updateMidiMonitor();
     void scanAudioDevices();
     void applyAudioConfiguration();
     void applyAudioProfile(int profile);
@@ -78,7 +83,10 @@ private:
     EcosystemEngine engine;
     Model12AudioRouter audioRouter { engine };
     juce::AudioDeviceManager deviceManager;
+    std::unique_ptr<juce::LookAndFeel> interfaceLookAndFeel;
     std::array<std::unique_ptr<MemoryOrb>, EcosystemEngine::memoryCount> orbs;
+    std::array<std::unique_ptr<juce::TextButton>, EcosystemEngine::memoryCount>
+        gestureTargetButtons;
 
     juce::Label titleLabel;
     juce::Label subtitleLabel;
@@ -91,6 +99,7 @@ private:
     juce::TextButton recordButton { "SEMINA" };
     juce::TextButton clearButton { "DIMENTICA" };
     juce::TextButton settingsButton { "CONNESSIONI" };
+    juce::TextButton gesturesButton { "GESTI" };
     juce::TextButton textureButton { "GRANA: PULITA" };
     juce::TextButton fuzzButton { "FUZZ: SPENTO" };
     juce::TextButton evolutionButton { "DERIVA: SPENTA" };
@@ -99,6 +108,10 @@ private:
     juce::TextButton freeTailButton { "CODA LIBERA: TIENI" };
     juce::TextButton thinningButton { "DIRADA: SPENTA" };
     juce::TextButton saxListenButton { "ASCOLTO: SPENTO" };
+    juce::Label gesturesTitleLabel;
+    juce::Label gesturesHintLabel;
+    juce::Label gestureTargetLabel;
+    juce::Label sustainMonitorLabel;
     juce::TextButton applyAudioButton { "APPLICA AUDIO" };
     juce::TextButton rescanAudioButton { "RILEGGI DISPOSITIVI" };
     juce::TextButton keyStepRoutingButton { "RILEGGI MIDI" };
@@ -152,6 +165,7 @@ private:
 
     int selectedMemory = 0;
     bool settingsVisible = false;
+    bool gesturesVisible = false;
     bool audioReady = false;
     juce::String keyStepInputName;
     juce::String model12MidiInputName;
@@ -162,6 +176,14 @@ private:
     int touchscreenFreezeTarget = -1;
     int touchscreenEchoThrowTarget = -1;
     int touchscreenFreeTailTarget = -1;
+    std::atomic<std::uint32_t> lastMidiMessagePacked { 0u };
+    std::atomic<std::uint32_t> lastMidiMessageTick { 0u };
+    std::atomic<int> lastSustainValue { -1 };
+    std::atomic<std::uint32_t> lastSustainTick { 0u };
+    std::atomic<std::uint32_t> sustainEdgeMask { 0u };
+    juce::Rectangle<int> saxControlPanelBounds;
+    juce::Rectangle<int> gesturesMainPanelBounds;
+    juce::Rectangle<int> gesturesPedalPanelBounds;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MainComponent)
 };

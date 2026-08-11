@@ -9,6 +9,43 @@ constexpr auto panel = 0xff121725;
 constexpr auto paleText = 0xffdce6e8;
 constexpr auto quietText = 0xff7f9298;
 
+class CommentoLookAndFeel final : public juce::LookAndFeel_V4
+{
+public:
+    juce::Font getTextButtonFont(juce::TextButton&, int buttonHeight) override
+    {
+        const auto height = buttonHeight >= 118 ? 27.0f
+                          : buttonHeight >= 78 ? 22.0f
+                          : buttonHeight >= 58 ? 19.0f : 16.0f;
+        return juce::Font(juce::FontOptions(height, juce::Font::bold));
+    }
+
+    void drawButtonBackground(juce::Graphics& graphics,
+                              juce::Button& button,
+                              const juce::Colour& backgroundColour,
+                              bool highlighted,
+                              bool down) override
+    {
+        auto colour = backgroundColour;
+        if (down)
+            colour = colour.brighter(0.20f);
+        else if (highlighted)
+            colour = colour.brighter(0.09f);
+        if (! button.isEnabled())
+            colour = colour.withMultipliedAlpha(0.34f);
+
+        const auto bounds = button.getLocalBounds().toFloat().reduced(1.5f);
+        const auto radius = juce::jlimit(10.0f, 22.0f,
+                                        bounds.getHeight() * 0.22f);
+        graphics.setColour(colour);
+        graphics.fillRoundedRectangle(bounds, radius);
+        graphics.setColour(button.findColour(
+            juce::TextButton::textColourOffId).withAlpha(
+                button.isEnabled() ? 0.32f : 0.12f));
+        graphics.drawRoundedRectangle(bounds, radius, down ? 2.6f : 1.4f);
+    }
+};
+
 bool looksLikeModel12(const juce::String& name)
 {
     return name.containsIgnoreCase("model 12")
@@ -44,6 +81,16 @@ const std::array<juce::Colour, EcosystemEngine::memoryCount> memoryColours {
     juce::Colour(0xff58a6ff)  // RESPIRO: blu
 };
 
+const std::array<juce::String, EcosystemEngine::memoryCount> memoryNames {
+    "I - BASSO LIVE", "II - MAREA", "III - RADICE", "IV - SCINTILLA",
+    "RESPIRO"
+};
+
+const std::array<juce::String, EcosystemEngine::memoryCount>
+    gestureTargetNames {
+        "I  BASSO", "II  MAREA", "III  RADICE", "IV  SCINTILLA", "RESPIRO"
+    };
+
 constexpr std::array<const char*, EcosystemEngine::memoryCount>
     performanceLevelSettingKeys {
         "levelBassMidi5", "levelPartMidi2", "levelPartMidi3",
@@ -65,6 +112,63 @@ constexpr auto defaultPerformanceLevelDb = -6.0;
 constexpr auto saxFootswitchRoleSettingKey = "saxFootswitchRole";
 constexpr auto saxFootswitchTypeSettingKey = "saxFootswitchType";
 constexpr auto saxFootswitchNumberSettingKey = "saxFootswitchNumber";
+
+enum class MidiMonitorKind : std::uint32_t
+{
+    none = 0u,
+    controller = 1u,
+    noteOn = 2u,
+    noteOff = 3u,
+    other = 4u
+};
+
+[[nodiscard]] std::uint32_t packMidiMonitorMessage(
+    const juce::MidiMessage& message,
+    EcosystemEngine::MidiInputRole role) noexcept
+{
+    auto kind = MidiMonitorKind::other;
+    auto number = 0;
+    auto value = 0;
+    if (message.isController())
+    {
+        kind = MidiMonitorKind::controller;
+        number = message.getControllerNumber();
+        value = message.getControllerValue();
+    }
+    else if (message.isNoteOn())
+    {
+        kind = MidiMonitorKind::noteOn;
+        number = message.getNoteNumber();
+        value = juce::jlimit(0, 127, static_cast<int>(std::round(
+            message.getFloatVelocity() * 127.0f)));
+    }
+    else if (message.isNoteOff())
+    {
+        kind = MidiMonitorKind::noteOff;
+        number = message.getNoteNumber();
+    }
+
+    return static_cast<std::uint32_t>(kind)
+        | (static_cast<std::uint32_t>(role) & 0x3u) << 3u
+        | (static_cast<std::uint32_t>(juce::jlimit(
+               0, 16, message.getChannel())) & 0x1fu) << 5u
+        | (static_cast<std::uint32_t>(juce::jlimit(0, 127, number))
+            & 0x7fu) << 10u
+        | (static_cast<std::uint32_t>(juce::jlimit(0, 127, value))
+            & 0x7fu) << 17u;
+}
+
+[[nodiscard]] juce::String midiRoleText(
+    EcosystemEngine::MidiInputRole role)
+{
+    switch (role)
+    {
+        case EcosystemEngine::MidiInputRole::keyStep: return "KEYSTEP PRO";
+        case EcosystemEngine::MidiInputRole::model12: return "MODEL 12";
+        case EcosystemEngine::MidiInputRole::generic: return "MIDI";
+    }
+    return "MIDI";
+}
 
 bool isMidiControlEndpoint(const juce::String& name)
 {
@@ -246,16 +350,17 @@ public:
         juce::String detail;
         if (isBass)
             detail = engine.isBassEnabled()
-                ? "ATTIVO / MIDI 5 -> USCITA CONFIGURATA"
-                : "MUTO / TOCCA RIATTIVA BASSO LIVE";
+                ? "ATTIVO  /  MIDI 5  /  LIVE"
+                : "MUTO  /  MIDI 5";
         else if (waitingForFirstNote)
             detail = "ATTENDO NOTA  /  MIDI "
                 + juce::String(engine.getMidiChannelForMemory(index));
         else if (recording && material)
-            detail = "NUTRI / OVERDUB: AGGIUNGE E CONSUMA LENTAMENTE  /  "
+            detail = "NUTRI / OVERDUB  /  "
                 + juce::String(engine.getLengthSeconds(index), 1) + " s";
         else if (recording)
-            detail = "REGISTRA  /  " + juce::String(engine.getLengthSeconds(index), 1) + " s";
+            detail = "CATTURA  /  "
+                + juce::String(engine.getLengthSeconds(index), 1) + " s";
         else if (material)
             detail = "SUONA  /  " + juce::String(engine.getLengthSeconds(index), 1) + " s";
         else
@@ -426,6 +531,8 @@ private:
 
 MainComponent::MainComponent()
 {
+    interfaceLookAndFeel = std::make_unique<CommentoLookAndFeel>();
+    setLookAndFeel(interfaceLookAndFeel.get());
     setOpaque(true);
 
     juce::PropertiesFile::Options propertyOptions;
@@ -467,13 +574,10 @@ MainComponent::MainComponent()
         addAndMakeVisible(*label);
     }
 
-    const std::array<juce::String, EcosystemEngine::memoryCount> names {
-        "I - BASSO LIVE", "II - MAREA", "III - RADICE", "IV - SCINTILLA", "RESPIRO"
-    };
     for (int index = 0; index < EcosystemEngine::memoryCount; ++index)
     {
         orbs[static_cast<size_t>(index)] = std::make_unique<MemoryOrb>(
-            index, names[static_cast<size_t>(index)],
+            index, memoryNames[static_cast<size_t>(index)],
             memoryColours[static_cast<size_t>(index)], engine);
         orbs[static_cast<size_t>(index)]->onSelected = [this](int selected)
         {
@@ -492,14 +596,17 @@ MainComponent::MainComponent()
     styleButton(recordButton, memoryColours[0]);
     styleButton(clearButton, juce::Colour(0xffad496a));
     styleButton(settingsButton, juce::Colour(0xff6a7c91));
-    styleButton(textureButton, juce::Colour(0xffc18a55));
-    styleButton(fuzzButton, juce::Colour(0xffb75b52));
-    styleButton(evolutionButton, juce::Colour(0xff9b7ed9));
-    styleButton(freezeButton, juce::Colour(0xff8cc8d8));
-    styleButton(echoThrowButton, juce::Colour(0xffd0a15d));
-    styleButton(freeTailButton, juce::Colour(0xff75bfa8));
-    styleButton(thinningButton, juce::Colour(0xff8e84c7));
-    styleButton(saxListenButton, juce::Colour(0xff65b6a6));
+    styleButton(gesturesButton, juce::Colour(0xff9b7ed9));
+    const auto persistentGestureColour = juce::Colour(0xffa996e8);
+    const auto momentaryGestureColour = juce::Colour(0xff526173);
+    styleButton(textureButton, persistentGestureColour);
+    styleButton(fuzzButton, persistentGestureColour);
+    styleButton(evolutionButton, persistentGestureColour);
+    styleButton(freezeButton, momentaryGestureColour);
+    styleButton(echoThrowButton, momentaryGestureColour);
+    styleButton(freeTailButton, momentaryGestureColour);
+    styleButton(thinningButton, persistentGestureColour);
+    styleButton(saxListenButton, persistentGestureColour);
     styleButton(applyAudioButton, juce::Colour(0xff5da8a1));
     styleButton(rescanAudioButton, juce::Colour(0xff7895b8));
     styleButton(keyStepRoutingButton, juce::Colour(0xff8aa6d6));
@@ -510,9 +617,20 @@ MainComponent::MainComponent()
     styleButton(toggleDelayDryButton, juce::Colour(0xff8299bd));
     styleButton(previousScenarioButton, juce::Colour(0xff8299bd));
     styleButton(nextScenarioButton, juce::Colour(0xff8299bd));
+    for (int index = 0; index < EcosystemEngine::memoryCount; ++index)
+    {
+        auto button = std::make_unique<juce::TextButton>(
+            gestureTargetNames[static_cast<std::size_t>(index)]);
+        styleButton(*button, memoryColours[static_cast<std::size_t>(index)]);
+        button->onClick = [this, index] { selectMemory(index); };
+        addChildComponent(*button);
+        gestureTargetButtons[static_cast<std::size_t>(index)]
+            = std::move(button);
+    }
     addAndMakeVisible(recordButton);
     addAndMakeVisible(clearButton);
     addAndMakeVisible(settingsButton);
+    addAndMakeVisible(gesturesButton);
     addAndMakeVisible(textureButton);
     addAndMakeVisible(fuzzButton);
     addAndMakeVisible(evolutionButton);
@@ -529,6 +647,37 @@ MainComponent::MainComponent()
     addChildComponent(saxModeButton);
     addAndMakeVisible(resetPerformanceLevelButton);
     addAndMakeVisible(toggleDelayDryButton);
+
+    gesturesTitleLabel.setText("GESTI", juce::dontSendNotification);
+    gesturesTitleLabel.setFont(juce::FontOptions(38.0f, juce::Font::bold));
+    gesturesTitleLabel.setColour(juce::Label::textColourId,
+                                 juce::Colour(paleText));
+    gesturesTitleLabel.setJustificationType(juce::Justification::centredLeft);
+    addChildComponent(gesturesTitleLabel);
+
+    gesturesHintLabel.setText(
+        "TRASFORMAZIONI GLOBALI  /  TIENI I PAD MOMENTANEI  /  UN SOLO BERSAGLIO",
+        juce::dontSendNotification);
+    gesturesHintLabel.setFont(juce::FontOptions(17.0f, juce::Font::bold));
+    gesturesHintLabel.setColour(juce::Label::textColourId,
+                                juce::Colour(quietText));
+    gesturesHintLabel.setJustificationType(juce::Justification::centredLeft);
+    addChildComponent(gesturesHintLabel);
+
+    gestureTargetLabel.setFont(juce::FontOptions(21.0f, juce::Font::bold));
+    gestureTargetLabel.setColour(juce::Label::textColourId,
+                                 juce::Colour(paleText));
+    gestureTargetLabel.setColour(juce::Label::backgroundColourId,
+                                 juce::Colour(panel));
+    gestureTargetLabel.setJustificationType(juce::Justification::centred);
+    addChildComponent(gestureTargetLabel);
+
+    sustainMonitorLabel.setFont(juce::FontOptions(19.0f, juce::Font::bold));
+    sustainMonitorLabel.setColour(juce::Label::textColourId,
+                                  juce::Colour(quietText));
+    sustainMonitorLabel.setJustificationType(juce::Justification::centredLeft);
+    sustainMonitorLabel.setMinimumHorizontalScale(0.65f);
+    addChildComponent(sustainMonitorLabel);
 
     connectionStatusLabel.setJustificationType(juce::Justification::centred);
     connectionStatusLabel.setFont(juce::FontOptions(21.0f));
@@ -606,6 +755,7 @@ MainComponent::MainComponent()
         }
     };
     settingsButton.onClick = [this] { toggleSettings(); };
+    gesturesButton.onClick = [this] { toggleGestures(); };
     textureButton.onClick = [this] { cycleTexture(); };
     fuzzButton.onClick = [this]
     {
@@ -970,7 +1120,9 @@ MainComponent::MainComponent()
     updateTextureButton();
     applyScenario(savedScenario);
     selectMemory(0);
-    setSize(1280, 800);
+    updatePageVisibility();
+    updateMidiMonitor();
+    setSize(1600, 1000);
     initialiseAudio();
     juce::Timer::startTimerHz(30);
 }
@@ -983,6 +1135,7 @@ MainComponent::~MainComponent()
     properties.saveIfNeeded();
     deviceManager.removeMidiInputDeviceCallback({}, this);
     deviceManager.removeAudioCallback(&audioRouter);
+    setLookAndFeel(nullptr);
 }
 
 void MainComponent::changeScenario(int delta)
@@ -1197,6 +1350,69 @@ void MainComponent::updateSaxFootswitchControls()
         learning ? juce::Colour(0xffffd08a) : juce::Colour(paleText));
 }
 
+void MainComponent::updateMidiMonitor()
+{
+    const auto now = juce::Time::getMillisecondCounter();
+    const auto sustainPacked = lastSustainValue.load(std::memory_order_relaxed);
+    if (sustainPacked >= 0)
+    {
+        const auto value = sustainPacked & 0x7f;
+        const auto role = static_cast<EcosystemEngine::MidiInputRole>(
+            (sustainPacked >> 8) & 0x3);
+        const auto edges = sustainEdgeMask.load(std::memory_order_relaxed);
+        const auto completeCycle = (edges & 0x3u) == 0x3u;
+        sustainMonitorLabel.setText(
+            "PEDALE RICEVUTO  /  " + midiRoleText(role)
+                + "  /  CC64 = " + juce::String(value)
+                + (value >= 64 ? "  PREMUTO" : "  RILASCIATO")
+                + (completeCycle ? "  /  CICLO 127-0 OK"
+                                 : "  /  MUOVILO FINO AL RILASCIO"),
+            juce::dontSendNotification);
+        const auto recent = static_cast<std::uint32_t>(
+            now - lastSustainTick.load(std::memory_order_relaxed)) < 900u;
+        sustainMonitorLabel.setColour(
+            juce::Label::textColourId,
+            recent ? memoryColours[0].brighter(0.35f)
+                   : juce::Colour(paleText));
+        return;
+    }
+
+    const auto packed = lastMidiMessagePacked.load(std::memory_order_relaxed);
+    const auto kind = static_cast<MidiMonitorKind>(packed & 0x7u);
+    if (kind == MidiMonitorKind::none)
+    {
+        sustainMonitorLabel.setText(
+            "PEDALE  /  NESSUN MIDI RICEVUTO  /  PREMI UNA NOTA E POI IL SUSTAIN",
+            juce::dontSendNotification);
+        sustainMonitorLabel.setColour(juce::Label::textColourId,
+                                      juce::Colour(quietText));
+        return;
+    }
+
+    const auto role = static_cast<EcosystemEngine::MidiInputRole>(
+        (packed >> 3u) & 0x3u);
+    const auto channel = static_cast<int>((packed >> 5u) & 0x1fu);
+    const auto number = static_cast<int>((packed >> 10u) & 0x7fu);
+    const auto value = static_cast<int>((packed >> 17u) & 0x7fu);
+    auto event = juce::String("MIDI ") + midiRoleText(role) + " OK  /  ";
+    if (kind == MidiMonitorKind::controller)
+        event += "CC" + juce::String(number) + " = " + juce::String(value);
+    else if (kind == MidiMonitorKind::noteOn
+             || kind == MidiMonitorKind::noteOff)
+        event += "NOTA " + juce::String(number)
+            + (kind == MidiMonitorKind::noteOn ? " ON" : " OFF")
+            + "  CH " + juce::String(channel);
+    else
+        event += "MESSAGGIO MIDI";
+    sustainMonitorLabel.setText(
+        event + "  /  CC64 NON ANCORA RICEVUTO",
+        juce::dontSendNotification);
+    const auto recent = static_cast<std::uint32_t>(
+        now - lastMidiMessageTick.load(std::memory_order_relaxed)) < 900u;
+    sustainMonitorLabel.setColour(juce::Label::textColourId,
+        recent ? juce::Colour(0xffffd08a) : juce::Colour(quietText));
+}
+
 void MainComponent::initialiseAudio()
 {
     // Start closed: the selected profile is applied later as one transaction.
@@ -1217,6 +1433,11 @@ void MainComponent::configureKeyStepMidi()
     engine.releaseMomentaryGestures();
     engine.releaseSaxFootswitch();
     engine.cancelSaxFootswitchLearn();
+    lastMidiMessagePacked.store(0u, std::memory_order_relaxed);
+    lastMidiMessageTick.store(0u, std::memory_order_relaxed);
+    lastSustainValue.store(-1, std::memory_order_relaxed);
+    lastSustainTick.store(0u, std::memory_order_relaxed);
+    sustainEdgeMask.store(0u, std::memory_order_relaxed);
     const auto devices = juce::MidiInput::getAvailableDevices();
     keyStepInputName.clear();
     model12MidiInputName.clear();
@@ -2097,6 +2318,27 @@ void MainComponent::handleIncomingMidiMessage(juce::MidiInput* source,
     const auto role = source != nullptr
         ? midiInputRoleForName(source->getName())
         : EcosystemEngine::MidiInputRole::generic;
+    if (! message.isActiveSense() && ! message.isMidiClock())
+    {
+        lastMidiMessagePacked.store(
+            packMidiMonitorMessage(message, role), std::memory_order_relaxed);
+        lastMidiMessageTick.store(
+            juce::Time::getMillisecondCounter(), std::memory_order_relaxed);
+        if (message.isController()
+            && message.getControllerNumber() == 64)
+        {
+            lastSustainValue.store(
+                message.getControllerValue()
+                    | (static_cast<int>(role) << 8),
+                                   std::memory_order_relaxed);
+            sustainEdgeMask.fetch_or(
+                message.getControllerValue() >= 64 ? 2u : 1u,
+                std::memory_order_relaxed);
+            lastSustainTick.store(
+                juce::Time::getMillisecondCounter(),
+                std::memory_order_relaxed);
+        }
+    }
     engine.enqueueMidiMessage(message, role);
 }
 
@@ -2116,6 +2358,7 @@ void MainComponent::timerCallback()
     if (! sameSaxFootswitchBinding(binding, persistedSaxFootswitchBinding))
         saveSaxFootswitchBinding(true);
     updateSaxFootswitchControls();
+    updateMidiMonitor();
     updateHardwareIndicators();
 }
 
@@ -2302,11 +2545,7 @@ void MainComponent::selectMemory(int index)
     engine.setGestureTarget(selectedMemory);
     for (int orbIndex = 0; orbIndex < EcosystemEngine::memoryCount; ++orbIndex)
         orbs[static_cast<size_t>(orbIndex)]->selected = orbIndex == selectedMemory;
-    decaySlider.setVisible(selectedMemory == EcosystemEngine::midiMemoryCount
-                           && ! settingsVisible);
-    decayLabel.setVisible(decaySlider.isVisible());
-    saxModeButton.setVisible(selectedMemory == EcosystemEngine::midiMemoryCount
-                             && ! settingsVisible);
+    updatePageVisibility();
     updateControls();
 }
 
@@ -2346,7 +2585,7 @@ void MainComponent::updateControls()
                                        : (recording || waitingForFirstNote),
                                 juce::dontSendNotification);
     clearButton.setEnabled(! isBass && (recording || material));
-    clearButton.setVisible(! settingsVisible && ! isBass);
+    clearButton.setVisible(! settingsVisible && ! gesturesVisible && ! isBass);
     if (! clearButton.isDown())
         clearButton.setButtonText("TIENI PER DISSOLVERE");
 
@@ -2372,13 +2611,19 @@ void MainComponent::updateControls()
     freezeButton.setEnabled(gesturesAvailable);
     echoThrowButton.setEnabled(gesturesAvailable);
     freeTailButton.setEnabled(gesturesAvailable);
-    freezeButton.setButtonText(engine.isFreezeEnabled(selectedMemory)
+    const auto freezeTarget = touchscreenFreezeTarget >= 0
+        ? touchscreenFreezeTarget : selectedMemory;
+    const auto echoTarget = touchscreenEchoThrowTarget >= 0
+        ? touchscreenEchoThrowTarget : selectedMemory;
+    const auto freezeActive = engine.isFreezeEnabled(freezeTarget);
+    const auto echoActive = engine.isEchoThrowEnabled(echoTarget);
+    freezeButton.setButtonText(freezeActive
         ? "GELO: ATTIVO" : "GELO: TIENI");
-    echoThrowButton.setButtonText(engine.isEchoThrowEnabled(selectedMemory)
+    echoThrowButton.setButtonText(echoActive
         ? "ECO: LANCIO" : "ECO THROW");
-    freezeButton.setToggleState(engine.isFreezeEnabled(selectedMemory),
+    freezeButton.setToggleState(freezeActive,
                                 juce::dontSendNotification);
-    echoThrowButton.setToggleState(engine.isEchoThrowEnabled(selectedMemory),
+    echoThrowButton.setToggleState(echoActive,
                                     juce::dontSendNotification);
     const auto freeTailTarget = touchscreenFreeTailTarget >= 0
         ? touchscreenFreeTailTarget : selectedMemory;
@@ -2402,6 +2647,25 @@ void MainComponent::updateControls()
     saxListenButton.setToggleState(listening > 0.005f,
                                    juce::dontSendNotification);
 
+    gestureTargetLabel.setText(
+        "BERSAGLIO  /  " + memoryNames[static_cast<std::size_t>(selectedMemory)]
+            + (isBass
+                ? "  /  I PAD MOMENTANEI NON ELABORANO IL BASSO"
+                : "  /  IL PAD CATTURA QUESTA MEMORIA"),
+        juce::dontSendNotification);
+    gestureTargetLabel.setColour(
+        juce::Label::outlineColourId, selectedColour.withAlpha(0.72f));
+    for (auto* button : { &freezeButton, &echoThrowButton, &freeTailButton })
+    {
+        button->setColour(juce::TextButton::buttonOnColourId,
+                          selectedColour.withAlpha(0.54f));
+        button->setColour(juce::TextButton::textColourOnId,
+                          juce::Colours::white);
+    }
+    for (int index = 0; index < EcosystemEngine::memoryCount; ++index)
+        gestureTargetButtons[static_cast<std::size_t>(index)]->setToggleState(
+            index == selectedMemory, juce::dontSendNotification);
+
     const auto type = waitingForFirstNote
         ? "LOOP MIDI " + juce::String(engine.getMidiChannelForMemory(selectedMemory))
             + " / ATTENDO PRIMO NOTE-ON"
@@ -2422,28 +2686,14 @@ void MainComponent::updateControls()
 void MainComponent::toggleSettings()
 {
     settingsVisible = ! settingsVisible;
+    gesturesVisible = false;
     // Never leave a hidden learn or a held edge behind when crossing pages.
     engine.releaseSaxFootswitch();
     engine.cancelSaxFootswitchLearn();
-    if (settingsVisible)
-    {
-        engine.releaseMomentaryGestures();
-        if (touchscreenFreezeTarget >= 0)
-        {
-            engine.setFreezeEnabled(touchscreenFreezeTarget, false);
-            touchscreenFreezeTarget = -1;
-        }
-        if (touchscreenEchoThrowTarget >= 0)
-        {
-            engine.setEchoThrowEnabled(touchscreenEchoThrowTarget, false);
-            touchscreenEchoThrowTarget = -1;
-        }
-        if (touchscreenFreeTailTarget >= 0)
-        {
-            engine.setFreeTailEnabled(touchscreenFreeTailTarget, false);
-            touchscreenFreeTailTarget = -1;
-        }
-    }
+    engine.releaseMomentaryGestures();
+    touchscreenFreezeTarget = -1;
+    touchscreenEchoThrowTarget = -1;
+    touchscreenFreeTailTarget = -1;
     if (! settingsVisible
         && (audioDraft.tone != EcosystemEngine::DiagnosticToneBus::off
             || engine.getDiagnosticToneBus()
@@ -2455,15 +2705,43 @@ void MainComponent::toggleSettings()
         diagnosticToneChoice->setSelectedIndex(0, false);
         updatingConnectionControls = false;
     }
+    updatePageVisibility();
+    updateControls();
+    resized();
+    repaint();
+}
+
+void MainComponent::toggleGestures()
+{
+    gesturesVisible = ! gesturesVisible;
+    settingsVisible = false;
+    // A hidden momentary pad must never remain held. The DSP performs the
+    // release ramp after these ownership bits are cleared.
+    engine.releaseMomentaryGestures();
+    touchscreenFreezeTarget = -1;
+    touchscreenEchoThrowTarget = -1;
+    touchscreenFreeTailTarget = -1;
+    engine.releaseSaxFootswitch();
+    engine.cancelSaxFootswitchLearn();
+    updatePageVisibility();
+    updateControls();
+    resized();
+    repaint();
+}
+
+void MainComponent::updatePageVisibility()
+{
+    const auto performanceVisible = ! settingsVisible && ! gesturesVisible;
+
     applyAudioButton.setVisible(settingsVisible);
     rescanAudioButton.setVisible(settingsVisible);
     keyStepRoutingButton.setVisible(settingsVisible);
     connectionStatusLabel.setVisible(settingsVisible);
     hardwareRouteLabel.setVisible(settingsVisible);
     midiConnectionLabel.setVisible(settingsVisible);
-    saxFootswitchBindingLabel.setVisible(settingsVisible);
-    saxFootswitchLearnButton.setVisible(settingsVisible);
-    saxFootswitchClearButton.setVisible(settingsVisible);
+    saxFootswitchBindingLabel.setVisible(settingsVisible || gesturesVisible);
+    saxFootswitchLearnButton.setVisible(settingsVisible || gesturesVisible);
+    saxFootswitchClearButton.setVisible(settingsVisible || gesturesVisible);
     for (auto* choice : { profileChoice.get(), backendChoice.get(),
                          inputDeviceChoice.get(), outputDeviceChoice.get(),
                          sampleRateChoice.get(), bufferChoice.get(),
@@ -2472,31 +2750,41 @@ void MainComponent::toggleSettings()
                          saxPathChoice.get(), diagnosticToneChoice.get() })
         choice->setVisible(settingsVisible);
     for (auto& orb : orbs)
-        orb->setVisible(! settingsVisible);
-    recordButton.setVisible(! settingsVisible);
-    clearButton.setVisible(! settingsVisible
+        orb->setVisible(performanceVisible);
+    recordButton.setVisible(performanceVisible);
+    clearButton.setVisible(performanceVisible
         && ! EcosystemEngine::isLiveBassLayer(selectedMemory));
-    textureButton.setVisible(! settingsVisible);
-    fuzzButton.setVisible(! settingsVisible);
-    evolutionButton.setVisible(! settingsVisible);
-    freezeButton.setVisible(! settingsVisible);
-    echoThrowButton.setVisible(! settingsVisible);
-    freeTailButton.setVisible(! settingsVisible);
-    thinningButton.setVisible(! settingsVisible);
-    saxListenButton.setVisible(! settingsVisible);
-    decaySlider.setVisible(! settingsVisible
+    textureButton.setVisible(gesturesVisible);
+    fuzzButton.setVisible(gesturesVisible);
+    evolutionButton.setVisible(gesturesVisible);
+    freezeButton.setVisible(gesturesVisible);
+    echoThrowButton.setVisible(gesturesVisible);
+    freeTailButton.setVisible(gesturesVisible);
+    thinningButton.setVisible(gesturesVisible);
+    saxListenButton.setVisible(gesturesVisible);
+    gesturesTitleLabel.setVisible(gesturesVisible);
+    gesturesHintLabel.setVisible(gesturesVisible);
+    gestureTargetLabel.setVisible(gesturesVisible);
+    sustainMonitorLabel.setVisible(gesturesVisible);
+    for (auto& button : gestureTargetButtons)
+        button->setVisible(gesturesVisible);
+    decaySlider.setVisible(performanceVisible
         && selectedMemory == EcosystemEngine::midiMemoryCount);
     decayLabel.setVisible(decaySlider.isVisible());
-    saxModeButton.setVisible(! settingsVisible
+    saxModeButton.setVisible(performanceVisible
         && selectedMemory == EcosystemEngine::midiMemoryCount);
-    performanceLevelSlider.setVisible(! settingsVisible);
-    performanceLevelLabel.setVisible(! settingsVisible);
-    resetPerformanceLevelButton.setVisible(! settingsVisible);
-    delayLevelSlider.setVisible(! settingsVisible);
-    delayLevelLabel.setVisible(! settingsVisible);
-    toggleDelayDryButton.setVisible(! settingsVisible);
-    settingsButton.setButtonText(settingsVisible ? "TORNA ALLE MEMORIE" : "CONNESSIONI");
-    resized();
+    performanceLevelSlider.setVisible(performanceVisible);
+    performanceLevelLabel.setVisible(performanceVisible);
+    resetPerformanceLevelButton.setVisible(performanceVisible);
+    delayLevelSlider.setVisible(performanceVisible);
+    delayLevelLabel.setVisible(performanceVisible);
+    toggleDelayDryButton.setVisible(performanceVisible);
+
+    settingsButton.setButtonText(settingsVisible
+        ? "TORNA ALLE MEMORIE" : "CONNESSIONI");
+    gesturesButton.setVisible(! settingsVisible);
+    gesturesButton.setButtonText(gesturesVisible
+        ? "TORNA ALLE MEMORIE" : "GESTI");
 }
 
 void MainComponent::paint(juce::Graphics& graphics)
@@ -2510,35 +2798,76 @@ void MainComponent::paint(juce::Graphics& graphics)
     graphics.setGradientFill(atmosphere);
     graphics.fillAll();
 
+    const auto drawPanel = [&graphics](juce::Rectangle<int> bounds,
+                                       juce::Colour accent,
+                                       float alpha = 0.30f)
+    {
+        if (bounds.isEmpty())
+            return;
+        const auto area = bounds.toFloat();
+        graphics.setColour(juce::Colour(panel).withAlpha(0.96f));
+        graphics.fillRoundedRectangle(area, 22.0f);
+        graphics.setColour(accent.withAlpha(alpha));
+        graphics.drawRoundedRectangle(area.reduced(1.0f), 21.0f, 1.7f);
+    };
+
     if (settingsVisible)
     {
         graphics.setColour(juce::Colour(panel));
         graphics.fillRoundedRectangle(getLocalBounds().toFloat().reduced(42.0f)
                                       .withTrimmedTop(72.0f).withTrimmedBottom(88.0f), 18.0f);
     }
+    else if (gesturesVisible)
+    {
+        drawPanel(gesturesMainPanelBounds, juce::Colour(0xffa996e8));
+        drawPanel(gesturesPedalPanelBounds, memoryColours[4], 0.24f);
+    }
+    else
+        drawPanel(saxControlPanelBounds, memoryColours[4], 0.34f);
 }
 
 void MainComponent::resized()
 {
-    auto bounds = getLocalBounds().reduced(38);
-    auto header = bounds.removeFromTop(82);
-    midiStatusLabel.setBounds(header.removeFromRight(180).reduced(5, 16));
-    audioStatusLabel.setBounds(header.removeFromRight(205).reduced(5, 16));
-    auto titleArea = header.removeFromLeft(190);
+    saxControlPanelBounds = {};
+    gesturesMainPanelBounds = {};
+    gesturesPedalPanelBounds = {};
+
+    const auto margin = getWidth() < 1500 ? 28 : 38;
+    auto bounds = getLocalBounds().reduced(margin);
+    auto header = bounds.removeFromTop(92);
+    auto titleArea = header.removeFromLeft(240);
     titleLabel.setBounds(titleArea.removeFromTop(49));
     subtitleLabel.setBounds(titleArea);
-    previousScenarioButton.setBounds(header.removeFromLeft(70).reduced(5, 10));
-    scenarioLabel.setBounds(header.removeFromLeft(300).reduced(5, 7));
-    nextScenarioButton.setBounds(header.removeFromLeft(70).reduced(5, 10));
-    statusLabel.setBounds(header.reduced(6, 0));
+
+    auto indicators = header.removeFromRight(390);
+    midiStatusLabel.setBounds(indicators.removeFromRight(180).reduced(5, 13));
+    indicators.removeFromRight(8);
+    audioStatusLabel.setBounds(indicators.reduced(5, 13));
+
+    const auto completeHeader = getLocalBounds().reduced(margin)
+        .removeFromTop(92);
+    const auto scenarioWidth = juce::jmin(640,
+        juce::jmax(420, completeHeader.getWidth() - 690));
+    auto scenarioArea = completeHeader.withSizeKeepingCentre(
+        scenarioWidth, 82);
+    previousScenarioButton.setBounds(
+        scenarioArea.removeFromLeft(78).reduced(4, 5));
+    nextScenarioButton.setBounds(
+        scenarioArea.removeFromRight(78).reduced(4, 5));
+    scenarioLabel.setBounds(scenarioArea.reduced(7, 4));
+    const auto statusLeft = completeHeader.getX() + 240;
+    const auto statusRight = scenarioLabel.getX() - 10;
+    statusLabel.setBounds(statusLeft, completeHeader.getY(),
+                          juce::jmax(0, statusRight - statusLeft),
+                          completeHeader.getHeight());
 
     auto footer = bounds.removeFromBottom(108);
-    settingsButton.setBounds(footer.removeFromLeft(190).reduced(4, 14));
-    textureButton.setBounds(footer.removeFromLeft(170).reduced(4, 14));
-    fuzzButton.setBounds(footer.removeFromLeft(150).reduced(4, 14));
-    evolutionButton.setBounds(footer.removeFromLeft(180).reduced(4, 14));
-    clearButton.setBounds(footer.removeFromRight(210).reduced(4, 14));
-    recordButton.setBounds(footer.withSizeKeepingCentre(400, 78));
+    const auto completeFooter = footer;
+    settingsButton.setBounds(footer.removeFromLeft(210).reduced(4, 12));
+    footer.removeFromLeft(10);
+    gesturesButton.setBounds(footer.removeFromLeft(210).reduced(4, 12));
+    clearButton.setBounds(footer.removeFromRight(230).reduced(4, 12));
+    recordButton.setBounds(completeFooter.withSizeKeepingCentre(400, 78));
 
     if (settingsVisible)
     {
@@ -2589,34 +2918,110 @@ void MainComponent::resized()
         return;
     }
 
+    if (gesturesVisible)
+    {
+        auto gestureArea = bounds.reduced(16, 10);
+        gesturesTitleLabel.setBounds(gestureArea.removeFromTop(48));
+        gesturesHintLabel.setBounds(gestureArea.removeFromTop(30));
+        gestureArea.removeFromTop(10);
+        gestureTargetLabel.setBounds(gestureArea.removeFromTop(42));
+        auto targetRow = gestureArea.removeFromTop(64);
+        constexpr int targetGap = 12;
+        const auto targetWidth = (targetRow.getWidth()
+            - targetGap * (EcosystemEngine::memoryCount - 1))
+            / EcosystemEngine::memoryCount;
+        for (int index = 0; index < EcosystemEngine::memoryCount; ++index)
+        {
+            auto cell = targetRow.removeFromLeft(
+                index == EcosystemEngine::memoryCount - 1
+                    ? targetRow.getWidth() : targetWidth);
+            gestureTargetButtons[static_cast<std::size_t>(index)]->setBounds(
+                cell);
+            if (index < EcosystemEngine::memoryCount - 1)
+                targetRow.removeFromLeft(targetGap);
+        }
+        const auto compactGestures = gestureArea.getHeight() < 600;
+        const auto sectionGap = compactGestures ? 12 : 18;
+        gestureArea.removeFromTop(sectionGap);
+
+        const auto mainTop = gestureTargetLabel.getY() - 10;
+        auto globalRow = gestureArea.removeFromTop(
+            compactGestures ? 82 : 112);
+        constexpr int gestureGap = 18;
+        const auto globalWidth = (globalRow.getWidth() - gestureGap * 2) / 3;
+        textureButton.setBounds(globalRow.removeFromLeft(globalWidth));
+        globalRow.removeFromLeft(gestureGap);
+        fuzzButton.setBounds(globalRow.removeFromLeft(globalWidth));
+        globalRow.removeFromLeft(gestureGap);
+        evolutionButton.setBounds(globalRow);
+
+        gestureArea.removeFromTop(sectionGap);
+        auto momentaryRow = gestureArea.removeFromTop(
+            compactGestures ? 104 : 156);
+        const auto momentaryWidth
+            = (momentaryRow.getWidth() - gestureGap * 2) / 3;
+        freezeButton.setBounds(momentaryRow.removeFromLeft(momentaryWidth));
+        momentaryRow.removeFromLeft(gestureGap);
+        echoThrowButton.setBounds(momentaryRow.removeFromLeft(momentaryWidth));
+        momentaryRow.removeFromLeft(gestureGap);
+        freeTailButton.setBounds(momentaryRow);
+
+        gestureArea.removeFromTop(sectionGap);
+        auto automaticRow = gestureArea.removeFromTop(
+            compactGestures ? 72 : 104);
+        const auto automaticWidth
+            = (automaticRow.getWidth() - gestureGap) / 2;
+        thinningButton.setBounds(automaticRow.removeFromLeft(automaticWidth));
+        automaticRow.removeFromLeft(gestureGap);
+        saxListenButton.setBounds(automaticRow);
+        gesturesMainPanelBounds = juce::Rectangle<int>(
+            gestureTargetLabel.getX() - 10, mainTop,
+            gestureTargetLabel.getWidth() + 20,
+            automaticRow.getBottom() - mainTop + 10);
+
+        gestureArea.removeFromTop(compactGestures ? 14 : 20);
+        gesturesPedalPanelBounds = gestureArea;
+        auto pedalArea = gestureArea.reduced(22, 12);
+        sustainMonitorLabel.setBounds(pedalArea.removeFromTop(48));
+        pedalArea.removeFromTop(5);
+        saxFootswitchBindingLabel.setBounds(pedalArea.removeFromTop(54));
+        pedalArea.removeFromTop(8);
+        auto pedalButtons = pedalArea.removeFromTop(
+            juce::jmin(74, pedalArea.getHeight()));
+        saxFootswitchClearButton.setBounds(
+            pedalButtons.removeFromRight(190).reduced(3));
+        pedalButtons.removeFromRight(12);
+        saxFootswitchLearnButton.setBounds(pedalButtons.reduced(3));
+        return;
+    }
+
     auto performanceArea = bounds.reduced(4, 6);
-    constexpr int gap = 16;
-    auto controlsArea = performanceArea.removeFromBottom(136);
-    auto levelArea = controlsArea.removeFromTop(64).reduced(5, 3);
-    auto delayArea = controlsArea.removeFromBottom(64).reduced(5, 3);
-    performanceArea.removeFromBottom(8);
-    performanceLevelLabel.setBounds(levelArea.removeFromLeft(270));
-    levelArea.removeFromLeft(14);
+    constexpr int gap = 20;
+    const auto controlsHeight = juce::jlimit(
+        148, 176, performanceArea.getHeight() / 4);
+    auto controlsArea = performanceArea.removeFromBottom(controlsHeight);
+    const auto controlRowGap = 12;
+    const auto controlRowHeight
+        = (controlsArea.getHeight() - controlRowGap) / 2;
+    auto levelArea = controlsArea.removeFromTop(controlRowHeight).reduced(5, 4);
+    controlsArea.removeFromTop(controlRowGap);
+    auto delayArea = controlsArea.reduced(5, 4);
+    performanceArea.removeFromBottom(14);
+    const auto controlLabelWidth = juce::jlimit(
+        220, 285, levelArea.getWidth() * 15 / 100);
+    performanceLevelLabel.setBounds(
+        levelArea.removeFromLeft(controlLabelWidth));
+    levelArea.removeFromLeft(16);
     resetPerformanceLevelButton.setBounds(
-        levelArea.removeFromRight(105).reduced(3, 2));
-    saxListenButton.setBounds(
-        levelArea.removeFromRight(185).reduced(3, 2));
-    thinningButton.setBounds(
-        levelArea.removeFromRight(175).reduced(3, 2));
+        levelArea.removeFromRight(120).reduced(3, 2));
     performanceLevelSlider.setBounds(levelArea.reduced(2, 0));
-    delayLevelLabel.setBounds(delayArea.removeFromLeft(270));
-    delayArea.removeFromLeft(14);
+    delayLevelLabel.setBounds(delayArea.removeFromLeft(controlLabelWidth));
+    delayArea.removeFromLeft(16);
     toggleDelayDryButton.setBounds(
-        delayArea.removeFromRight(105).reduced(3, 2));
-    echoThrowButton.setBounds(
-        delayArea.removeFromRight(165).reduced(3, 2));
-    freezeButton.setBounds(
-        delayArea.removeFromRight(135).reduced(3, 2));
-    freeTailButton.setBounds(
-        delayArea.removeFromRight(185).reduced(3, 2));
+        delayArea.removeFromRight(150).reduced(3, 2));
     delayLevelSlider.setBounds(delayArea.reduced(2, 0));
-    const auto saxHeight = juce::jlimit(170, 270,
-        static_cast<int>(static_cast<float>(performanceArea.getHeight()) * 0.28f));
+    const auto saxHeight = juce::jlimit(220, 260,
+        static_cast<int>(static_cast<float>(performanceArea.getHeight()) * 0.31f));
     auto saxArea = performanceArea.removeFromBottom(saxHeight);
     performanceArea.removeFromBottom(gap);
 
@@ -2630,13 +3035,16 @@ void MainComponent::resized()
         if (index < EcosystemEngine::midiMemoryCount - 1)
             performanceArea.removeFromLeft(gap);
     }
-    orbs[static_cast<size_t>(EcosystemEngine::midiMemoryCount)]->setBounds(saxArea);
+    const auto saxControlsWidth = juce::jlimit(430, 620,
+        static_cast<int>(static_cast<float>(saxArea.getWidth()) * 0.34f));
+    saxControlPanelBounds = saxArea.removeFromRight(saxControlsWidth);
+    saxArea.removeFromRight(gap);
+    orbs[static_cast<size_t>(EcosystemEngine::midiMemoryCount)]->setBounds(
+        saxArea);
 
-    auto saxControls = saxArea.removeFromRight(
-        juce::jmax(350, static_cast<int>(static_cast<float>(saxArea.getWidth()) * 0.34f)))
-                           .reduced(26, 22);
-    saxModeButton.setBounds(saxControls.removeFromTop(62));
-    saxControls.removeFromTop(20);
+    auto saxControls = saxControlPanelBounds.reduced(26, 20);
+    saxModeButton.setBounds(saxControls.removeFromTop(64));
+    saxControls.removeFromTop(14);
     decayLabel.setBounds(saxControls.removeFromTop(32));
-    decaySlider.setBounds(saxControls.removeFromTop(54));
+    decaySlider.setBounds(saxControls.removeFromTop(58));
 }

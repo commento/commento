@@ -4,6 +4,8 @@
 #include "Scenarios.h"
 #include <cstdint>
 
+struct CommentoFreezeRampProbe;
+
 class AmbientSynth final
 {
 public:
@@ -21,6 +23,8 @@ public:
                 int startSample, int numSamples);
 
 private:
+    friend struct CommentoFreezeRampProbe;
+
     void updateEffectTargets(bool immediately);
     void prepareMorphBlock(int numSamples);
     void finishMorphBlock();

@@ -3,6 +3,8 @@
 #include <JuceHeader.h>
 #include "Scenarios.h"
 
+struct CommentoFreezeRampProbe;
+
 class SaxProcessor final
 {
 public:
@@ -19,6 +21,8 @@ public:
     [[nodiscard]] bool isIncrementalTailResetActive() const noexcept;
 
 private:
+    friend struct CommentoFreezeRampProbe;
+
     void updateTargets(bool immediately, double transitionSeconds = 1.0);
     void updateReverbParameters(int numSamples);
     [[nodiscard]] float readDelay(int channel, float delayInSamples) const;
