@@ -67,6 +67,7 @@ private:
     void applyScenario(int index);
     void updateScenarioLabels();
     void cycleTexture();
+    void toggleSaxListening();
     void updateTextureButton();
     void updatePerformanceLevelControl();
     void savePerformanceLevels(bool flushToDisk);
@@ -90,6 +91,9 @@ private:
     juce::TextButton textureButton { "GRANA: PULITA" };
     juce::TextButton fuzzButton { "FUZZ: SPENTO" };
     juce::TextButton evolutionButton { "DERIVA: SPENTA" };
+    juce::TextButton freezeButton { "GELO" };
+    juce::TextButton echoThrowButton { "ECO THROW" };
+    juce::TextButton saxListenButton { "ASCOLTO: SPENTO" };
     juce::TextButton applyAudioButton { "APPLICA AUDIO" };
     juce::TextButton rescanAudioButton { "RILEGGI DISPOSITIVI" };
     juce::TextButton keyStepRoutingButton { "RIPROVA KEYSTEP PRO" };
@@ -145,6 +149,8 @@ private:
     double clearHoldStartedAt = -1.0;
     bool clearHoldTriggered = false;
     double animationPhase = 0.0;
+    int touchscreenFreezeTarget = -1;
+    int touchscreenEchoThrowTarget = -1;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MainComponent)
 };

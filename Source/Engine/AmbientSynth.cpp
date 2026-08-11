@@ -675,6 +675,8 @@ void AmbientSynth::prepare(double sampleRate, int maximumBlockSize)
     delayWritePosition = 0;
     delayLevel.reset(currentSampleRate, 0.045);
     delayLevel.setCurrentAndTargetValue(requestedDelayLevel);
+    freezeMix.reset(currentSampleRate, 0.025);
+    freezeMix.setCurrentAndTargetValue(requestedFreeze ? 1.0f : 0.0f);
     reverb.setSampleRate(currentSampleRate);
     reverb.reset();
     morphSourcePatch = patch;
@@ -746,6 +748,17 @@ void AmbientSynth::setDelayLevel(float newLevel) noexcept
     requestedDelayLevel = juce::jlimit(0.0f, 1.0f, newLevel);
     if (std::abs(delayLevel.getTargetValue() - requestedDelayLevel) > 0.0001f)
         delayLevel.setTargetValue(requestedDelayLevel);
+}
+
+void AmbientSynth::setFreezeEnabled(bool shouldFreeze) noexcept
+{
+    if (requestedFreeze == shouldFreeze)
+        return;
+
+    requestedFreeze = shouldFreeze;
+    freezeMix.setTargetValue(requestedFreeze ? 1.0f : 0.0f);
+    if (prepared)
+        updateReverbParameters();
 }
 
 void AmbientSynth::allNotesOff()
@@ -825,7 +838,7 @@ void AmbientSynth::updateReverbParameters()
     parameters.wetLevel = juce::jlimit(0.0f, 0.65f, patch.reverbWet);
     parameters.dryLevel = 1.0f - parameters.wetLevel * 0.45f;
     parameters.width = 0.92f;
-    parameters.freezeMode = 0.0f;
+    parameters.freezeMode = requestedFreeze ? 1.0f : 0.0f;
     reverb.setParameters(parameters);
 }
 
@@ -837,6 +850,9 @@ void AmbientSynth::processEffects(int numSamples)
     auto* left = renderBuffer.getWritePointer(0);
     auto* right = renderBuffer.getWritePointer(1);
     const auto maximumDelay = static_cast<float>(delayBuffer.getNumSamples() - 2);
+    const auto freezeStart = freezeMix.getCurrentValue();
+    const auto freezeEnd = freezeMix.skip(numSamples);
+    const auto freezeActive = juce::jmax(freezeStart, freezeEnd) > 0.00001f;
     const auto leftUsesTwoTaps = std::abs(delayMorphSourceSamples[0]
                                           - delayMorphTargetSamples[0]) > 0.5f;
     const auto rightUsesTwoTaps = std::abs(delayMorphSourceSamples[1]
@@ -884,12 +900,33 @@ void AmbientSynth::processEffects(int numSamples)
             0.0f, 0.75f,
             linearMorph(morphSourcePatch.delayMix,
                         morphTargetPatch.delayMix, morph)) * amount;
-        delayBuffer.setSample(0, delayWritePosition, softProtect(
-            dryLeft + wetLeft * feedback + wetRight * feedback * 0.12f));
-        delayBuffer.setSample(1, delayWritePosition, softProtect(
-            dryRight + wetRight * feedback + wetLeft * feedback * 0.12f));
-        left[sample] = dryLeft * (1.0f - mix * 0.35f) + wetLeft * mix;
-        right[sample] = dryRight * (1.0f - mix * 0.35f) + wetRight * mix;
+        auto writeLeft = dryLeft + wetLeft * feedback
+                       + wetRight * feedback * 0.12f;
+        auto writeRight = dryRight + wetRight * feedback
+                        + wetLeft * feedback * 0.12f;
+        auto effectiveMix = mix;
+        if (freezeActive)
+        {
+            const auto freeze = linearMorph(freezeStart, freezeEnd, fraction);
+            // The ordinary cross-feedback path has a 1.12 common-mode gain,
+            // which is safe at its normal 0.78 cap but not close to unity.
+            // GELO therefore uses a normalised matrix and removes new input as
+            // it enters. No buffer is copied or cleared in the callback.
+            constexpr auto frozenFeedback = 0.995f;
+            const auto frozenLeft = frozenFeedback
+                * (wetLeft * 0.88f + wetRight * 0.12f);
+            const auto frozenRight = frozenFeedback
+                * (wetRight * 0.88f + wetLeft * 0.12f);
+            writeLeft += (frozenLeft - writeLeft) * freeze;
+            writeRight += (frozenRight - writeRight) * freeze;
+            effectiveMix = juce::jmax(effectiveMix, freeze * 0.72f);
+        }
+        delayBuffer.setSample(0, delayWritePosition, softProtect(writeLeft));
+        delayBuffer.setSample(1, delayWritePosition, softProtect(writeRight));
+        left[sample] = dryLeft * (1.0f - effectiveMix * 0.35f)
+                     + wetLeft * effectiveMix;
+        right[sample] = dryRight * (1.0f - effectiveMix * 0.35f)
+                      + wetRight * effectiveMix;
         delayWritePosition = (delayWritePosition + 1) % delayBuffer.getNumSamples();
     }
 

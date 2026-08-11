@@ -11,6 +11,12 @@
 
 namespace
 {
+constexpr std::uint8_t touchscreenGestureBit = 1u;
+constexpr std::uint8_t midiGestureBit = 2u;
+constexpr int freezeController = 80;
+constexpr int echoThrowController = 81;
+constexpr int saxListenController = 82;
+
 #if JUCE_LINUX
 [[nodiscard]] int enableRealtimeAudioScheduling() noexcept
 {
@@ -91,6 +97,10 @@ EcosystemEngine::EcosystemEngine()
 {
     for (auto& delayLevel : delayLevels)
         delayLevel.store(1.0f, std::memory_order_relaxed);
+    for (auto& mask : freezeGestureMasks)
+        mask.store(0u, std::memory_order_relaxed);
+    for (auto& mask : echoThrowGestureMasks)
+        mask.store(0u, std::memory_order_relaxed);
 
     const auto& initialScenario = CommentoScenarios::get(0);
     for (int index = 0; index < midiMemoryCount; ++index)
@@ -114,6 +124,32 @@ void EcosystemEngine::enqueueMidiMessage(const juce::MidiMessage& message)
 {
     if (message.isActiveSense() || message.isMidiClock())
         return;
+
+    if (message.isController())
+    {
+        const auto controller = message.getControllerNumber();
+        const auto value = message.getControllerValue();
+        if (controller == freezeController)
+        {
+            setMidiFreezeEnabled(value >= 64);
+            return;
+        }
+        if (controller == echoThrowController)
+        {
+            setMidiEchoThrowEnabled(value >= 64);
+            return;
+        }
+        if (controller == saxListenController)
+        {
+            setSaxListenAmount(static_cast<float>(value) / 127.0f);
+            return;
+        }
+        if (controller == 120 || controller == 123)
+        {
+            setMidiFreezeEnabled(false);
+            setMidiEchoThrowEnabled(false);
+        }
+    }
 
     int start1 = 0;
     int size1 = 0;
@@ -415,6 +451,139 @@ float EcosystemEngine::getDelayLevel(int memoryIndex) const noexcept
         : 0.0f;
 }
 
+void EcosystemEngine::setGestureTarget(int memoryIndex) noexcept
+{
+    gestureTarget.store(
+        juce::jlimit(0, memoryCount - 1, memoryIndex),
+        std::memory_order_relaxed);
+}
+
+void EcosystemEngine::setFreezeEnabled(int memoryIndex,
+                                       bool shouldFreeze) noexcept
+{
+    if (memoryIndex <= bassLayerIndex
+        || ! juce::isPositiveAndBelow(memoryIndex, memoryCount))
+        return;
+
+    auto& mask = freezeGestureMasks[static_cast<std::size_t>(memoryIndex)];
+    if (shouldFreeze)
+        mask.fetch_or(touchscreenGestureBit, std::memory_order_relaxed);
+    else
+        mask.fetch_and(static_cast<std::uint8_t>(~touchscreenGestureBit),
+                       std::memory_order_relaxed);
+}
+
+bool EcosystemEngine::isFreezeEnabled(int memoryIndex) const noexcept
+{
+    return memoryIndex > bassLayerIndex
+        && juce::isPositiveAndBelow(memoryIndex, memoryCount)
+        && freezeGestureMasks[static_cast<std::size_t>(memoryIndex)].load(
+               std::memory_order_relaxed) != 0u;
+}
+
+void EcosystemEngine::setEchoThrowEnabled(int memoryIndex,
+                                          bool shouldThrow) noexcept
+{
+    if (memoryIndex <= bassLayerIndex
+        || ! juce::isPositiveAndBelow(memoryIndex, memoryCount))
+        return;
+
+    auto& mask = echoThrowGestureMasks[static_cast<std::size_t>(memoryIndex)];
+    if (shouldThrow)
+        mask.fetch_or(touchscreenGestureBit, std::memory_order_relaxed);
+    else
+        mask.fetch_and(static_cast<std::uint8_t>(~touchscreenGestureBit),
+                       std::memory_order_relaxed);
+}
+
+bool EcosystemEngine::isEchoThrowEnabled(int memoryIndex) const noexcept
+{
+    return memoryIndex > bassLayerIndex
+        && juce::isPositiveAndBelow(memoryIndex, memoryCount)
+        && echoThrowGestureMasks[static_cast<std::size_t>(memoryIndex)].load(
+               std::memory_order_relaxed) != 0u;
+}
+
+void EcosystemEngine::setSaxListenAmount(float amount) noexcept
+{
+    const auto safeAmount = std::isfinite(amount) ? amount : 0.0f;
+    saxListenAmount.store(juce::jlimit(0.0f, 1.0f, safeAmount),
+                          std::memory_order_relaxed);
+}
+
+float EcosystemEngine::getSaxListenAmount() const noexcept
+{
+    return saxListenAmount.load(std::memory_order_relaxed);
+}
+
+void EcosystemEngine::releaseMomentaryGestures() noexcept
+{
+    clearMomentaryGestures();
+}
+
+void EcosystemEngine::setMidiFreezeEnabled(bool shouldFreeze) noexcept
+{
+    if (shouldFreeze)
+    {
+        const auto target = gestureTarget.load(std::memory_order_relaxed);
+        const auto usableTarget = target > bassLayerIndex
+            && juce::isPositiveAndBelow(target, memoryCount) ? target : -1;
+        const auto previous = midiFreezeTarget.exchange(
+            usableTarget, std::memory_order_relaxed);
+        if (previous > bassLayerIndex && previous != usableTarget)
+            freezeGestureMasks[static_cast<std::size_t>(previous)].fetch_and(
+                static_cast<std::uint8_t>(~midiGestureBit),
+                std::memory_order_relaxed);
+        if (usableTarget > bassLayerIndex)
+            freezeGestureMasks[static_cast<std::size_t>(usableTarget)].fetch_or(
+                midiGestureBit, std::memory_order_relaxed);
+        return;
+    }
+
+    midiFreezeTarget.store(-1, std::memory_order_relaxed);
+    // Clear every MIDI-owned bit, not only the remembered target. Besides
+    // acting as a panic, this makes release robust if an audio restart raced a
+    // controller press between its target exchange and mask update.
+    for (auto& mask : freezeGestureMasks)
+        mask.fetch_and(static_cast<std::uint8_t>(~midiGestureBit),
+                       std::memory_order_relaxed);
+}
+
+void EcosystemEngine::setMidiEchoThrowEnabled(bool shouldThrow) noexcept
+{
+    if (shouldThrow)
+    {
+        const auto target = gestureTarget.load(std::memory_order_relaxed);
+        const auto usableTarget = target > bassLayerIndex
+            && juce::isPositiveAndBelow(target, memoryCount) ? target : -1;
+        const auto previous = midiEchoThrowTarget.exchange(
+            usableTarget, std::memory_order_relaxed);
+        if (previous > bassLayerIndex && previous != usableTarget)
+            echoThrowGestureMasks[static_cast<std::size_t>(previous)].fetch_and(
+                static_cast<std::uint8_t>(~midiGestureBit),
+                std::memory_order_relaxed);
+        if (usableTarget > bassLayerIndex)
+            echoThrowGestureMasks[static_cast<std::size_t>(usableTarget)].fetch_or(
+                midiGestureBit, std::memory_order_relaxed);
+        return;
+    }
+
+    midiEchoThrowTarget.store(-1, std::memory_order_relaxed);
+    for (auto& mask : echoThrowGestureMasks)
+        mask.fetch_and(static_cast<std::uint8_t>(~midiGestureBit),
+                       std::memory_order_relaxed);
+}
+
+void EcosystemEngine::clearMomentaryGestures() noexcept
+{
+    for (auto& mask : freezeGestureMasks)
+        mask.store(0u, std::memory_order_relaxed);
+    for (auto& mask : echoThrowGestureMasks)
+        mask.store(0u, std::memory_order_relaxed);
+    midiFreezeTarget.store(-1, std::memory_order_relaxed);
+    midiEchoThrowTarget.store(-1, std::memory_order_relaxed);
+}
+
 int EcosystemEngine::memoryIndexForMidiChannel(int midiChannel)
 {
     for (int index = 0; index < midiMemoryCount; ++index)
@@ -486,6 +655,7 @@ void EcosystemEngine::prepare(double newSampleRate, int maximumBlockSize)
         || sampleRateChanged;
 
     sampleRate = preparedSampleRate;
+    clearMomentaryGestures();
     dspLoad.store(0.0f, std::memory_order_relaxed);
     dspNearOverloadCount.store(0, std::memory_order_relaxed);
     callbackIntervalLoad.store(0.0f, std::memory_order_relaxed);
@@ -541,6 +711,21 @@ void EcosystemEngine::prepare(double newSampleRate, int maximumBlockSize)
     bassMuteGain.reset(sampleRate, 0.006);
     bassMuteGain.setCurrentAndTargetValue(bassEnabled.load() ? 1.0f : 0.0f);
     bassWasEnabled = bassEnabled.load();
+    saxListenMix.reset(sampleRate, 0.080);
+    saxListenMix.setCurrentAndTargetValue(
+        juce::jlimit(0.0f, 1.0f, saxListenAmount.load(
+            std::memory_order_relaxed)));
+    saxListenEnvelope = 0.0f;
+    saxListenBlockGainStart = 1.0f;
+    saxListenBlockGainEnd = 1.0f;
+    for (int index = 0; index < memoryCount; ++index)
+    {
+        auto& mix = echoThrowMixes[static_cast<std::size_t>(index)];
+        mix.reset(sampleRate, 0.025);
+        mix.setCurrentAndTargetValue(0.0f);
+        echoThrowBlockAmounts[static_cast<std::size_t>(index)] = 0.0f;
+        echoThrowWasActive[static_cast<std::size_t>(index)] = false;
+    }
     grainEffectMix.reset(sampleRate, 0.001);
     grainEffectMix.setCurrentAndTargetValue(
         juce::jlimit(0.0f, 1.0f, requestedTexture.load()));
@@ -597,9 +782,11 @@ void EcosystemEngine::prepare(double newSampleRate, int maximumBlockSize)
         // channel first so a ghost voice cannot survive without its later
         // boundary note-off.
         synth->allNotesOff();
+        synth->setFreezeEnabled(false);
         synth->setDelayLevel(getDelayLevel(index));
         synth->prepare(sampleRate, maximumBlockSize);
     }
+    saxProcessor.setFreezeEnabled(false);
     saxProcessor.setDelayLevel(getDelayLevel(midiMemoryCount));
     saxProcessor.prepare(sampleRate, maximumBlockSize);
     fourHeadSaxLoopMix.reset(sampleRate, 0.001);
@@ -640,6 +827,7 @@ void EcosystemEngine::audioDeviceStopped()
     saxDangerSamples = 0;
     saxRecoverySamples = 0;
     saxSafetyGain = 1.0f;
+    clearMomentaryGestures();
     for (int index = 0; index < midiMemoryCount; ++index)
     {
         auto& memory = midiMemories[static_cast<size_t>(index)];
@@ -766,6 +954,8 @@ void EcosystemEngine::audioDeviceIOCallbackWithContext(
     applyScenarioIfNeeded();
     advanceScenarioMorph(numSamples);
     updatePerformanceEffectTargets();
+    updateMomentaryGestureTargets(numSamples);
+    prepareSaxListenBlock(numSamples);
     for (int index = 1; index < midiMemoryCount; ++index)
         applyMidiCommands(midiMemories[static_cast<size_t>(index)],
                           midiChannels[static_cast<size_t>(index)], blockMidiOutput);
@@ -1039,6 +1229,78 @@ void EcosystemEngine::updatePerformanceEffectTargets() noexcept
         fuzzEffectMix.setTargetValue(fuzzTarget);
         activeFuzzEffectTarget = fuzzTarget;
     }
+}
+
+void EcosystemEngine::updateMomentaryGestureTargets(int numSamples) noexcept
+{
+    const auto samples = juce::jmax(0, numSamples);
+    for (int index = 1; index < memoryCount; ++index)
+    {
+        const auto active = isEchoThrowEnabled(index);
+        auto& wasActive = echoThrowWasActive[static_cast<std::size_t>(index)];
+        auto& mix = echoThrowMixes[static_cast<std::size_t>(index)];
+        if (active != wasActive)
+        {
+            const auto current = mix.getCurrentValue();
+            // Fast enough to catch the performed note, slow enough to avoid a
+            // wet-level edge. On release the return remains audible long
+            // enough for the longest factory tap to speak at least once.
+            mix.reset(sampleRate, active ? 0.025 : 4.0);
+            mix.setCurrentAndTargetValue(current);
+            mix.setTargetValue(active ? 1.0f : 0.0f);
+            wasActive = active;
+        }
+        echoThrowBlockAmounts[static_cast<std::size_t>(index)]
+            = mix.skip(samples);
+    }
+    echoThrowBlockAmounts[static_cast<std::size_t>(bassLayerIndex)] = 0.0f;
+}
+
+void EcosystemEngine::prepareSaxListenBlock(int numSamples) noexcept
+{
+    saxListenBlockGainStart = 1.0f;
+    saxListenBlockGainEnd = 1.0f;
+    if (numSamples <= 0 || sampleRate <= 0.0)
+        return;
+
+    const auto targetMix = juce::jlimit(
+        0.0f, 1.0f, saxListenAmount.load(std::memory_order_relaxed));
+    if (std::abs(targetMix - saxListenMix.getTargetValue()) > 0.0001f)
+        saxListenMix.setTargetValue(targetMix);
+
+    const auto mixStart = saxListenMix.getCurrentValue();
+    const auto mixEnd = saxListenMix.skip(numSamples);
+    if (juce::jmax(mixStart, mixEnd) <= 0.00001f)
+    {
+        saxListenEnvelope = 0.0f;
+        return;
+    }
+
+    // Reuse the peak already measured for the hardware display. It belongs to
+    // the preceding callback, adding only one block of latency (10.7 ms at the
+    // Model 12 default) and avoiding a second scan of the sax input.
+    auto inputLevel = saxInputLevel.load(std::memory_order_relaxed);
+    if (! std::isfinite(inputLevel)
+        || getSaxPathMode() == SaxPathMode::muted
+        || saxSafetyMuted.load(std::memory_order_relaxed))
+        inputLevel = 0.0f;
+    const auto targetEnvelope = juce::jlimit(
+        0.0f, 1.0f, (inputLevel - 0.015f) * 3.5f);
+    const auto envelopeStart = saxListenEnvelope;
+    const auto timeSeconds = targetEnvelope > envelopeStart ? 0.035 : 0.45;
+    const auto blockCoefficient = static_cast<float>(1.0 - std::exp(
+        -static_cast<double>(numSamples) / (timeSeconds * sampleRate)));
+    saxListenEnvelope += (targetEnvelope - saxListenEnvelope)
+                       * blockCoefficient;
+
+    // ASCOLTO only makes the ambient bed yield to the live sax. Bass, RESPIRO
+    // and physical routing remain untouched. The maximum reduction is about
+    // 7 dB and both edges are rendered as one vector-friendly block ramp.
+    constexpr auto maximumDuck = 0.55f;
+    saxListenBlockGainStart = 1.0f
+        - mixStart * maximumDuck * envelopeStart;
+    saxListenBlockGainEnd = 1.0f
+        - mixEnd * maximumDuck * saxListenEnvelope;
 }
 
 void EcosystemEngine::processPerformanceEffects(
@@ -1542,9 +1804,12 @@ void EcosystemEngine::renderInternalSynths(float* const* outputs, int outputChan
         }
 
         layerSynthBuffer.clear(0, numSamples);
-        internalSynths[static_cast<size_t>(layer)]->setDelayLevel(
-            getDelayLevel(layer));
-        internalSynths[static_cast<size_t>(layer)]->render(
+        auto& synth = internalSynths[static_cast<size_t>(layer)];
+        const auto throwAmount = echoThrowBlockAmounts[
+            static_cast<std::size_t>(layer)];
+        synth->setDelayLevel(juce::jmax(getDelayLevel(layer), throwAmount));
+        synth->setFreezeEnabled(isFreezeEnabled(layer));
+        synth->render(
             layerSynthBuffer, layerMidi, 0, numSamples);
         performanceLevels.process(layer, layerSynthBuffer, numSamples);
         if (layer == bassLayerIndex)
@@ -1568,6 +1833,14 @@ void EcosystemEngine::renderInternalSynths(float* const* outputs, int outputChan
             destination.addFrom(channel, 0, layerSynthBuffer, channel, 0,
                                 numSamples);
     }
+
+    if (saxListenBlockGainStart < 0.99999f
+        || saxListenBlockGainEnd < 0.99999f)
+        for (int channel = 0; channel < ambientSynthBuffer.getNumChannels();
+             ++channel)
+            ambientSynthBuffer.applyGainRamp(
+                channel, 0, numSamples,
+                saxListenBlockGainStart, saxListenBlockGainEnd);
 
     for (int channel = ambientLeftBus;
          channel <= ambientRightBus && channel < outputChannels; ++channel)
@@ -1892,6 +2165,11 @@ void EcosystemEngine::renderAudioMemory(
     const auto rightInputChannel = juce::jmin(1, inputChannels - 1);
     const auto useStereoInput = saxStereoInput.load();
     const auto pathMode = getSaxPathMode();
+    const auto saxGestureIndex = midiMemoryCount;
+    saxProcessor.setDelayLevel(juce::jmax(
+        getDelayLevel(saxGestureIndex),
+        echoThrowBlockAmounts[static_cast<std::size_t>(saxGestureIndex)]));
+    saxProcessor.setFreezeEnabled(isFreezeEnabled(saxGestureIndex));
     const auto inputAllowed = pathMode != SaxPathMode::muted
         && ! saxSafetyMuted.load();
 
@@ -2188,7 +2466,6 @@ void EcosystemEngine::renderAudioMemory(
 
     if (pathMode == SaxPathMode::sceneEffects)
     {
-        saxProcessor.setDelayLevel(getDelayLevel(midiMemoryCount));
         saxProcessor.process(saxRenderBuffer, numSamples);
     }
     else

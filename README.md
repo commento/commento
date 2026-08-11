@@ -36,12 +36,15 @@ Il nome **Commento** e' provvisorio.
 - due gesti globali a ingresso e uscita lenti: GRANA/downsample e FUZZ;
 - DERIVA opzionale e rara: una sola ombra reverse oppure +12 alla volta, sempre
   sommata al loop originale;
+- tre gesti live a costo contenuto: GELO ed ECO THROW sulla card selezionata,
+  piu' ASCOLTO per far arretrare il letto ambient quando entra il sax;
 - build macOS e Raspberry Pi OS 64 bit dallo stesso codice.
 
 Questa versione non salva ancora i loop su disco. Salva invece l'ultimo scenario
 selezionato, il livello di GRANA, i cinque livelli di performance e l'ultima
-configurazione audio applicata. I parametri sonori sono scelti per il live e non
-espongono ancora un pannello di sintesi dettagliato.
+configurazione audio applicata. GELO ed ECO THROW sono momentanei; ASCOLTO riparte
+spento a ogni avvio. I parametri sonori sono scelti per il live e non espongono
+ancora un pannello di sintesi dettagliato.
 
 ## Flusso del sistema autonomo
 
@@ -145,6 +148,24 @@ durante il collegamento.
   RESPIRO;
 - regolare il grande controllo **LIVELLO** della card selezionata; i cinque
   valori sono indipendenti, partono da -6 dB e vengono ricordati al riavvio;
+- tenere premuto **GELO** per trattenere la coda della card selezionata. Riusa il
+  delay e il riverbero gia' attivi: non crea copie del buffer e torna al
+  comportamento dello scenario quando si rilascia. E' escluso dal BASSO LIVE;
+- tenere premuto **ECO THROW** per richiamare il contenuto del delay della card
+  selezionata e catturare il suono eseguito durante la pressione. Wet e feedback
+  salgono senza modificare il valore DELAY salvato; dopo il rilascio rientrano
+  lentamente in quattro secondi, lasciando parlare la coda;
+- attivare **ASCOLTO** per far arretrare gradualmente soltanto il bus AMBIENTE
+  quando il sax live entra, fino a circa 7 dB. BASSO LIVE, RESPIRO e routing
+  fisico restano invariati; il follower riusa il meter sax del blocco precedente
+  e non aggiunge una seconda analisi dell'ingresso;
+- un controller o footswitch MIDI configurato sul Keystep puo' inviare `CC80`
+  per GELO, `CC81` per ECO THROW e `CC82` per ASCOLTO. I primi due sono
+  momentanei (`0-63` rilascia, `64-127` preme); CC82 controlla direttamente
+  l'intensita' `0-127`. Questi tre CC sono consumati dal motore e non finiscono
+  nelle memorie MIDI. Il sustain `CC64` resta libero. Se si perde un rilascio
+  MIDI, aprire **CONNESSIONI** o usare **RIPROVA KEYSTEP PRO** come panic; anche
+  `CC120/123` rilasciano entrambi i momentanei;
 - su BASSO LIVE usare **MUTA BASSO LIVE** / **RIATTIVA BASSO LIVE**; e' un mute
   rapido e il MIDI 5 suona il basso senza essere registrato in una memoria MIDI;
 - su MAREA, RADICE e SCINTILLA, premere **SEMINA** per armare la registrazione:
@@ -182,6 +203,8 @@ Per usarla, selezionare **RESPIRO**, registrare il sax con **SEMINA** e chiudere
 il ciclo; **NUTRI / OVERDUB** continua ad aggiungere nuovo suono e a consumare
 lentamente la memoria senza ridefinirne la durata. Il MIDI 5 resta indipendente
 e continua sempre a pilotare BASSO LIVE sul canale AUDIO 5.
+I nuovi gesti non cambiano questo routing o il comportamento automatico di
+COSMOS; intervengono soltanto mentre vengono azionati esplicitamente.
 
 Il percorso PULITA e' lineare ai livelli normali. Le protezioni intervengono solo
 vicino al fondo scala; GRANA reintroduce gradualmente saturazione, rumore e
@@ -444,6 +467,11 @@ sudo systemctl reboot
 - `AudioMemory`: buffer circolare stereo con overdub, decadimento e, in COSMOS,
   quattro testine asincrone;
 - `MainComponent`: interfaccia touch, routing device e animazione.
+
+GELO ricircola i delay gia' allocati con una matrice di feedback normalizzata;
+ECO THROW smussa l'inviluppo una volta per blocco e riusa il DSP DELAY esistente;
+ASCOLTO lavora una volta per blocco sul bus ambient gia' sommato. Nessuno dei tre
+alloca buffer, crea riverberi o aggiunge voci nel callback realtime.
 
 Il callback MIDI del solo Keystep scrive in una FIFO preallocata. Le memorie
 vengono modificate dal thread audio; in caso di overflow viene inviato un panic

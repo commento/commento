@@ -189,12 +189,352 @@ int main()
                          "DERIVA deve partire spenta");
         passed &= expect(defaultEngine.isSaxStereoInput(),
                          "RESPIRO deve partire in stereo sugli ingressi 7/8");
+        auto gesturesStartOff = defaultEngine.getSaxListenAmount() == 0.0f;
+        for (int memory = 0; memory < EcosystemEngine::memoryCount; ++memory)
+            gesturesStartOff &= ! defaultEngine.isFreezeEnabled(memory)
+                && ! defaultEngine.isEchoThrowEnabled(memory);
+        passed &= expect(gesturesStartOff,
+                         "GELO, ECO THROW e ASCOLTO devono partire spenti");
+
+        // MIDI 5 is the dedicated live bass and deliberately owns neither a
+        // delay nor a reverb tail. Both the direct UI API and the global MIDI
+        // gestures must therefore leave it outside GELO/ECO THROW.
+        defaultEngine.setFreezeEnabled(EcosystemEngine::bassLayerIndex, true);
+        defaultEngine.setEchoThrowEnabled(EcosystemEngine::bassLayerIndex,
+                                          true);
+        defaultEngine.setGestureTarget(EcosystemEngine::bassLayerIndex);
+        defaultEngine.enqueueMidiMessage(
+            juce::MidiMessage::controllerEvent(5, 80, 127));
+        defaultEngine.enqueueMidiMessage(
+            juce::MidiMessage::controllerEvent(5, 81, 127));
+        passed &= expect(! defaultEngine.isFreezeEnabled(
+                              EcosystemEngine::bassLayerIndex)
+                             && ! defaultEngine.isEchoThrowEnabled(
+                                 EcosystemEngine::bassLayerIndex),
+                         "il basso MIDI 5 deve restare escluso dai gesti di coda");
     }
     passed &= expect(CommentoScenarios::wrapIndex(-1)
                              == CommentoScenarios::count - 1
                          && CommentoScenarios::wrapIndex(
                                 CommentoScenarios::count) == 0,
                      "la selezione scenario deve essere circolare");
+
+    // The three dedicated MIDI controls are global performance controls, not
+    // material for the loop recorder. Their state changes synchronously on
+    // the MIDI thread, so threshold and ownership can be tested without any
+    // scheduler-sensitive sleeps.
+    {
+        constexpr auto gestureSampleRate = 8000.0;
+        constexpr auto gestureBlockSize = 400;
+        EcosystemEngine controlEngine;
+
+        controlEngine.setGestureTarget(1);
+        controlEngine.enqueueMidiMessage(
+            juce::MidiMessage::controllerEvent(2, 80, 63));
+        const auto freezeBelowThreshold = ! controlEngine.isFreezeEnabled(1);
+        controlEngine.enqueueMidiMessage(
+            juce::MidiMessage::controllerEvent(2, 80, 64));
+        controlEngine.setGestureTarget(2);
+        const auto freezeCapturedTarget = controlEngine.isFreezeEnabled(1)
+            && ! controlEngine.isFreezeEnabled(2);
+        controlEngine.enqueueMidiMessage(
+            juce::MidiMessage::controllerEvent(2, 80, 0));
+        const auto freezeReleasedCapturedTarget
+            = ! controlEngine.isFreezeEnabled(1)
+            && ! controlEngine.isFreezeEnabled(2);
+
+        controlEngine.enqueueMidiMessage(
+            juce::MidiMessage::controllerEvent(3, 80, 127));
+        controlEngine.setFreezeEnabled(2, true);
+        controlEngine.enqueueMidiMessage(
+            juce::MidiMessage::controllerEvent(3, 80, 0));
+        const auto touchscreenStillOwnsFreeze
+            = controlEngine.isFreezeEnabled(2);
+        controlEngine.setFreezeEnabled(2, false);
+
+        controlEngine.setGestureTarget(3);
+        controlEngine.enqueueMidiMessage(
+            juce::MidiMessage::controllerEvent(4, 81, 63));
+        const auto throwBelowThreshold
+            = ! controlEngine.isEchoThrowEnabled(3);
+        controlEngine.enqueueMidiMessage(
+            juce::MidiMessage::controllerEvent(4, 81, 64));
+        controlEngine.setGestureTarget(EcosystemEngine::midiMemoryCount);
+        const auto throwCapturedTarget
+            = controlEngine.isEchoThrowEnabled(3)
+            && ! controlEngine.isEchoThrowEnabled(
+                EcosystemEngine::midiMemoryCount);
+        controlEngine.enqueueMidiMessage(
+            juce::MidiMessage::controllerEvent(4, 81, 0));
+        const auto throwReleasedCapturedTarget
+            = ! controlEngine.isEchoThrowEnabled(3)
+            && ! controlEngine.isEchoThrowEnabled(
+                EcosystemEngine::midiMemoryCount);
+
+        controlEngine.enqueueMidiMessage(
+            juce::MidiMessage::controllerEvent(2, 82, 64));
+        const auto halfListen = controlEngine.getSaxListenAmount();
+        controlEngine.enqueueMidiMessage(
+            juce::MidiMessage::controllerEvent(2, 82, 127));
+        const auto fullListen = controlEngine.getSaxListenAmount();
+        controlEngine.enqueueMidiMessage(
+            juce::MidiMessage::controllerEvent(2, 82, 0));
+
+        passed &= expect(freezeBelowThreshold && freezeCapturedTarget
+                             && freezeReleasedCapturedTarget
+                             && touchscreenStillOwnsFreeze,
+                         "CC80 deve usare soglia 64, catturare il target e rispettare l'owner touch");
+        passed &= expect(throwBelowThreshold && throwCapturedTarget
+                             && throwReleasedCapturedTarget,
+                         "CC81 deve usare soglia 64 e rilasciare il target catturato");
+        passed &= expect(std::abs(halfListen - 64.0f / 127.0f) < 0.000001f
+                             && fullListen == 1.0f
+                             && controlEngine.getSaxListenAmount() == 0.0f,
+                         "CC82 deve controllare ASCOLTO sull'intero intervallo 0..1");
+
+        controlEngine.setGestureTarget(2);
+        controlEngine.enqueueMidiMessage(
+            juce::MidiMessage::controllerEvent(3, 80, 127));
+        controlEngine.enqueueMidiMessage(
+            juce::MidiMessage::controllerEvent(3, 81, 127));
+        controlEngine.releaseMomentaryGestures();
+        passed &= expect(! controlEngine.isFreezeEnabled(2)
+                             && ! controlEngine.isEchoThrowEnabled(2),
+                         "il panic deve liberare GELO ed ECO THROW su ogni card");
+
+        controlEngine.setDelayLevel(1, 0.0f);
+        controlEngine.prepare(gestureSampleRate, gestureBlockSize);
+        OutputBlock<EcosystemEngine::logicalOutputBusCount> controlOutput(
+            gestureBlockSize);
+        controlEngine.setGestureTarget(1);
+        controlEngine.toggleRecording(1);
+        controlEngine.enqueueMidiMessage(
+            juce::MidiMessage::controllerEvent(2, 80, 127));
+        controlEngine.enqueueMidiMessage(
+            juce::MidiMessage::controllerEvent(2, 81, 127));
+        controlEngine.enqueueMidiMessage(
+            juce::MidiMessage::controllerEvent(2, 82, 96));
+        process(controlEngine, nullptr, 0, controlOutput.pointers.data(),
+                EcosystemEngine::logicalOutputBusCount, gestureBlockSize);
+        const auto controllersDidNotStartCapture
+            = controlEngine.isWaitingForFirstNote(1)
+            && controlEngine.getEventCount(1) == 0;
+
+        controlEngine.enqueueMidiMessage(
+            juce::MidiMessage::noteOn(2, 57, 0.45f));
+        for (int block = 0; block < 4; ++block)
+        {
+            controlOutput.clear();
+            process(controlEngine, nullptr, 0, controlOutput.pointers.data(),
+                    EcosystemEngine::logicalOutputBusCount,
+                    gestureBlockSize);
+        }
+        controlEngine.enqueueMidiMessage(
+            juce::MidiMessage::controllerEvent(2, 80, 0));
+        controlEngine.enqueueMidiMessage(
+            juce::MidiMessage::controllerEvent(2, 81, 0));
+        controlEngine.enqueueMidiMessage(
+            juce::MidiMessage::controllerEvent(2, 82, 0));
+        controlEngine.enqueueMidiMessage(juce::MidiMessage::noteOff(2, 57));
+        controlOutput.clear();
+        process(controlEngine, nullptr, 0, controlOutput.pointers.data(),
+                EcosystemEngine::logicalOutputBusCount, gestureBlockSize);
+        controlEngine.toggleRecording(1);
+        controlOutput.clear();
+        process(controlEngine, nullptr, 0, controlOutput.pointers.data(),
+                EcosystemEngine::logicalOutputBusCount, gestureBlockSize);
+        passed &= expect(controllersDidNotStartCapture
+                             && controlEngine.hasMaterial(1)
+                             && controlEngine.getEventCount(1) == 2,
+                         "CC80-82 devono essere consumati e mai registrati nel loop MIDI");
+
+        // Exercise both tails briefly with the recorded phrase. This is a
+        // signal-safety invariant, not a wall-clock performance benchmark.
+        controlEngine.enqueueMidiMessage(
+            juce::MidiMessage::controllerEvent(2, 80, 127));
+        controlEngine.enqueueMidiMessage(
+            juce::MidiMessage::controllerEvent(2, 81, 127));
+        auto gestureAudioFinite = true;
+        auto gestureAudioPeak = 0.0f;
+        for (int block = 0; block < 32; ++block)
+        {
+            controlOutput.clear();
+            process(controlEngine, nullptr, 0, controlOutput.pointers.data(),
+                    EcosystemEngine::logicalOutputBusCount,
+                    gestureBlockSize);
+            gestureAudioFinite &= controlOutput.finite(gestureBlockSize);
+            gestureAudioPeak = std::max(gestureAudioPeak,
+                std::max(controlOutput.peak(EcosystemEngine::ambientLeftBus,
+                                            gestureBlockSize),
+                         controlOutput.peak(EcosystemEngine::ambientRightBus,
+                                            gestureBlockSize)));
+        }
+        controlEngine.enqueueMidiMessage(
+            juce::MidiMessage::controllerEvent(2, 80, 0));
+        controlEngine.enqueueMidiMessage(
+            juce::MidiMessage::controllerEvent(2, 81, 0));
+        for (int block = 0; block < 8; ++block)
+        {
+            controlOutput.clear();
+            process(controlEngine, nullptr, 0, controlOutput.pointers.data(),
+                    EcosystemEngine::logicalOutputBusCount,
+                    gestureBlockSize);
+            gestureAudioFinite &= controlOutput.finite(gestureBlockSize);
+            gestureAudioPeak = std::max(gestureAudioPeak,
+                std::max(controlOutput.peak(EcosystemEngine::ambientLeftBus,
+                                            gestureBlockSize),
+                         controlOutput.peak(EcosystemEngine::ambientRightBus,
+                                            gestureBlockSize)));
+        }
+        passed &= expect(gestureAudioFinite && gestureAudioPeak < 0.90f
+                             && controlEngine.getDelayLevel(1) == 0.0f
+                             && ! controlEngine.isFreezeEnabled(1)
+                             && ! controlEngine.isEchoThrowEnabled(1),
+                         "GELO/ECO devono restare finiti, rilasciarsi e non cambiare DELAY");
+    }
+
+    // Run the dry and ducked render sequentially so the 120-second sax memory
+    // of one engine is released before constructing the next. The schedules
+    // and signals are identical, making bass/sax equality deterministic while
+    // avoiding timing assertions.
+    {
+        struct ListenProbe
+        {
+            std::array<double, 3> activeRms {};
+            std::array<double, 3> releasedRms {};
+            float maximumPeak = 0.0f;
+            bool finite = true;
+            bool released = false;
+        };
+        const auto runListenProbe = [](float amount)
+        {
+            constexpr auto probeSampleRate = 8000.0;
+            constexpr auto probeBlockSize = 400;
+            constexpr auto activeFirstBlock = 40;
+            constexpr auto releaseBlock = 48;
+            constexpr auto releasedFirstBlock = 64;
+            constexpr auto finalBlock = 72;
+            ListenProbe result;
+            std::array<double, 3> activeEnergy {};
+            std::array<double, 3> releasedEnergy {};
+            int activeSamples = 0;
+            int releasedSamples = 0;
+
+            EcosystemEngine engine;
+            engine.setScenarioIndex(2); // deterministic warm/reed voices
+            engine.setSaxPathMode(EcosystemEngine::SaxPathMode::direct);
+            engine.setSaxStereoInput(false);
+            engine.setDelayLevel(2, 0.0f);
+            engine.setSaxListenAmount(amount);
+            engine.prepare(probeSampleRate, probeBlockSize);
+            engine.enqueueMidiMessage(
+                juce::MidiMessage::noteOn(3, 60, 0.65f));
+            engine.enqueueMidiMessage(
+                juce::MidiMessage::noteOn(5, 48, 0.65f));
+
+            std::vector<float> saxInput(static_cast<std::size_t>(
+                probeBlockSize));
+            const float* inputPointer = saxInput.data();
+            OutputBlock<EcosystemEngine::logicalOutputBusCount> output(
+                probeBlockSize);
+            int64_t samplePosition = 0;
+            for (int block = 0; block < finalBlock; ++block)
+            {
+                if (block == releaseBlock)
+                    engine.setSaxListenAmount(0.0f);
+                for (int sample = 0; sample < probeBlockSize; ++sample)
+                    saxInput[static_cast<std::size_t>(sample)]
+                        = 0.30f * static_cast<float>(std::sin(
+                            juce::MathConstants<double>::twoPi * 173.0
+                            * static_cast<double>(samplePosition + sample)
+                            / probeSampleRate));
+                output.clear();
+                process(engine, &inputPointer, 1, output.pointers.data(),
+                        EcosystemEngine::logicalOutputBusCount,
+                        probeBlockSize);
+                result.finite &= output.finite(probeBlockSize);
+                for (int bus = 0;
+                     bus < EcosystemEngine::logicalOutputBusCount; ++bus)
+                    result.maximumPeak = std::max(result.maximumPeak,
+                        output.peak(static_cast<std::size_t>(bus),
+                                    probeBlockSize));
+
+                const auto accumulate = [&output, probeBlockSize](
+                                            std::array<double, 3>& energy)
+                {
+                    for (int sample = 0; sample < probeBlockSize; ++sample)
+                    {
+                        const auto ambientLeft = output.storage[
+                            EcosystemEngine::ambientLeftBus][
+                                static_cast<std::size_t>(sample)];
+                        const auto ambientRight = output.storage[
+                            EcosystemEngine::ambientRightBus][
+                                static_cast<std::size_t>(sample)];
+                        const auto bass = output.storage[
+                            EcosystemEngine::bassBus][
+                                static_cast<std::size_t>(sample)];
+                        const auto sax = output.storage[
+                            EcosystemEngine::saxLeftBus][
+                                static_cast<std::size_t>(sample)];
+                        energy[0] += 0.5 * (ambientLeft * ambientLeft
+                                          + ambientRight * ambientRight);
+                        energy[1] += bass * bass;
+                        energy[2] += sax * sax;
+                    }
+                };
+                if (block >= activeFirstBlock && block < releaseBlock)
+                {
+                    accumulate(activeEnergy);
+                    activeSamples += probeBlockSize;
+                }
+                if (block >= releasedFirstBlock)
+                {
+                    accumulate(releasedEnergy);
+                    releasedSamples += probeBlockSize;
+                }
+                samplePosition += probeBlockSize;
+            }
+            for (std::size_t index = 0; index < result.activeRms.size();
+                 ++index)
+            {
+                result.activeRms[index] = std::sqrt(
+                    activeEnergy[index] / static_cast<double>(activeSamples));
+                result.releasedRms[index] = std::sqrt(
+                    releasedEnergy[index]
+                    / static_cast<double>(releasedSamples));
+            }
+            result.released = engine.getSaxListenAmount() == 0.0f;
+            return result;
+        };
+
+        const auto listenOff = runListenProbe(0.0f);
+        const auto listenOn = runListenProbe(1.0f);
+        const auto relativelyEqual = [](double first, double second)
+        {
+            return std::abs(first - second)
+                <= std::max(1.0e-9, std::abs(first) * 0.00001);
+        };
+        passed &= expect(listenOff.activeRms[0] > 0.0001
+                             && listenOn.activeRms[0]
+                                < listenOff.activeRms[0] * 0.65
+                             && relativelyEqual(listenOn.activeRms[1],
+                                                listenOff.activeRms[1])
+                             && relativelyEqual(listenOn.activeRms[2],
+                                                listenOff.activeRms[2]),
+                         "ASCOLTO deve ridurre soltanto il bus ambient, non basso o sax");
+        passed &= expect(listenOff.finite && listenOn.finite
+                             && listenOff.maximumPeak < 0.80f
+                             && listenOn.maximumPeak < 0.80f,
+                         "ASCOLTO deve conservare campioni finiti e headroom");
+        passed &= expect(listenOn.released
+                             && relativelyEqual(listenOn.releasedRms[0],
+                                                listenOff.releasedRms[0])
+                             && relativelyEqual(listenOn.releasedRms[1],
+                                                listenOff.releasedRms[1])
+                             && relativelyEqual(listenOn.releasedRms[2],
+                                                listenOff.releasedRms[2]),
+                         "rilasciare ASCOLTO deve ripristinare tutti i bus senza residui");
+    }
 
     EcosystemEngine bassEngine;
     bassEngine.prepare(sampleRate, blockSize);
@@ -638,8 +978,8 @@ int main()
                 &evolutionOutput, &evolutionTwinOutput, &evolutionOffOutput
             };
 
-        const auto renderEvolutionEngine = [](EcosystemEngine& engine,
-                                               auto& output)
+        const auto renderEvolutionEngine = [=](EcosystemEngine& engine,
+                                                auto& output)
         {
             output.clear();
             process(engine, nullptr, 0, output.pointers.data(),
@@ -726,7 +1066,7 @@ int main()
         auto octaveUpPower = 0.0;
         auto hypotheticalOctaveDownPower = 0.0;
 
-        const auto spectralPower = [](const auto& samples, double frequency)
+        const auto spectralPower = [=](const auto& samples, double frequency)
         {
             auto real = 0.0;
             auto imaginary = 0.0;
@@ -1469,7 +1809,8 @@ int main()
     multiLoopEngine.setScenarioIndex(2); // NASTRO: hottest stress-probe scene
     OutputBlock<EcosystemEngine::logicalOutputBusCount> multiLoopOutput(
         blockSize);
-    const auto recordChordLoop = [&multiLoopEngine, &multiLoopOutput](
+    const auto recordChordLoop = [&multiLoopEngine, &multiLoopOutput,
+                                  blockSize](
                                      int memory, int channel, int baseNote,
                                      int lengthInBlocks)
     {

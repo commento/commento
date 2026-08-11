@@ -14,6 +14,7 @@ public:
     void beginPatchMorph(const SynthPatch& targetPatch,
                          double durationSeconds);
     void setDelayLevel(float newLevel) noexcept;
+    void setFreezeEnabled(bool shouldFreeze) noexcept;
     void allNotesOff();
     void render(juce::AudioBuffer<float>& output, const juce::MidiBuffer& midi,
                 int startSample, int numSamples);
@@ -32,6 +33,7 @@ private:
     juce::AudioBuffer<float> delayBuffer;
     juce::Reverb reverb;
     juce::SmoothedValue<float> delayLevel;
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> freezeMix;
     SynthPatch morphSourcePatch;
     SynthPatch morphTargetPatch;
     std::array<float, 2> delayMorphSourceSamples { 1.0f, 1.0f };
@@ -41,6 +43,7 @@ private:
     float blockMorphStart = 1.0f;
     float blockMorphEnd = 1.0f;
     float requestedDelayLevel = 1.0f;
+    bool requestedFreeze = false;
     int delayWritePosition = 0;
     double currentSampleRate = 48000.0;
     bool processesAmbientEffects = true;

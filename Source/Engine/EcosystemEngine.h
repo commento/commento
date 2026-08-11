@@ -97,6 +97,14 @@ public:
     [[nodiscard]] float getPerformanceLevel(int memoryIndex) const noexcept;
     void setDelayLevel(int memoryIndex, float amount) noexcept;
     [[nodiscard]] float getDelayLevel(int memoryIndex) const noexcept;
+    void setGestureTarget(int memoryIndex) noexcept;
+    void setFreezeEnabled(int memoryIndex, bool shouldFreeze) noexcept;
+    [[nodiscard]] bool isFreezeEnabled(int memoryIndex) const noexcept;
+    void setEchoThrowEnabled(int memoryIndex, bool shouldThrow) noexcept;
+    [[nodiscard]] bool isEchoThrowEnabled(int memoryIndex) const noexcept;
+    void setSaxListenAmount(float amount) noexcept;
+    [[nodiscard]] float getSaxListenAmount() const noexcept;
+    void releaseMomentaryGestures() noexcept;
 
     void setAudioDecay(float newDecay);
     [[nodiscard]] float getAudioDecay() const;
@@ -207,6 +215,8 @@ private:
     void applyScenarioIfNeeded();
     void advanceScenarioMorph(int numSamples) noexcept;
     void updatePerformanceEffectTargets() noexcept;
+    void updateMomentaryGestureTargets(int numSamples) noexcept;
+    void prepareSaxListenBlock(int numSamples) noexcept;
     void processPerformanceEffects(float* const* outputs, int outputChannels,
                                    int numSamples) noexcept;
     void recordIncomingMidi(int numSamples, juce::MidiBuffer& liveMidi);
@@ -232,6 +242,9 @@ private:
                                                   int crossfadeSamples) const noexcept;
     void renderDiagnosticTone(float* const* outputs, int outputChannels,
                               int numSamples);
+    void setMidiFreezeEnabled(bool shouldFreeze) noexcept;
+    void setMidiEchoThrowEnabled(bool shouldThrow) noexcept;
+    void clearMomentaryGestures() noexcept;
 
     std::array<MidiMemory, midiMemoryCount> midiMemories;
     std::array<std::unique_ptr<AmbientSynth>, midiMemoryCount> internalSynths;
@@ -249,6 +262,23 @@ private:
     juce::AudioBuffer<float> saxRenderBuffer;
     PerformanceLevels performanceLevels;
     std::array<std::atomic<float>, memoryCount> delayLevels;
+    // Bit 0 is owned by the touchscreen, bit 1 by a dedicated MIDI CC. This
+    // prevents one control source from releasing a gesture still held by the
+    // other without locks or message-thread callbacks.
+    std::array<std::atomic<std::uint8_t>, memoryCount> freezeGestureMasks;
+    std::array<std::atomic<std::uint8_t>, memoryCount> echoThrowGestureMasks;
+    std::atomic<int> gestureTarget { bassLayerIndex };
+    std::atomic<int> midiFreezeTarget { -1 };
+    std::atomic<int> midiEchoThrowTarget { -1 };
+    std::array<juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear>,
+               memoryCount> echoThrowMixes;
+    std::array<float, memoryCount> echoThrowBlockAmounts {};
+    std::array<bool, memoryCount> echoThrowWasActive {};
+    std::atomic<float> saxListenAmount { 0.0f };
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> saxListenMix;
+    float saxListenEnvelope = 0.0f;
+    float saxListenBlockGainStart = 1.0f;
+    float saxListenBlockGainEnd = 1.0f;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> bassMuteGain;
     std::atomic<float> audioDecay { 0.985f };
     std::atomic<uint32_t> audioDecayManualRevision { 0 };

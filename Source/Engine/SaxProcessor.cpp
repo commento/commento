@@ -50,6 +50,8 @@ void SaxProcessor::prepare(double newSampleRate, int maximumBlockSize)
                         false, true, false);
     delayLevel.reset(sampleRate, 0.045);
     delayLevel.setCurrentAndTargetValue(requestedDelayLevel);
+    freezeMix.reset(sampleRate, 0.025);
+    freezeMix.setCurrentAndTargetValue(requestedFreeze ? 1.0f : 0.0f);
     reverb.setSampleRate(sampleRate);
     prepared = true;
     resetTails();
@@ -108,6 +110,15 @@ void SaxProcessor::setDelayLevel(float newLevel) noexcept
         delayLevel.setTargetValue(requestedDelayLevel);
 }
 
+void SaxProcessor::setFreezeEnabled(bool shouldFreeze) noexcept
+{
+    if (requestedFreeze == shouldFreeze)
+        return;
+
+    requestedFreeze = shouldFreeze;
+    freezeMix.setTargetValue(requestedFreeze ? 1.0f : 0.0f);
+}
+
 void SaxProcessor::updateTargets(bool immediately, double transitionSeconds)
 {
     const auto setTarget = [this, immediately, transitionSeconds](
@@ -159,7 +170,7 @@ void SaxProcessor::updateReverbParameters(int numSamples)
     parameters.wetLevel = reverbWet.getCurrentValue();
     parameters.dryLevel = 1.0f - parameters.wetLevel * 0.38f;
     parameters.width = 1.0f;
-    parameters.freezeMode = 0.0f;
+    parameters.freezeMode = requestedFreeze ? 1.0f : 0.0f;
     reverb.setParameters(parameters);
     if (numSamples > 0)
     {
@@ -218,6 +229,9 @@ void SaxProcessor::process(juce::AudioBuffer<float>& buffer, int numSamples)
     const auto maximumDelay = static_cast<float>(delayBuffer.getNumSamples() - 2);
     const auto highPassPole = std::exp(-juce::MathConstants<float>::twoPi
                                        * 72.0f / static_cast<float>(sampleRate));
+    const auto freezeStart = freezeMix.getCurrentValue();
+    const auto freezeEnd = freezeMix.skip(numSamples);
+    const auto freezeActive = juce::jmax(freezeStart, freezeEnd) > 0.00001f;
 
     for (int sample = 0; sample < numSamples; ++sample)
     {
@@ -278,16 +292,31 @@ void SaxProcessor::process(juce::AudioBuffer<float>& buffer, int numSamples)
         const auto amount = delayLevel.getNextValue();
         const auto feedbackAmount = feedback.getNextValue() * amount;
         const auto crossAmount = crossFeedback.getNextValue();
-        const auto delayInputLeft = filtered[0] + feedbackAmount
+        auto delayInputLeft = filtered[0] + feedbackAmount
             * (echoLeft * (1.0f - crossAmount) + echoRight * crossAmount);
-        const auto delayInputRight = filtered[1] + feedbackAmount
+        auto delayInputRight = filtered[1] + feedbackAmount
             * (echoRight * (1.0f - crossAmount) + echoLeft * crossAmount);
+        auto wet = delayMix.getNextValue() * amount;
+        if (freezeActive)
+        {
+            const auto fraction = numSamples > 1
+                ? static_cast<float>(sample) / static_cast<float>(numSamples - 1)
+                : 1.0f;
+            const auto freeze = juce::jmap(fraction, freezeStart, freezeEnd);
+            constexpr auto frozenFeedback = 0.995f;
+            const auto frozenLeft = frozenFeedback
+                * (echoLeft * (1.0f - crossAmount) + echoRight * crossAmount);
+            const auto frozenRight = frozenFeedback
+                * (echoRight * (1.0f - crossAmount) + echoLeft * crossAmount);
+            delayInputLeft += (frozenLeft - delayInputLeft) * freeze;
+            delayInputRight += (frozenRight - delayInputRight) * freeze;
+            wet = juce::jmax(wet, freeze * 0.68f);
+        }
         delayBuffer.setSample(0, writePosition,
             applyConditionalCeiling(delayInputLeft, 0.92f, 0.995f));
         delayBuffer.setSample(1, writePosition,
             applyConditionalCeiling(delayInputRight, 0.92f, 0.995f));
 
-        const auto wet = delayMix.getNextValue() * amount;
         const auto tremolo = tremoloDepth.getNextValue();
         const auto tremoloWave = CommentoDsp::fastSine(tremoloPhase);
         const auto leftMovement = 1.0f - tremolo
@@ -341,6 +370,7 @@ void SaxProcessor::advanceMorph(int numSamples) noexcept
     advance(crossFeedback);
     advance(delayMix);
     advance(delayLevel);
+    advance(freezeMix);
     advance(modulationDepthSamples);
     advance(modulationRateHz);
     advance(tremoloDepth);

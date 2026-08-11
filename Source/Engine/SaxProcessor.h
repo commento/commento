@@ -10,6 +10,7 @@ public:
     void setPatch(const SaxPatch& newPatch);
     void beginPatchMorph(const SaxPatch& newPatch, double durationSeconds);
     void setDelayLevel(float newLevel) noexcept;
+    void setFreezeEnabled(bool shouldFreeze) noexcept;
     void process(juce::AudioBuffer<float>& buffer, int numSamples);
     void advanceMorph(int numSamples) noexcept;
     void resetTails();
@@ -32,6 +33,7 @@ private:
     juce::SmoothedValue<float> crossFeedback;
     juce::SmoothedValue<float> delayMix;
     juce::SmoothedValue<float> delayLevel;
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> freezeMix;
     juce::SmoothedValue<float> modulationDepthSamples;
     juce::SmoothedValue<float> modulationRateHz;
     juce::SmoothedValue<float> tremoloDepth;
@@ -54,6 +56,7 @@ private:
     float delayMorphToLeft = 1.0f;
     float delayMorphToRight = 1.0f;
     float requestedDelayLevel = 1.0f;
+    bool requestedFreeze = false;
     bool delayMorphActive = false;
     bool prepared = false;
 };

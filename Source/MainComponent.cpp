@@ -412,6 +412,9 @@ MainComponent::MainComponent()
     styleButton(textureButton, juce::Colour(0xffc18a55));
     styleButton(fuzzButton, juce::Colour(0xffb75b52));
     styleButton(evolutionButton, juce::Colour(0xff9b7ed9));
+    styleButton(freezeButton, juce::Colour(0xff8cc8d8));
+    styleButton(echoThrowButton, juce::Colour(0xffd0a15d));
+    styleButton(saxListenButton, juce::Colour(0xff65b6a6));
     styleButton(applyAudioButton, juce::Colour(0xff5da8a1));
     styleButton(rescanAudioButton, juce::Colour(0xff7895b8));
     styleButton(keyStepRoutingButton, juce::Colour(0xff8aa6d6));
@@ -426,6 +429,9 @@ MainComponent::MainComponent()
     addAndMakeVisible(textureButton);
     addAndMakeVisible(fuzzButton);
     addAndMakeVisible(evolutionButton);
+    addAndMakeVisible(freezeButton);
+    addAndMakeVisible(echoThrowButton);
+    addAndMakeVisible(saxListenButton);
     addChildComponent(applyAudioButton);
     addChildComponent(rescanAudioButton);
     addChildComponent(keyStepRoutingButton);
@@ -508,6 +514,39 @@ MainComponent::MainComponent()
         engine.setLoopEvolutionEnabled(! engine.isLoopEvolutionEnabled());
         updateControls();
     };
+    freezeButton.onStateChange = [this]
+    {
+        if (freezeButton.isDown())
+        {
+            if (touchscreenFreezeTarget < 0)
+            {
+                touchscreenFreezeTarget = selectedMemory;
+                engine.setFreezeEnabled(touchscreenFreezeTarget, true);
+            }
+        }
+        else if (touchscreenFreezeTarget >= 0)
+        {
+            engine.setFreezeEnabled(touchscreenFreezeTarget, false);
+            touchscreenFreezeTarget = -1;
+        }
+    };
+    echoThrowButton.onStateChange = [this]
+    {
+        if (echoThrowButton.isDown())
+        {
+            if (touchscreenEchoThrowTarget < 0)
+            {
+                touchscreenEchoThrowTarget = selectedMemory;
+                engine.setEchoThrowEnabled(touchscreenEchoThrowTarget, true);
+            }
+        }
+        else if (touchscreenEchoThrowTarget >= 0)
+        {
+            engine.setEchoThrowEnabled(touchscreenEchoThrowTarget, false);
+            touchscreenEchoThrowTarget = -1;
+        }
+    };
+    saxListenButton.onClick = [this] { toggleSaxListening(); };
     previousScenarioButton.onClick = [this] { changeScenario(-1); };
     nextScenarioButton.onClick = [this] { changeScenario(1); };
     applyAudioButton.onClick = [this] { applyAudioConfiguration(); };
@@ -873,6 +912,13 @@ void MainComponent::cycleTexture()
     updateTextureButton();
 }
 
+void MainComponent::toggleSaxListening()
+{
+    engine.setSaxListenAmount(engine.getSaxListenAmount() > 0.01f
+        ? 0.0f : 1.0f);
+    updateControls();
+}
+
 void MainComponent::updateTextureButton()
 {
     const auto amount = engine.getTextureAmount();
@@ -960,6 +1006,9 @@ void MainComponent::initialiseAudio()
 
 void MainComponent::configureKeyStepMidi()
 {
+    // Re-reading or losing the controller is also the explicit panic path for
+    // a missing CC release. Latched controls such as ASCOLTO are unaffected.
+    engine.releaseMomentaryGestures();
     const auto devices = juce::MidiInput::getAvailableDevices();
     keyStepInputName.clear();
     juce::String selectedIdentifier;
@@ -2011,6 +2060,7 @@ void MainComponent::updateHardwareIndicators()
 void MainComponent::selectMemory(int index)
 {
     selectedMemory = juce::jlimit(0, EcosystemEngine::memoryCount - 1, index);
+    engine.setGestureTarget(selectedMemory);
     for (int orbIndex = 0; orbIndex < EcosystemEngine::memoryCount; ++orbIndex)
         orbs[static_cast<size_t>(orbIndex)]->selected = orbIndex == selectedMemory;
     decaySlider.setVisible(selectedMemory == EcosystemEngine::midiMemoryCount
@@ -2077,6 +2127,26 @@ void MainComponent::updateControls()
                                       ? "DERIVA: RARA" : "DERIVA: SPENTA");
     evolutionButton.setToggleState(engine.isLoopEvolutionEnabled(),
                                    juce::dontSendNotification);
+    const auto saxEffectsAvailable = selectedMemory != EcosystemEngine::midiMemoryCount
+        || engine.getSaxPathMode() == EcosystemEngine::SaxPathMode::sceneEffects;
+    const auto gesturesAvailable = ! isBass && saxEffectsAvailable;
+    freezeButton.setEnabled(gesturesAvailable);
+    echoThrowButton.setEnabled(gesturesAvailable);
+    freezeButton.setButtonText(engine.isFreezeEnabled(selectedMemory)
+        ? "GELO: ATTIVO" : "GELO: TIENI");
+    echoThrowButton.setButtonText(engine.isEchoThrowEnabled(selectedMemory)
+        ? "ECO: LANCIO" : "ECO THROW");
+    freezeButton.setToggleState(engine.isFreezeEnabled(selectedMemory),
+                                juce::dontSendNotification);
+    echoThrowButton.setToggleState(engine.isEchoThrowEnabled(selectedMemory),
+                                   juce::dontSendNotification);
+    const auto listening = engine.getSaxListenAmount();
+    saxListenButton.setButtonText(listening <= 0.005f
+        ? "ASCOLTO: SPENTO"
+        : "ASCOLTO: " + juce::String(static_cast<int>(
+              std::round(listening * 100.0f))) + "%");
+    saxListenButton.setToggleState(listening > 0.005f,
+                                   juce::dontSendNotification);
 
     const auto type = waitingForFirstNote
         ? "LOOP MIDI " + juce::String(engine.getMidiChannelForMemory(selectedMemory))
@@ -2098,6 +2168,20 @@ void MainComponent::updateControls()
 void MainComponent::toggleSettings()
 {
     settingsVisible = ! settingsVisible;
+    if (settingsVisible)
+    {
+        engine.releaseMomentaryGestures();
+        if (touchscreenFreezeTarget >= 0)
+        {
+            engine.setFreezeEnabled(touchscreenFreezeTarget, false);
+            touchscreenFreezeTarget = -1;
+        }
+        if (touchscreenEchoThrowTarget >= 0)
+        {
+            engine.setEchoThrowEnabled(touchscreenEchoThrowTarget, false);
+            touchscreenEchoThrowTarget = -1;
+        }
+    }
     if (! settingsVisible
         && (audioDraft.tone != EcosystemEngine::DiagnosticToneBus::off
             || engine.getDiagnosticToneBus()
@@ -2130,6 +2214,9 @@ void MainComponent::toggleSettings()
     textureButton.setVisible(! settingsVisible);
     fuzzButton.setVisible(! settingsVisible);
     evolutionButton.setVisible(! settingsVisible);
+    freezeButton.setVisible(! settingsVisible);
+    echoThrowButton.setVisible(! settingsVisible);
+    saxListenButton.setVisible(! settingsVisible);
     decaySlider.setVisible(! settingsVisible
         && selectedMemory == EcosystemEngine::midiMemoryCount);
     decayLabel.setVisible(decaySlider.isVisible());
@@ -2238,11 +2325,17 @@ void MainComponent::resized()
     levelArea.removeFromLeft(14);
     resetPerformanceLevelButton.setBounds(
         levelArea.removeFromRight(105).reduced(3, 2));
+    saxListenButton.setBounds(
+        levelArea.removeFromRight(185).reduced(3, 2));
     performanceLevelSlider.setBounds(levelArea.reduced(2, 0));
     delayLevelLabel.setBounds(delayArea.removeFromLeft(270));
     delayArea.removeFromLeft(14);
     toggleDelayDryButton.setBounds(
         delayArea.removeFromRight(105).reduced(3, 2));
+    echoThrowButton.setBounds(
+        delayArea.removeFromRight(165).reduced(3, 2));
+    freezeButton.setBounds(
+        delayArea.removeFromRight(135).reduced(3, 2));
     delayLevelSlider.setBounds(delayArea.reduced(2, 0));
     const auto saxHeight = juce::jlimit(170, 270,
         static_cast<int>(static_cast<float>(performanceArea.getHeight()) * 0.28f));
