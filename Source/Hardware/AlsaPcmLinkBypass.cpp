@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <cstddef>
 #include <limits>
+#include <syslog.h>
 #include <unistd.h>
 
 // JUCE 8.0.13 links the playback and capture handles, prepares them, and then
@@ -29,12 +31,24 @@ extern "C" int snd_pcm_get_params(_snd_pcm*, CommentoAlsaFrames*,
 extern "C" int __real_snd_pcm_sw_params_set_start_threshold(
     _snd_pcm*, _snd_pcm_sw_params*, CommentoAlsaFrames);
 
+namespace
+{
+void reportAlsaWorkaround(const char* message, std::size_t bytes) noexcept
+{
+    (void) ::write(STDERR_FILENO, message, bytes);
+    // xinit may attach the client's stderr to its virtual terminal rather
+    // than the systemd unit's journal. syslog reaches journald independently,
+    // so the active workaround remains verifiable from SSH.
+    ::syslog(LOG_NOTICE, "%.*s", static_cast<int>(bytes), message);
+}
+}
+
 extern "C" int __wrap_snd_pcm_link(_snd_pcm*, _snd_pcm*)
 {
     static constexpr char message[] =
         "Commento ALSA: snd_pcm_link bypass attivo; capture e playback "
         "partono indipendenti\n";
-    (void) ::write(STDERR_FILENO, message, sizeof(message) - 1);
+    reportAlsaWorkaround(message, sizeof(message) - 1);
     return -ENOSYS;
 }
 
@@ -72,7 +86,7 @@ extern "C" int __wrap_snd_pcm_sw_params_set_start_threshold(
         {
             static constexpr char message[] =
                 "Commento ALSA: playback prefill attivo; avvio dopo 2 periodi\n";
-            (void) ::write(STDERR_FILENO, message, sizeof(message) - 1);
+            reportAlsaWorkaround(message, sizeof(message) - 1);
         }
     }
 
