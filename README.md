@@ -39,15 +39,16 @@ Il nome **Commento** e' provvisorio.
 - due gesti globali a ingresso e uscita lenti: GRANA/downsample e FUZZ;
 - DERIVA opzionale e rara: una sola ombra reverse oppure +12 alla volta, sempre
   sommata al loop originale;
-- tre gesti live a costo contenuto: GELO ed ECO THROW sulla card selezionata,
-  piu' ASCOLTO per far arretrare il letto ambient quando entra il sax;
+- cinque gesti live a costo contenuto: GELO, ECO THROW e CODA LIBERA sulla card
+  selezionata, piu' ASCOLTO e DIRADA per articolare il letto ambient;
 - build macOS e Raspberry Pi OS 64 bit dallo stesso codice.
 
 Questa versione non salva ancora i loop su disco. Salva invece l'ultimo scenario
 selezionato, il livello di GRANA, i cinque livelli di performance, l'ultima
-configurazione audio applicata e l'eventuale associazione del pedale sax. GELO ed
-ECO THROW sono momentanei; ASCOLTO riparte spento a ogni avvio. I parametri sonori
-sono scelti per il live e non espongono ancora un pannello di sintesi dettagliato.
+configurazione audio applicata e l'eventuale associazione del pedale sax. GELO,
+ECO THROW e CODA LIBERA sono momentanei; ASCOLTO e DIRADA ripartono spenti a ogni
+avvio. I parametri sonori sono scelti per il live e non espongono ancora un
+pannello di sintesi dettagliato.
 
 ## Flusso del sistema autonomo
 
@@ -179,6 +180,13 @@ durante il collegamento.
   `OMBRA REVERSE` durante il giro interessato. Spegnendo DERIVA non partono
   nuovi eventi; l'ombra eventualmente in corso termina con la propria
   dissolvenza invece di essere troncata;
+- attivare **DIRADA** per aprire ogni tanto uno spazio nel tessuto: una sola fra
+  MAREA, RADICE e SCINTILLA trascorre un giro completo in silenzio e rientra
+  con una dissolvenza. La card interessata mostra `RESPIRA`. BASSO LIVE e
+  RESPIRO non vengono mai diradati, il materiale non viene cancellato e la
+  funzione riparte spenta a ogni avvio. Spegnendola durante `RESPIRA`, il giro
+  gia' iniziato termina al proprio confine prima del rientro: cosi' non perde
+  note iniziate nella parte silenziosa e non sposta la fase del loop;
 - toccare una card per selezionare BASSO LIVE, MAREA, RADICE, SCINTILLA o
   RESPIRO;
 - regolare il grande controllo **LIVELLO** della card selezionata; i cinque
@@ -190,19 +198,27 @@ durante il collegamento.
   selezionata e catturare il suono eseguito durante la pressione. Wet e feedback
   salgono senza modificare il valore DELAY salvato; dopo il rilascio rientrano
   lentamente in quattro secondi, lasciando parlare la coda;
+- tenere premuto **CODA LIBERA** per sfumare il segnale diretto della card
+  selezionata e lasciare decadere liberamente delay e riverbero gia' presenti.
+  Il bersaglio viene catturato alla pressione e resta lo stesso fino al rilascio,
+  anche se nel frattempo cambia la selezione. E' disponibile per MAREA, RADICE e
+  SCINTILLA, oltre che per RESPIRO nel percorso EFFETTI SCENA; non e' disponibile
+  per BASSO LIVE e non crea nuovi buffer o riverberi;
 - attivare **ASCOLTO** per far arretrare gradualmente soltanto il bus AMBIENTE
   quando il sax live entra, fino a circa 7 dB. BASSO LIVE, RESPIRO e routing
   fisico restano invariati; il follower riusa il meter sax del blocco precedente
   e non aggiunge una seconda analisi dell'ingresso;
-- un controller o footswitch MIDI configurato sul Keystep puo' inviare `CC80`
-  per GELO, `CC81` per ECO THROW e `CC82` per ASCOLTO. I primi due sono
-  momentanei (`0-63` rilascia, `64-127` preme); CC82 controlla direttamente
-  l'intensita' `0-127`. Questi tre CC sono consumati dal motore e non finiscono
-  nelle memorie MIDI. Il sustain `CC64` resta libero finche' non viene appreso
-  esplicitamente come pedale RESPIRO; dopo l'associazione viene consumato dal
-  comando del looper. Se si perde un rilascio
+- un controller MIDI configurato sul Keystep puo' inviare `CC80` per GELO,
+  `CC81` per ECO THROW, `CC82` per ASCOLTO, `CC83` per CODA LIBERA e `CC84`
+  per DIRADA. CC80, CC81 e CC83 sono momentanei (`0-63` rilascia, `64-127`
+  preme); CC82 controlla direttamente l'intensita' `0-127`. CC84 imposta uno
+  stato assoluto: usare `127` per accendere DIRADA e `0` per spegnerla. Questi
+  cinque CC sono consumati dal motore, non finiscono nelle memorie MIDI e non
+  possono essere appresi come pedale RESPIRO. Il sustain `CC64` resta libero
+  finche' non viene appreso esplicitamente come pedale RESPIRO; dopo
+  l'associazione viene consumato dal comando del looper. Se si perde un rilascio
   MIDI, aprire **CONNESSIONI** o usare **RILEGGI MIDI** come panic; anche
-  `CC120/123` rilasciano entrambi i momentanei;
+  `CC120/123` rilasciano i tre gesti momentanei;
 - su BASSO LIVE usare **MUTA BASSO LIVE** / **RIATTIVA BASSO LIVE**; e' un mute
   rapido e il MIDI 5 suona il basso senza essere registrato in una memoria MIDI;
 - su MAREA, RADICE e SCINTILLA, premere **SEMINA** per armare la registrazione:
@@ -507,8 +523,9 @@ sudo systemctl reboot
 
 GELO ricircola i delay gia' allocati con una matrice di feedback normalizzata;
 ECO THROW smussa l'inviluppo una volta per blocco e riusa il DSP DELAY esistente;
-ASCOLTO lavora una volta per blocco sul bus ambient gia' sommato. Nessuno dei tre
-alloca buffer, crea riverberi o aggiunge voci nel callback realtime.
+CODA LIBERA e DIRADA lavorano sui guadagni gia' preparati, mentre ASCOLTO opera
+una volta per blocco sul bus ambient gia' sommato. Nessuno dei cinque alloca
+buffer, crea riverberi o aggiunge voci nel callback realtime.
 
 Il callback MIDI del solo Keystep scrive in una FIFO preallocata. Le memorie
 vengono modificate dal thread audio; in caso di overflow viene inviato un panic

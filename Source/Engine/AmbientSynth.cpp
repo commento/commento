@@ -677,6 +677,8 @@ void AmbientSynth::prepare(double sampleRate, int maximumBlockSize)
     delayLevel.setCurrentAndTargetValue(requestedDelayLevel);
     freezeMix.reset(currentSampleRate, 0.025);
     freezeMix.setCurrentAndTargetValue(requestedFreeze ? 1.0f : 0.0f);
+    excitationGain.reset(currentSampleRate, 0.001);
+    excitationGain.setCurrentAndTargetValue(requestedFreeTail ? 0.0f : 1.0f);
     reverb.setSampleRate(currentSampleRate);
     reverb.reset();
     morphSourcePatch = patch;
@@ -759,6 +761,19 @@ void AmbientSynth::setFreezeEnabled(bool shouldFreeze) noexcept
     freezeMix.setTargetValue(requestedFreeze ? 1.0f : 0.0f);
     if (prepared)
         updateReverbParameters();
+}
+
+void AmbientSynth::setFreeTailEnabled(bool shouldReleaseTail) noexcept
+{
+    if (requestedFreeTail == shouldReleaseTail)
+        return;
+
+    requestedFreeTail = shouldReleaseTail;
+    const auto current = excitationGain.getCurrentValue();
+    excitationGain.reset(currentSampleRate,
+                         requestedFreeTail ? 0.12 : 0.24);
+    excitationGain.setCurrentAndTargetValue(current);
+    excitationGain.setTargetValue(requestedFreeTail ? 0.0f : 1.0f);
 }
 
 void AmbientSynth::allNotesOff()
@@ -948,7 +963,16 @@ void AmbientSynth::render(juce::AudioBuffer<float>& output,
                 synthesiser.getVoice(index)))
             voice->finishRenderBlock();
     if (processesAmbientEffects)
+    {
+        const auto excitationStart = excitationGain.getCurrentValue();
+        const auto excitationEnd = excitationGain.skip(numSamples);
+        if (juce::jmin(excitationStart, excitationEnd) < 0.99999f)
+            for (int channel = 0; channel < renderBuffer.getNumChannels();
+                 ++channel)
+                renderBuffer.applyGainRamp(channel, 0, numSamples,
+                                           excitationStart, excitationEnd);
         processEffects(numSamples);
+    }
     else
     {
         // Every factory bass patch is deliberately dry and its UI delay is

@@ -16,6 +16,8 @@ constexpr std::uint8_t midiGestureBit = 2u;
 constexpr int freezeController = 80;
 constexpr int echoThrowController = 81;
 constexpr int saxListenController = 82;
+constexpr int freeTailController = 83;
+constexpr int thinningController = 84;
 constexpr std::uint32_t saxFootswitchNumberMask = 0xffu;
 constexpr std::uint32_t saxFootswitchTypeShift = 8u;
 constexpr std::uint32_t saxFootswitchTypeMask = 0x7u << saxFootswitchTypeShift;
@@ -31,6 +33,8 @@ constexpr std::uint32_t saxFootswitchLearningBit = 1u << 31u;
     return controller == freezeController
         || controller == echoThrowController
         || controller == saxListenController
+        || controller == freeTailController
+        || controller == thinningController
         || controller == 120 || controller == 123;
 }
 
@@ -162,6 +166,8 @@ EcosystemEngine::EcosystemEngine()
     for (auto& mask : freezeGestureMasks)
         mask.store(0u, std::memory_order_relaxed);
     for (auto& mask : echoThrowGestureMasks)
+        mask.store(0u, std::memory_order_relaxed);
+    for (auto& mask : freeTailGestureMasks)
         mask.store(0u, std::memory_order_relaxed);
 
     const auto& initialScenario = CommentoScenarios::get(0);
@@ -350,10 +356,21 @@ void EcosystemEngine::enqueueMidiMessage(const juce::MidiMessage& message,
             setSaxListenAmount(static_cast<float>(value) / 127.0f);
             return;
         }
+        if (controller == freeTailController)
+        {
+            setMidiFreeTailEnabled(value >= 64);
+            return;
+        }
+        if (controller == thinningController)
+        {
+            setThinningEnabled(value >= 64);
+            return;
+        }
         if (controller == 120 || controller == 123)
         {
             setMidiFreezeEnabled(false);
             setMidiEchoThrowEnabled(false);
+            setMidiFreeTailEnabled(false);
         }
     }
 
@@ -715,6 +732,44 @@ bool EcosystemEngine::isEchoThrowEnabled(int memoryIndex) const noexcept
                std::memory_order_relaxed) != 0u;
 }
 
+void EcosystemEngine::setFreeTailEnabled(int memoryIndex,
+                                         bool shouldReleaseTail) noexcept
+{
+    if (memoryIndex <= bassLayerIndex
+        || ! juce::isPositiveAndBelow(memoryIndex, memoryCount))
+        return;
+
+    auto& mask = freeTailGestureMasks[static_cast<std::size_t>(memoryIndex)];
+    if (shouldReleaseTail)
+        mask.fetch_or(touchscreenGestureBit, std::memory_order_relaxed);
+    else
+        mask.fetch_and(static_cast<std::uint8_t>(~touchscreenGestureBit),
+                       std::memory_order_relaxed);
+}
+
+bool EcosystemEngine::isFreeTailEnabled(int memoryIndex) const noexcept
+{
+    return memoryIndex > bassLayerIndex
+        && juce::isPositiveAndBelow(memoryIndex, memoryCount)
+        && freeTailGestureMasks[static_cast<std::size_t>(memoryIndex)].load(
+               std::memory_order_relaxed) != 0u;
+}
+
+void EcosystemEngine::setThinningEnabled(bool shouldThin) noexcept
+{
+    thinningEnabled.store(shouldThin, std::memory_order_relaxed);
+}
+
+bool EcosystemEngine::isThinningEnabled() const noexcept
+{
+    return thinningEnabled.load(std::memory_order_relaxed);
+}
+
+int EcosystemEngine::getThinnedMemoryIndex() const noexcept
+{
+    return thinnedMemoryForDisplay.load(std::memory_order_relaxed);
+}
+
 void EcosystemEngine::setSaxListenAmount(float amount) noexcept
 {
     const auto safeAmount = std::isfinite(amount) ? amount : 0.0f;
@@ -785,14 +840,53 @@ void EcosystemEngine::setMidiEchoThrowEnabled(bool shouldThrow) noexcept
                        std::memory_order_relaxed);
 }
 
+void EcosystemEngine::setMidiFreeTailEnabled(bool shouldReleaseTail) noexcept
+{
+    if (shouldReleaseTail)
+    {
+        const auto target = gestureTarget.load(std::memory_order_relaxed);
+        const auto usableTarget = target > bassLayerIndex
+            && juce::isPositiveAndBelow(target, memoryCount) ? target : -1;
+        const auto capturedTarget = usableTarget >= 0 ? usableTarget : -2;
+        auto expected = -1;
+        if (! midiFreeTailTarget.compare_exchange_strong(
+                expected, capturedTarget, std::memory_order_relaxed,
+                std::memory_order_relaxed))
+            return;
+        if (usableTarget > bassLayerIndex)
+        {
+            freeTailGestureMasks[static_cast<std::size_t>(usableTarget)].fetch_or(
+                midiGestureBit, std::memory_order_relaxed);
+            // An audio restart can clear the captured target between the CAS
+            // and the mask update. Recheck ownership so that interleaving
+            // cannot leave CODA held without a matching MIDI release.
+            if (midiFreeTailTarget.load(std::memory_order_relaxed)
+                != capturedTarget)
+                freeTailGestureMasks[
+                    static_cast<std::size_t>(usableTarget)].fetch_and(
+                        static_cast<std::uint8_t>(~midiGestureBit),
+                        std::memory_order_relaxed);
+        }
+        return;
+    }
+
+    midiFreeTailTarget.store(-1, std::memory_order_relaxed);
+    for (auto& mask : freeTailGestureMasks)
+        mask.fetch_and(static_cast<std::uint8_t>(~midiGestureBit),
+                       std::memory_order_relaxed);
+}
+
 void EcosystemEngine::clearMomentaryGestures() noexcept
 {
     for (auto& mask : freezeGestureMasks)
         mask.store(0u, std::memory_order_relaxed);
     for (auto& mask : echoThrowGestureMasks)
         mask.store(0u, std::memory_order_relaxed);
+    for (auto& mask : freeTailGestureMasks)
+        mask.store(0u, std::memory_order_relaxed);
     midiFreezeTarget.store(-1, std::memory_order_relaxed);
     midiEchoThrowTarget.store(-1, std::memory_order_relaxed);
+    midiFreeTailTarget.store(-1, std::memory_order_relaxed);
 }
 
 int EcosystemEngine::memoryIndexForMidiChannel(int midiChannel)
@@ -922,6 +1016,18 @@ void EcosystemEngine::prepare(double newSampleRate, int maximumBlockSize)
     bassMuteGain.reset(sampleRate, 0.006);
     bassMuteGain.setCurrentAndTargetValue(bassEnabled.load() ? 1.0f : 0.0f);
     bassWasEnabled = bassEnabled.load();
+    for (auto& gain : thinningGains)
+    {
+        gain.reset(sampleRate, 0.001);
+        gain.setCurrentAndTargetValue(1.0f);
+    }
+    thinningTransitionOffsets.fill(-1);
+    activeThinnedMemory = -1;
+    scheduledThinningMemory = -1;
+    nextThinningSample = 0;
+    thinningRandomState = 0x6d2b79f5u;
+    thinningWasEnabled = false;
+    thinnedMemoryForDisplay.store(-1, std::memory_order_relaxed);
     saxListenMix.reset(sampleRate, 0.080);
     saxListenMix.setCurrentAndTargetValue(
         juce::jlimit(0.0f, 1.0f, saxListenAmount.load(
@@ -994,10 +1100,12 @@ void EcosystemEngine::prepare(double newSampleRate, int maximumBlockSize)
         // boundary note-off.
         synth->allNotesOff();
         synth->setFreezeEnabled(false);
+        synth->setFreeTailEnabled(false);
         synth->setDelayLevel(getDelayLevel(index));
         synth->prepare(sampleRate, maximumBlockSize);
     }
     saxProcessor.setFreezeEnabled(false);
+    saxProcessor.setFreeTailEnabled(false);
     saxProcessor.setDelayLevel(getDelayLevel(midiMemoryCount));
     saxProcessor.prepare(sampleRate, maximumBlockSize);
     fourHeadSaxLoopMix.reset(sampleRate, 0.001);
@@ -1035,6 +1143,11 @@ void EcosystemEngine::audioDeviceStopped()
     bassOutputLevel.store(0.0f);
     saxOutputLevel.store(0.0f);
     saxSafetyMuted.store(false);
+    activeThinnedMemory = -1;
+    scheduledThinningMemory = -1;
+    nextThinningSample = 0;
+    thinningWasEnabled = false;
+    thinnedMemoryForDisplay.store(-1, std::memory_order_relaxed);
     saxDangerSamples = 0;
     saxRecoverySamples = 0;
     saxSafetyGain = 1.0f;
@@ -1143,6 +1256,7 @@ void EcosystemEngine::audioDeviceIOCallbackWithContext(
             juce::FloatVectorOperations::clear(outputChannelData[channel], numSamples);
 
     evolutionSampleClock += juce::jmax(0, numSamples);
+    thinningTransitionOffsets.fill(-1);
     const auto evolutionEnabledNow = loopEvolutionEnabled.load(
         std::memory_order_relaxed);
     if (evolutionEnabledNow && ! evolutionWasEnabled)
@@ -1156,6 +1270,7 @@ void EcosystemEngine::audioDeviceIOCallbackWithContext(
     else if (! evolutionEnabledNow)
         nextEvolutionSample = 0;
     evolutionWasEnabled = evolutionEnabledNow;
+    updateThinningState();
 
     blockMidiOutput.clear();
     if (midiOverflowed.exchange(false))
@@ -1467,6 +1582,184 @@ void EcosystemEngine::updateMomentaryGestureTargets(int numSamples) noexcept
     echoThrowBlockAmounts[static_cast<std::size_t>(bassLayerIndex)] = 0.0f;
 }
 
+void EcosystemEngine::setThinningGainTarget(int memoryIndex, float target,
+                                             int transitionOffset) noexcept
+{
+    if (memoryIndex <= bassLayerIndex
+        || ! juce::isPositiveAndBelow(memoryIndex, midiMemoryCount))
+        return;
+
+    auto& gain = thinningGains[static_cast<std::size_t>(memoryIndex)];
+    const auto safeTarget = juce::jlimit(0.0f, 1.0f, target);
+    if (std::abs(gain.getTargetValue() - safeTarget) <= 0.0001f)
+        return;
+
+    const auto current = gain.getCurrentValue();
+    gain.reset(sampleRate, safeTarget < current ? 0.18 : 0.65);
+    gain.setCurrentAndTargetValue(current);
+    gain.setTargetValue(safeTarget);
+    thinningTransitionOffsets[static_cast<std::size_t>(memoryIndex)]
+        = juce::jmax(0, transitionOffset);
+}
+
+void EcosystemEngine::scheduleNextThinning(bool firstGesture) noexcept
+{
+    if (! thinningEnabled.load(std::memory_order_relaxed)
+        || activeThinnedMemory >= 0)
+        return;
+
+    std::array<int, midiMemoryCount - 1> candidates {};
+    auto candidateCount = 0;
+    for (int index = 1; index < midiMemoryCount; ++index)
+    {
+        const auto& memory = midiMemories[static_cast<std::size_t>(index)];
+        if (! memory.recordingActive && memory.loopLength > 0
+            && ! memory.events.empty())
+            candidates[static_cast<std::size_t>(candidateCount++)] = index;
+    }
+
+    if (candidateCount <= 0)
+    {
+        scheduledThinningMemory = -1;
+        nextThinningSample = evolutionSampleClock
+            + static_cast<int64_t>(std::round(sampleRate));
+        return;
+    }
+
+    const auto random = nextEvolutionRandom(thinningRandomState);
+    scheduledThinningMemory = candidates[static_cast<std::size_t>(
+        random % static_cast<std::uint32_t>(candidateCount))];
+    const auto delaySeconds = firstGesture
+        ? 4u + ((random >> 8) % 3u)
+        : 14u + ((random >> 8) % 15u);
+    nextThinningSample = evolutionSampleClock
+        + static_cast<int64_t>(std::round(
+            sampleRate * static_cast<double>(delaySeconds)));
+}
+
+void EcosystemEngine::updateThinningState() noexcept
+{
+    const auto enabledNow = thinningEnabled.load(std::memory_order_relaxed);
+    if (! enabledNow)
+    {
+        // A rest already in progress completes at its own wrap. Resuming from
+        // the middle would miss any note-on skipped near the start of the
+        // cycle; finishing the rotation preserves both phase and note state.
+        scheduledThinningMemory = -1;
+        nextThinningSample = 0;
+        thinningWasEnabled = false;
+        return;
+    }
+
+    if (! thinningWasEnabled)
+    {
+        thinningWasEnabled = true;
+        scheduleNextThinning(true);
+        return;
+    }
+
+    if (activeThinnedMemory >= 0)
+        return;
+
+    const auto scheduledIsUsable = [this]() noexcept
+    {
+        if (! juce::isPositiveAndBelow(scheduledThinningMemory,
+                                       midiMemoryCount)
+            || scheduledThinningMemory == bassLayerIndex)
+            return false;
+        const auto& memory = midiMemories[
+            static_cast<std::size_t>(scheduledThinningMemory)];
+        return ! memory.recordingActive && memory.loopLength > 0
+            && ! memory.events.empty();
+    };
+
+    if (! scheduledIsUsable())
+    {
+        scheduledThinningMemory = -1;
+        if (nextThinningSample <= 0
+            || evolutionSampleClock >= nextThinningSample)
+            scheduleNextThinning(false);
+    }
+}
+
+void EcosystemEngine::startThinningCycle(int memoryIndex, int outputOffset,
+                                          int numSamples,
+                                          juce::MidiBuffer& output) noexcept
+{
+    if (! thinningEnabled.load(std::memory_order_relaxed)
+        || activeThinnedMemory >= 0
+        || memoryIndex != scheduledThinningMemory
+        || evolutionSampleClock < nextThinningSample
+        || memoryIndex <= bassLayerIndex
+        || ! juce::isPositiveAndBelow(memoryIndex, midiMemoryCount))
+        return;
+
+    auto& memory = midiMemories[static_cast<std::size_t>(memoryIndex)];
+    if (memory.recordingActive || memory.loopLength <= 0
+        || memory.events.empty())
+        return;
+
+    // The gain renderer stores one transition point per layer and callback.
+    // If this very short loop could also finish in the samples still pending,
+    // defer its start to the last wrap of the block. The silent rotation then
+    // spans two callbacks, so its fade-out cannot be overwritten by fade-in.
+    const auto clampedOffset = juce::jlimit(0, numSamples, outputOffset);
+    const auto samplesRemaining = numSamples - clampedOffset;
+    if (memory.loopLength <= static_cast<int64_t>(samplesRemaining))
+        return;
+
+    activeThinnedMemory = memoryIndex;
+    scheduledThinningMemory = -1;
+    thinnedMemoryForDisplay.store(memoryIndex, std::memory_order_relaxed);
+    setThinningGainTarget(memoryIndex, 0.0f, outputOffset);
+
+    const auto eventOffset = juce::jlimit(0, juce::jmax(0, numSamples - 1),
+                                          outputOffset);
+    output.addEvent(juce::MidiMessage::allNotesOff(
+                        midiChannels[static_cast<std::size_t>(memoryIndex)]),
+                    eventOffset);
+    output.addEvent(juce::MidiMessage::allNotesOff(
+                        evolutionMidiChannels[
+                            static_cast<std::size_t>(memoryIndex)]),
+                    eventOffset);
+    memory.evolution = LoopEvolution::normal;
+    memory.evolutionForDisplay.store(static_cast<int>(LoopEvolution::normal),
+                                     std::memory_order_relaxed);
+    if (activeMidiEvolutionMemory == memoryIndex)
+        activeMidiEvolutionMemory = -1;
+}
+
+void EcosystemEngine::finishThinningCycle(int memoryIndex,
+                                           int outputOffset) noexcept
+{
+    if (activeThinnedMemory != memoryIndex)
+        return;
+
+    setThinningGainTarget(memoryIndex, 1.0f, outputOffset);
+    activeThinnedMemory = -1;
+    thinnedMemoryForDisplay.store(-1, std::memory_order_relaxed);
+    scheduleNextThinning(false);
+}
+
+void EcosystemEngine::cancelThinningForMemory(int memoryIndex) noexcept
+{
+    if (activeThinnedMemory == memoryIndex)
+    {
+        setThinningGainTarget(memoryIndex, 1.0f, 0);
+        activeThinnedMemory = -1;
+        thinnedMemoryForDisplay.store(-1, std::memory_order_relaxed);
+        scheduledThinningMemory = -1;
+        nextThinningSample = evolutionSampleClock
+            + static_cast<int64_t>(std::round(sampleRate));
+    }
+    else if (scheduledThinningMemory == memoryIndex)
+    {
+        scheduledThinningMemory = -1;
+        nextThinningSample = evolutionSampleClock
+            + static_cast<int64_t>(std::round(sampleRate));
+    }
+}
+
 void EcosystemEngine::prepareSaxListenBlock(int numSamples) noexcept
 {
     saxListenBlockGainStart = 1.0f;
@@ -1595,6 +1888,7 @@ void EcosystemEngine::applyMidiCommands(MidiMemory& memory, int channel,
         ? evolutionMidiChannels[static_cast<std::size_t>(memoryIndex)] : 0;
     if (memory.clearRequested.exchange(false))
     {
+        cancelThinningForMemory(memoryIndex);
         memory.events.clear();
         memory.loopLength = 0;
         memory.recordPosition = 0;
@@ -1631,6 +1925,8 @@ void EcosystemEngine::applyMidiCommands(MidiMemory& memory, int channel,
     memory.recordingForDisplay.store(shouldRecord);
     memory.waitingForFirstNote = shouldRecord;
     memory.waitingForFirstNoteForDisplay.store(shouldRecord);
+    if (shouldRecord)
+        cancelThinningForMemory(memoryIndex);
     output.addEvent(juce::MidiMessage::allNotesOff(channel), 0);
     if (ghostChannel > 0)
         output.addEvent(juce::MidiMessage::allNotesOff(ghostChannel), 0);
@@ -2020,9 +2316,38 @@ void EcosystemEngine::renderInternalSynths(float* const* outputs, int outputChan
             static_cast<std::size_t>(layer)];
         synth->setDelayLevel(juce::jmax(getDelayLevel(layer), throwAmount));
         synth->setFreezeEnabled(isFreezeEnabled(layer));
+        synth->setFreeTailEnabled(isFreeTailEnabled(layer));
         synth->render(
             layerSynthBuffer, layerMidi, 0, numSamples);
         performanceLevels.process(layer, layerSynthBuffer, numSamples);
+        if (layer > bassLayerIndex)
+        {
+            auto& thinningGain = thinningGains[
+                static_cast<std::size_t>(layer)];
+            const auto requestedOffset = thinningTransitionOffsets[
+                static_cast<std::size_t>(layer)];
+            const auto rampOffset = requestedOffset >= 0
+                ? juce::jlimit(0, numSamples, requestedOffset) : 0;
+            const auto prefixGain = thinningGain.getCurrentValue();
+            if (rampOffset > 0 && prefixGain < 0.99999f)
+                for (int channel = 0;
+                     channel < layerSynthBuffer.getNumChannels(); ++channel)
+                    layerSynthBuffer.applyGain(channel, 0, rampOffset,
+                                               prefixGain);
+
+            const auto rampSamples = numSamples - rampOffset;
+            if (rampSamples > 0)
+            {
+                const auto thinningStart = thinningGain.getCurrentValue();
+                const auto thinningEnd = thinningGain.skip(rampSamples);
+                if (juce::jmin(thinningStart, thinningEnd) < 0.99999f)
+                    for (int channel = 0;
+                         channel < layerSynthBuffer.getNumChannels(); ++channel)
+                        layerSynthBuffer.applyGainRamp(
+                            channel, rampOffset, rampSamples,
+                            thinningStart, thinningEnd);
+            }
+        }
         if (layer == bassLayerIndex)
         {
             const auto muteTarget = bassWasEnabled ? 1.0f : 0.0f;
@@ -2255,10 +2580,15 @@ void EcosystemEngine::renderMidiMemories(int numSamples, juce::MidiBuffer& outpu
         {
             const auto untilWrap = static_cast<int>(std::min<int64_t>(
                 remaining, memory.loopLength - memory.playbackPosition));
-            renderMidiSegment(memory, memory.playbackPosition, untilWrap,
-                              outputOffset, output);
-            renderMidiEvolutionSegment(memory, index, memory.playbackPosition,
-                                       untilWrap, outputOffset, output);
+            const auto thinningThisSegment = activeThinnedMemory == index;
+            if (! thinningThisSegment)
+            {
+                renderMidiSegment(memory, memory.playbackPosition, untilWrap,
+                                  outputOffset, output);
+                renderMidiEvolutionSegment(memory, index,
+                                           memory.playbackPosition,
+                                           untilWrap, outputOffset, output);
+            }
             memory.playbackPosition += untilWrap;
             remaining -= untilWrap;
             outputOffset += untilWrap;
@@ -2270,7 +2600,10 @@ void EcosystemEngine::renderMidiMemories(int numSamples, juce::MidiBuffer& outpu
                         evolutionMidiChannels[static_cast<std::size_t>(index)]),
                         juce::jlimit(0, numSamples - 1, outputOffset));
                 memory.playbackPosition = 0;
+                if (activeThinnedMemory == index)
+                    finishThinningCycle(index, outputOffset);
                 chooseMidiEvolution(memory, index);
+                startThinningCycle(index, outputOffset, numSamples, output);
             }
         }
         memory.phase.store(static_cast<double>(memory.playbackPosition)
@@ -2381,6 +2714,7 @@ void EcosystemEngine::renderAudioMemory(
         getDelayLevel(saxGestureIndex),
         echoThrowBlockAmounts[static_cast<std::size_t>(saxGestureIndex)]));
     saxProcessor.setFreezeEnabled(isFreezeEnabled(saxGestureIndex));
+    saxProcessor.setFreeTailEnabled(isFreeTailEnabled(saxGestureIndex));
     const auto inputAllowed = pathMode != SaxPathMode::muted
         && ! saxSafetyMuted.load();
 

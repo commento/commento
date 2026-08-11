@@ -270,6 +270,9 @@ public:
                 detail += "  /  OMBRA +12";
             else if (evolution == EcosystemEngine::LoopEvolution::reverse)
                 detail += "  /  OMBRA REVERSE";
+
+            if (engine.getThinnedMemoryIndex() == index)
+                detail += "  /  RESPIRA";
         }
 
         graphics.setColour(captureActive ? juce::Colours::white
@@ -494,6 +497,8 @@ MainComponent::MainComponent()
     styleButton(evolutionButton, juce::Colour(0xff9b7ed9));
     styleButton(freezeButton, juce::Colour(0xff8cc8d8));
     styleButton(echoThrowButton, juce::Colour(0xffd0a15d));
+    styleButton(freeTailButton, juce::Colour(0xff75bfa8));
+    styleButton(thinningButton, juce::Colour(0xff8e84c7));
     styleButton(saxListenButton, juce::Colour(0xff65b6a6));
     styleButton(applyAudioButton, juce::Colour(0xff5da8a1));
     styleButton(rescanAudioButton, juce::Colour(0xff7895b8));
@@ -513,6 +518,8 @@ MainComponent::MainComponent()
     addAndMakeVisible(evolutionButton);
     addAndMakeVisible(freezeButton);
     addAndMakeVisible(echoThrowButton);
+    addAndMakeVisible(freeTailButton);
+    addAndMakeVisible(thinningButton);
     addAndMakeVisible(saxListenButton);
     addChildComponent(applyAudioButton);
     addChildComponent(rescanAudioButton);
@@ -641,6 +648,33 @@ MainComponent::MainComponent()
             engine.setEchoThrowEnabled(touchscreenEchoThrowTarget, false);
             touchscreenEchoThrowTarget = -1;
         }
+    };
+    freeTailButton.onStateChange = [this]
+    {
+        if (freeTailButton.isDown())
+        {
+            const auto saxEffectsAvailable =
+                selectedMemory != EcosystemEngine::midiMemoryCount
+                || engine.getSaxPathMode()
+                    == EcosystemEngine::SaxPathMode::sceneEffects;
+            if (touchscreenFreeTailTarget < 0
+                && ! EcosystemEngine::isLiveBassLayer(selectedMemory)
+                && saxEffectsAvailable)
+            {
+                touchscreenFreeTailTarget = selectedMemory;
+                engine.setFreeTailEnabled(touchscreenFreeTailTarget, true);
+            }
+        }
+        else if (touchscreenFreeTailTarget >= 0)
+        {
+            engine.setFreeTailEnabled(touchscreenFreeTailTarget, false);
+            touchscreenFreeTailTarget = -1;
+        }
+    };
+    thinningButton.onClick = [this]
+    {
+        engine.setThinningEnabled(! engine.isThinningEnabled());
+        updateControls();
     };
     saxListenButton.onClick = [this] { toggleSaxListening(); };
     previousScenarioButton.onClick = [this] { changeScenario(-1); };
@@ -2337,6 +2371,7 @@ void MainComponent::updateControls()
     const auto gesturesAvailable = ! isBass && saxEffectsAvailable;
     freezeButton.setEnabled(gesturesAvailable);
     echoThrowButton.setEnabled(gesturesAvailable);
+    freeTailButton.setEnabled(gesturesAvailable);
     freezeButton.setButtonText(engine.isFreezeEnabled(selectedMemory)
         ? "GELO: ATTIVO" : "GELO: TIENI");
     echoThrowButton.setButtonText(engine.isEchoThrowEnabled(selectedMemory)
@@ -2344,7 +2379,21 @@ void MainComponent::updateControls()
     freezeButton.setToggleState(engine.isFreezeEnabled(selectedMemory),
                                 juce::dontSendNotification);
     echoThrowButton.setToggleState(engine.isEchoThrowEnabled(selectedMemory),
-                                   juce::dontSendNotification);
+                                    juce::dontSendNotification);
+    const auto freeTailTarget = touchscreenFreeTailTarget >= 0
+        ? touchscreenFreeTailTarget : selectedMemory;
+    const auto freeTailActive = engine.isFreeTailEnabled(freeTailTarget);
+    freeTailButton.setButtonText(freeTailActive
+        ? "CODA LIBERA: ATTIVA" : "CODA LIBERA: TIENI");
+    freeTailButton.setToggleState(freeTailActive,
+                                  juce::dontSendNotification);
+    const auto thinningEnabled = engine.isThinningEnabled();
+    const auto thinnedMemory = engine.getThinnedMemoryIndex();
+    thinningButton.setButtonText(! thinningEnabled
+        ? (thinnedMemory >= 1 ? "DIRADA: FINISCE" : "DIRADA: SPENTA")
+        : (thinnedMemory >= 1 ? "DIRADA: RESPIRA" : "DIRADA: ATTIVA"));
+    thinningButton.setToggleState(thinningEnabled,
+                                  juce::dontSendNotification);
     const auto listening = engine.getSaxListenAmount();
     saxListenButton.setButtonText(listening <= 0.005f
         ? "ASCOLTO: SPENTO"
@@ -2389,6 +2438,11 @@ void MainComponent::toggleSettings()
             engine.setEchoThrowEnabled(touchscreenEchoThrowTarget, false);
             touchscreenEchoThrowTarget = -1;
         }
+        if (touchscreenFreeTailTarget >= 0)
+        {
+            engine.setFreeTailEnabled(touchscreenFreeTailTarget, false);
+            touchscreenFreeTailTarget = -1;
+        }
     }
     if (! settingsVisible
         && (audioDraft.tone != EcosystemEngine::DiagnosticToneBus::off
@@ -2427,6 +2481,8 @@ void MainComponent::toggleSettings()
     evolutionButton.setVisible(! settingsVisible);
     freezeButton.setVisible(! settingsVisible);
     echoThrowButton.setVisible(! settingsVisible);
+    freeTailButton.setVisible(! settingsVisible);
+    thinningButton.setVisible(! settingsVisible);
     saxListenButton.setVisible(! settingsVisible);
     decaySlider.setVisible(! settingsVisible
         && selectedMemory == EcosystemEngine::midiMemoryCount);
@@ -2545,6 +2601,8 @@ void MainComponent::resized()
         levelArea.removeFromRight(105).reduced(3, 2));
     saxListenButton.setBounds(
         levelArea.removeFromRight(185).reduced(3, 2));
+    thinningButton.setBounds(
+        levelArea.removeFromRight(175).reduced(3, 2));
     performanceLevelSlider.setBounds(levelArea.reduced(2, 0));
     delayLevelLabel.setBounds(delayArea.removeFromLeft(270));
     delayArea.removeFromLeft(14);
@@ -2554,6 +2612,8 @@ void MainComponent::resized()
         delayArea.removeFromRight(165).reduced(3, 2));
     freezeButton.setBounds(
         delayArea.removeFromRight(135).reduced(3, 2));
+    freeTailButton.setBounds(
+        delayArea.removeFromRight(185).reduced(3, 2));
     delayLevelSlider.setBounds(delayArea.reduced(2, 0));
     const auto saxHeight = juce::jlimit(170, 270,
         static_cast<int>(static_cast<float>(performanceArea.getHeight()) * 0.28f));

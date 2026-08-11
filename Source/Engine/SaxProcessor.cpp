@@ -52,6 +52,8 @@ void SaxProcessor::prepare(double newSampleRate, int maximumBlockSize)
     delayLevel.setCurrentAndTargetValue(requestedDelayLevel);
     freezeMix.reset(sampleRate, 0.025);
     freezeMix.setCurrentAndTargetValue(requestedFreeze ? 1.0f : 0.0f);
+    excitationGain.reset(sampleRate, 0.001);
+    excitationGain.setCurrentAndTargetValue(requestedFreeTail ? 0.0f : 1.0f);
     reverb.setSampleRate(sampleRate);
     prepared = true;
     resetTails();
@@ -117,6 +119,18 @@ void SaxProcessor::setFreezeEnabled(bool shouldFreeze) noexcept
 
     requestedFreeze = shouldFreeze;
     freezeMix.setTargetValue(requestedFreeze ? 1.0f : 0.0f);
+}
+
+void SaxProcessor::setFreeTailEnabled(bool shouldReleaseTail) noexcept
+{
+    if (requestedFreeTail == shouldReleaseTail)
+        return;
+
+    requestedFreeTail = shouldReleaseTail;
+    const auto current = excitationGain.getCurrentValue();
+    excitationGain.reset(sampleRate, requestedFreeTail ? 0.12 : 0.24);
+    excitationGain.setCurrentAndTargetValue(current);
+    excitationGain.setTargetValue(requestedFreeTail ? 0.0f : 1.0f);
 }
 
 void SaxProcessor::updateTargets(bool immediately, double transitionSeconds)
@@ -218,11 +232,18 @@ void SaxProcessor::process(juce::AudioBuffer<float>& buffer, int numSamples)
         incrementalClearPosition += samplesToClear;
         if (incrementalClearPosition >= delayBuffer.getNumSamples())
             incrementalClearPosition = -1;
+        excitationGain.skip(numSamples);
         buffer.clear(0, numSamples);
         return;
     }
 
     juce::ScopedNoDenormals noDenormals;
+    const auto excitationStart = excitationGain.getCurrentValue();
+    const auto excitationEnd = excitationGain.skip(numSamples);
+    if (juce::jmin(excitationStart, excitationEnd) < 0.99999f)
+        for (int channel = 0; channel < 2; ++channel)
+            buffer.applyGainRamp(channel, 0, numSamples,
+                                 excitationStart, excitationEnd);
     updateReverbParameters(numSamples);
     auto* left = buffer.getWritePointer(0);
     auto* right = buffer.getWritePointer(1);
@@ -371,6 +392,7 @@ void SaxProcessor::advanceMorph(int numSamples) noexcept
     advance(delayMix);
     advance(delayLevel);
     advance(freezeMix);
+    advance(excitationGain);
     advance(modulationDepthSamples);
     advance(modulationRateHz);
     advance(tremoloDepth);

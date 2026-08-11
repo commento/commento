@@ -144,6 +144,11 @@ public:
     [[nodiscard]] bool isFreezeEnabled(int memoryIndex) const noexcept;
     void setEchoThrowEnabled(int memoryIndex, bool shouldThrow) noexcept;
     [[nodiscard]] bool isEchoThrowEnabled(int memoryIndex) const noexcept;
+    void setFreeTailEnabled(int memoryIndex, bool shouldReleaseTail) noexcept;
+    [[nodiscard]] bool isFreeTailEnabled(int memoryIndex) const noexcept;
+    void setThinningEnabled(bool shouldThin) noexcept;
+    [[nodiscard]] bool isThinningEnabled() const noexcept;
+    [[nodiscard]] int getThinnedMemoryIndex() const noexcept;
     void setSaxListenAmount(float amount) noexcept;
     [[nodiscard]] float getSaxListenAmount() const noexcept;
     void releaseMomentaryGestures() noexcept;
@@ -258,6 +263,14 @@ private:
     void advanceScenarioMorph(int numSamples) noexcept;
     void updatePerformanceEffectTargets() noexcept;
     void updateMomentaryGestureTargets(int numSamples) noexcept;
+    void updateThinningState() noexcept;
+    void scheduleNextThinning(bool firstGesture) noexcept;
+    void startThinningCycle(int memoryIndex, int outputOffset,
+                            int numSamples, juce::MidiBuffer& output) noexcept;
+    void finishThinningCycle(int memoryIndex, int outputOffset) noexcept;
+    void cancelThinningForMemory(int memoryIndex) noexcept;
+    void setThinningGainTarget(int memoryIndex, float target,
+                               int transitionOffset) noexcept;
     void prepareSaxListenBlock(int numSamples) noexcept;
     void processPerformanceEffects(float* const* outputs, int outputChannels,
                                    int numSamples) noexcept;
@@ -286,6 +299,7 @@ private:
                               int numSamples);
     void setMidiFreezeEnabled(bool shouldFreeze) noexcept;
     void setMidiEchoThrowEnabled(bool shouldThrow) noexcept;
+    void setMidiFreeTailEnabled(bool shouldReleaseTail) noexcept;
     void clearMomentaryGestures() noexcept;
     [[nodiscard]] bool consumeSaxFootswitchMessage(
         const juce::MidiMessage& message, MidiInputRole role) noexcept;
@@ -311,9 +325,11 @@ private:
     // other without locks or message-thread callbacks.
     std::array<std::atomic<std::uint8_t>, memoryCount> freezeGestureMasks;
     std::array<std::atomic<std::uint8_t>, memoryCount> echoThrowGestureMasks;
+    std::array<std::atomic<std::uint8_t>, memoryCount> freeTailGestureMasks;
     std::atomic<int> gestureTarget { bassLayerIndex };
     std::atomic<int> midiFreezeTarget { -1 };
     std::atomic<int> midiEchoThrowTarget { -1 };
+    std::atomic<int> midiFreeTailTarget { -1 };
     // Binding, learn and edge state share one lock-free word, so MIDI input and
     // UI threads cannot observe a partially published learned assignment.
     std::atomic<std::uint32_t> saxFootswitchState { 0u };
@@ -321,6 +337,16 @@ private:
                memoryCount> echoThrowMixes;
     std::array<float, memoryCount> echoThrowBlockAmounts {};
     std::array<bool, memoryCount> echoThrowWasActive {};
+    std::atomic<bool> thinningEnabled { false };
+    std::atomic<int> thinnedMemoryForDisplay { -1 };
+    std::array<juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear>,
+               midiMemoryCount> thinningGains;
+    std::array<int, midiMemoryCount> thinningTransitionOffsets {};
+    int activeThinnedMemory = -1;
+    int scheduledThinningMemory = -1;
+    int64_t nextThinningSample = 0;
+    std::uint32_t thinningRandomState = 0x6d2b79f5u;
+    bool thinningWasEnabled = false;
     std::atomic<float> saxListenAmount { 0.0f };
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> saxListenMix;
     float saxListenEnvelope = 0.0f;

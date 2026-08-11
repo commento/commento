@@ -96,6 +96,8 @@ private:
     juce::TextButton evolutionButton { "DERIVA: SPENTA" };
     juce::TextButton freezeButton { "GELO" };
     juce::TextButton echoThrowButton { "ECO THROW" };
+    juce::TextButton freeTailButton { "CODA LIBERA: TIENI" };
+    juce::TextButton thinningButton { "DIRADA: SPENTA" };
     juce::TextButton saxListenButton { "ASCOLTO: SPENTO" };
     juce::TextButton applyAudioButton { "APPLICA AUDIO" };
     juce::TextButton rescanAudioButton { "RILEGGI DISPOSITIVI" };
@@ -159,6 +161,7 @@ private:
     double animationPhase = 0.0;
     int touchscreenFreezeTarget = -1;
     int touchscreenEchoThrowTarget = -1;
+    int touchscreenFreeTailTarget = -1;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MainComponent)
 };

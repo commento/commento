@@ -189,12 +189,15 @@ int main()
                          "DERIVA deve partire spenta");
         passed &= expect(defaultEngine.isSaxStereoInput(),
                          "RESPIRO deve partire in stereo sugli ingressi 7/8");
-        auto gesturesStartOff = defaultEngine.getSaxListenAmount() == 0.0f;
+        auto gesturesStartOff = defaultEngine.getSaxListenAmount() == 0.0f
+            && ! defaultEngine.isThinningEnabled()
+            && defaultEngine.getThinnedMemoryIndex() == -1;
         for (int memory = 0; memory < EcosystemEngine::memoryCount; ++memory)
             gesturesStartOff &= ! defaultEngine.isFreezeEnabled(memory)
-                && ! defaultEngine.isEchoThrowEnabled(memory);
+                && ! defaultEngine.isEchoThrowEnabled(memory)
+                && ! defaultEngine.isFreeTailEnabled(memory);
         passed &= expect(gesturesStartOff,
-                         "GELO, ECO THROW e ASCOLTO devono partire spenti");
+                         "GELO, ECO THROW, CODA, ASCOLTO e DIRADA devono partire spenti");
 
         // MIDI 5 is the dedicated live bass and deliberately owns neither a
         // delay nor a reverb tail. Both the direct UI API and the global MIDI
@@ -202,14 +205,20 @@ int main()
         defaultEngine.setFreezeEnabled(EcosystemEngine::bassLayerIndex, true);
         defaultEngine.setEchoThrowEnabled(EcosystemEngine::bassLayerIndex,
                                           true);
+        defaultEngine.setFreeTailEnabled(EcosystemEngine::bassLayerIndex,
+                                         true);
         defaultEngine.setGestureTarget(EcosystemEngine::bassLayerIndex);
         defaultEngine.enqueueMidiMessage(
             juce::MidiMessage::controllerEvent(5, 80, 127));
         defaultEngine.enqueueMidiMessage(
             juce::MidiMessage::controllerEvent(5, 81, 127));
+        defaultEngine.enqueueMidiMessage(
+            juce::MidiMessage::controllerEvent(5, 83, 127));
         passed &= expect(! defaultEngine.isFreezeEnabled(
                               EcosystemEngine::bassLayerIndex)
                              && ! defaultEngine.isEchoThrowEnabled(
+                                 EcosystemEngine::bassLayerIndex)
+                             && ! defaultEngine.isFreeTailEnabled(
                                  EcosystemEngine::bassLayerIndex),
                          "il basso MIDI 5 deve restare escluso dai gesti di coda");
     }
@@ -219,7 +228,7 @@ int main()
                                 CommentoScenarios::count) == 0,
                      "la selezione scenario deve essere circolare");
 
-    // The three dedicated MIDI controls are global performance controls, not
+    // The five dedicated MIDI controls are global performance controls, not
     // material for the loop recorder. Their state changes synchronously on
     // the MIDI thread, so threshold and ownership can be tested without any
     // scheduler-sensitive sleeps.
@@ -280,6 +289,42 @@ int main()
         controlEngine.enqueueMidiMessage(
             juce::MidiMessage::controllerEvent(2, 82, 0));
 
+        controlEngine.setGestureTarget(1);
+        controlEngine.enqueueMidiMessage(
+            juce::MidiMessage::controllerEvent(2, 83, 63));
+        const auto freeTailBelowThreshold
+            = ! controlEngine.isFreeTailEnabled(1);
+        controlEngine.enqueueMidiMessage(
+            juce::MidiMessage::controllerEvent(2, 83, 64));
+        controlEngine.setGestureTarget(2);
+        controlEngine.enqueueMidiMessage(
+            juce::MidiMessage::controllerEvent(2, 83, 127));
+        const auto freeTailCapturedTarget
+            = controlEngine.isFreeTailEnabled(1)
+            && ! controlEngine.isFreeTailEnabled(2);
+        controlEngine.enqueueMidiMessage(
+            juce::MidiMessage::controllerEvent(2, 83, 0));
+        const auto freeTailReleasedCapturedTarget
+            = ! controlEngine.isFreeTailEnabled(1)
+            && ! controlEngine.isFreeTailEnabled(2);
+
+        controlEngine.enqueueMidiMessage(
+            juce::MidiMessage::controllerEvent(2, 84, 63));
+        const auto thinningBelowThreshold
+            = ! controlEngine.isThinningEnabled();
+        controlEngine.enqueueMidiMessage(
+            juce::MidiMessage::controllerEvent(2, 84, 64));
+        controlEngine.enqueueMidiMessage(
+            juce::MidiMessage::controllerEvent(2, 84, 127));
+        const auto thinningDuplicateHighStayedOn
+            = controlEngine.isThinningEnabled();
+        controlEngine.enqueueMidiMessage(
+            juce::MidiMessage::controllerEvent(2, 84, 63));
+        controlEngine.enqueueMidiMessage(
+            juce::MidiMessage::controllerEvent(2, 84, 0));
+        const auto thinningDuplicateLowStayedOff
+            = ! controlEngine.isThinningEnabled();
+
         passed &= expect(freezeBelowThreshold && freezeCapturedTarget
                              && freezeReleasedCapturedTarget
                              && touchscreenStillOwnsFreeze,
@@ -291,16 +336,26 @@ int main()
                              && fullListen == 1.0f
                              && controlEngine.getSaxListenAmount() == 0.0f,
                          "CC82 deve controllare ASCOLTO sull'intero intervallo 0..1");
+        passed &= expect(freeTailBelowThreshold && freeTailCapturedTarget
+                             && freeTailReleasedCapturedTarget,
+                         "CC83 deve essere momentaneo e rilasciare il target catturato");
+        passed &= expect(thinningBelowThreshold
+                             && thinningDuplicateHighStayedOn
+                             && thinningDuplicateLowStayedOff,
+                         "CC84 deve impostare DIRADA in modo assoluto e idempotente");
 
         controlEngine.setGestureTarget(2);
         controlEngine.enqueueMidiMessage(
             juce::MidiMessage::controllerEvent(3, 80, 127));
         controlEngine.enqueueMidiMessage(
             juce::MidiMessage::controllerEvent(3, 81, 127));
+        controlEngine.enqueueMidiMessage(
+            juce::MidiMessage::controllerEvent(3, 83, 127));
         controlEngine.releaseMomentaryGestures();
         passed &= expect(! controlEngine.isFreezeEnabled(2)
-                             && ! controlEngine.isEchoThrowEnabled(2),
-                         "il panic deve liberare GELO ed ECO THROW su ogni card");
+                             && ! controlEngine.isEchoThrowEnabled(2)
+                             && ! controlEngine.isFreeTailEnabled(2),
+                         "il panic deve liberare GELO, ECO THROW e CODA su ogni card");
 
         controlEngine.setDelayLevel(1, 0.0f);
         controlEngine.prepare(gestureSampleRate, gestureBlockSize);
@@ -314,6 +369,10 @@ int main()
             juce::MidiMessage::controllerEvent(2, 81, 127));
         controlEngine.enqueueMidiMessage(
             juce::MidiMessage::controllerEvent(2, 82, 96));
+        controlEngine.enqueueMidiMessage(
+            juce::MidiMessage::controllerEvent(2, 83, 127));
+        controlEngine.enqueueMidiMessage(
+            juce::MidiMessage::controllerEvent(2, 84, 127));
         process(controlEngine, nullptr, 0, controlOutput.pointers.data(),
                 EcosystemEngine::logicalOutputBusCount, gestureBlockSize);
         const auto controllersDidNotStartCapture
@@ -335,6 +394,10 @@ int main()
             juce::MidiMessage::controllerEvent(2, 81, 0));
         controlEngine.enqueueMidiMessage(
             juce::MidiMessage::controllerEvent(2, 82, 0));
+        controlEngine.enqueueMidiMessage(
+            juce::MidiMessage::controllerEvent(2, 83, 0));
+        controlEngine.enqueueMidiMessage(
+            juce::MidiMessage::controllerEvent(2, 84, 0));
         controlEngine.enqueueMidiMessage(juce::MidiMessage::noteOff(2, 57));
         controlOutput.clear();
         process(controlEngine, nullptr, 0, controlOutput.pointers.data(),
@@ -345,8 +408,9 @@ int main()
                 EcosystemEngine::logicalOutputBusCount, gestureBlockSize);
         passed &= expect(controllersDidNotStartCapture
                              && controlEngine.hasMaterial(1)
-                             && controlEngine.getEventCount(1) == 2,
-                         "CC80-82 devono essere consumati e mai registrati nel loop MIDI");
+                             && controlEngine.getEventCount(1) == 2
+                             && ! controlEngine.isThinningEnabled(),
+                         "CC80-84 devono essere consumati e mai registrati nel loop MIDI");
 
         // Exercise both tails briefly with the recorded phrase. This is a
         // signal-safety invariant, not a wall-clock performance benchmark.
@@ -391,6 +455,1030 @@ int main()
                              && ! controlEngine.isFreezeEnabled(1)
                              && ! controlEngine.isEchoThrowEnabled(1),
                          "GELO/ECO devono restare finiti, rilasciarsi e non cambiare DELAY");
+    }
+
+    // CODA LIBERA must be a transparent, target-scoped gate on new
+    // excitation: it may not clear the existing delay/reverb state.  Keep the
+    // probe at 8 kHz so several musical delay times fit in a small test while
+    // exercising the same sample-by-sample ramps used at 48 kHz.
+    {
+        constexpr auto freeTailSampleRate = 8000.0;
+        constexpr auto freeTailBlockSize = 400;
+        constexpr auto freeTailMemory = 1;
+        constexpr auto freeTailChannel = 2;
+        constexpr auto freeTailNote = 55;
+
+        auto freeTailEngineStorage = std::make_unique<EcosystemEngine>();
+        auto freeTailReferenceStorage = std::make_unique<EcosystemEngine>();
+        auto& freeTailEngine = *freeTailEngineStorage;
+        auto& freeTailReference = *freeTailReferenceStorage;
+        std::array<EcosystemEngine*, 2> freeTailEngines {
+            &freeTailEngine, &freeTailReference
+        };
+        for (auto* engine : freeTailEngines)
+        {
+            engine->setScenarioIndex(1); // GOCCE: distinct direct hits/taps.
+            engine->setDelayLevel(freeTailMemory, 1.0f);
+            engine->prepare(freeTailSampleRate, freeTailBlockSize);
+        }
+
+        OutputBlock<EcosystemEngine::logicalOutputBusCount> freeTailOutput(
+            freeTailBlockSize);
+        OutputBlock<EcosystemEngine::logicalOutputBusCount> freeTailRefOutput(
+            freeTailBlockSize);
+        std::array<OutputBlock<EcosystemEngine::logicalOutputBusCount>*, 2>
+            freeTailOutputs { &freeTailOutput, &freeTailRefOutput };
+        const auto renderFreeTail = [=](EcosystemEngine& engine,
+                                        auto& output)
+        {
+            output.clear();
+            process(engine, nullptr, 0, output.pointers.data(),
+                    EcosystemEngine::logicalOutputBusCount,
+                    freeTailBlockSize);
+        };
+        const auto recordFreeTailLoop = [&](EcosystemEngine& engine,
+                                             auto& output)
+        {
+            engine.toggleRecording(freeTailMemory);
+            engine.enqueueMidiMessage(juce::MidiMessage::noteOn(
+                freeTailChannel, freeTailNote, 0.82f));
+            for (int block = 0; block < 6; ++block)
+                renderFreeTail(engine, output);
+            engine.enqueueMidiMessage(juce::MidiMessage::noteOff(
+                freeTailChannel, freeTailNote));
+            renderFreeTail(engine, output);
+            engine.toggleRecording(freeTailMemory);
+            renderFreeTail(engine, output);
+        };
+        for (std::size_t index = 0; index < freeTailEngines.size(); ++index)
+            recordFreeTailLoop(*freeTailEngines[index],
+                               *freeTailOutputs[index]);
+
+        const auto ambientEnergy = [=](const auto& output)
+        {
+            auto energy = 0.0;
+            for (int channel = EcosystemEngine::ambientLeftBus;
+                 channel <= EcosystemEngine::ambientRightBus; ++channel)
+                for (int sample = 0; sample < freeTailBlockSize; ++sample)
+                {
+                    const auto value = static_cast<double>(output.storage[
+                        static_cast<std::size_t>(channel)][
+                            static_cast<std::size_t>(sample)]);
+                    energy += value * value;
+                }
+            return energy / static_cast<double>(2 * freeTailBlockSize);
+        };
+        const auto maximumAmbientDifference = [=](const auto& first,
+                                                   const auto& second)
+        {
+            auto difference = 0.0f;
+            for (int channel = EcosystemEngine::ambientLeftBus;
+                 channel <= EcosystemEngine::ambientRightBus; ++channel)
+                for (int sample = 0; sample < freeTailBlockSize; ++sample)
+                    difference = std::max(difference, std::abs(
+                        first.storage[static_cast<std::size_t>(channel)][
+                            static_cast<std::size_t>(sample)]
+                        - second.storage[static_cast<std::size_t>(channel)][
+                            static_cast<std::size_t>(sample)]));
+            return difference;
+        };
+
+        auto freeTailDefaultParity = true;
+        for (int block = 0; block < 42; ++block)
+        {
+            renderFreeTail(freeTailEngine, freeTailOutput);
+            renderFreeTail(freeTailReference, freeTailRefOutput);
+            freeTailDefaultParity &= maximumAmbientDifference(
+                freeTailOutput, freeTailRefOutput) < 0.000001f;
+        }
+        passed &= expect(freeTailDefaultParity
+                             && ! freeTailEngine.isFreeTailEnabled(
+                                 freeTailMemory),
+                         "CODA spenta deve essere trasparente bit per bit");
+
+        const auto originalFreeTailEvents = freeTailEngine.getEventCount(
+            freeTailMemory);
+        const auto originalFreeTailLength = freeTailEngine.getLengthSeconds(
+            freeTailMemory);
+        std::array<float, 2> previousFreeTailSamples {
+            freeTailOutput.storage[EcosystemEngine::ambientLeftBus].back(),
+            freeTailOutput.storage[EcosystemEngine::ambientRightBus].back()
+        };
+        freeTailEngine.setFreeTailEnabled(freeTailMemory, true);
+        auto freeTailStayedFinite = true;
+        auto freeTailPeak = 0.0f;
+        auto freeTailMaximumStep = 0.0f;
+        auto earlyTailEnergy = 0.0;
+        auto lateTailEnergy = 0.0;
+        auto lateReferenceEnergy = 0.0;
+        for (int block = 0; block < 80; ++block)
+        {
+            renderFreeTail(freeTailEngine, freeTailOutput);
+            renderFreeTail(freeTailReference, freeTailRefOutput);
+            freeTailStayedFinite &= freeTailOutput.finite(freeTailBlockSize);
+            for (int channel = EcosystemEngine::ambientLeftBus;
+                 channel <= EcosystemEngine::ambientRightBus; ++channel)
+            {
+                const auto channelIndex = static_cast<std::size_t>(channel);
+                auto previous = previousFreeTailSamples[channelIndex];
+                for (const auto sample : freeTailOutput.storage[channelIndex])
+                {
+                    freeTailMaximumStep = std::max(
+                        freeTailMaximumStep, std::abs(sample - previous));
+                    previous = sample;
+                    freeTailPeak = std::max(freeTailPeak, std::abs(sample));
+                }
+                previousFreeTailSamples[channelIndex] = previous;
+            }
+            if (block >= 6 && block < 22)
+                earlyTailEnergy += ambientEnergy(freeTailOutput);
+            if (block >= 60)
+            {
+                lateTailEnergy += ambientEnergy(freeTailOutput);
+                lateReferenceEnergy += ambientEnergy(freeTailRefOutput);
+            }
+        }
+        earlyTailEnergy /= 16.0;
+        lateTailEnergy /= 20.0;
+        lateReferenceEnergy /= 20.0;
+
+        passed &= expect(earlyTailEnergy > 0.00000001
+                             && lateTailEnergy < earlyTailEnergy * 0.80
+                             && lateTailEnergy
+                                    < lateReferenceEnergy * 0.55,
+                         "CODA deve spegnere l'eccitazione lasciando una coda udibile che decade");
+        passed &= expect(freeTailStayedFinite && freeTailPeak < 0.90f
+                             && freeTailMaximumStep < 0.20f
+                             && freeTailEngine.getEventCount(freeTailMemory)
+                                    == originalFreeTailEvents
+                             && std::abs(freeTailEngine.getLengthSeconds(
+                                    freeTailMemory) - originalFreeTailLength)
+                                    < 0.000001,
+                         "CODA deve restare finita, contenuta, anti-click e non riscrivere il loop");
+
+        freeTailEngine.setFreeTailEnabled(freeTailMemory, false);
+        auto restoredEnergy = 0.0;
+        auto restoredReferenceEnergy = 0.0;
+        for (int block = 0; block < 24; ++block)
+        {
+            renderFreeTail(freeTailEngine, freeTailOutput);
+            renderFreeTail(freeTailReference, freeTailRefOutput);
+            freeTailStayedFinite &= freeTailOutput.finite(freeTailBlockSize);
+            if (block >= 12)
+            {
+                restoredEnergy += ambientEnergy(freeTailOutput);
+                restoredReferenceEnergy += ambientEnergy(freeTailRefOutput);
+            }
+        }
+        passed &= expect(! freeTailEngine.isFreeTailEnabled(freeTailMemory)
+                             && restoredEnergy
+                                    > restoredReferenceEnergy * 0.45,
+                         "rilasciare CODA deve far rientrare gradualmente il materiale dry");
+
+        // Even while the ambient histories differ, the dedicated mono bass
+        // remains an exact dry reference and cannot acquire CODA.
+        freeTailEngine.setFreeTailEnabled(EcosystemEngine::bassLayerIndex,
+                                          true);
+        freeTailEngine.enqueueMidiMessage(
+            juce::MidiMessage::noteOn(5, 43, 0.75f));
+        freeTailReference.enqueueMidiMessage(
+            juce::MidiMessage::noteOn(5, 43, 0.75f));
+        auto bassStayedIdentical = true;
+        for (int block = 0; block < 6; ++block)
+        {
+            renderFreeTail(freeTailEngine, freeTailOutput);
+            renderFreeTail(freeTailReference, freeTailRefOutput);
+            for (int sample = 0; sample < freeTailBlockSize; ++sample)
+                bassStayedIdentical &= std::abs(
+                    freeTailOutput.storage[EcosystemEngine::bassBus][
+                        static_cast<std::size_t>(sample)]
+                    - freeTailRefOutput.storage[EcosystemEngine::bassBus][
+                        static_cast<std::size_t>(sample)]) < 0.000001f;
+        }
+        passed &= expect(! freeTailEngine.isFreeTailEnabled(
+                              EcosystemEngine::bassLayerIndex)
+                             && bassStayedIdentical,
+                         "CODA non deve toccare il fast-path del basso MIDI 5");
+    }
+
+    // RESPIRO owns CODA only in the scene-effects path. DIRECT and the clean
+    // looper are diagnostic/capture paths and must remain exact even while the
+    // gesture is held; the effected path instead stops accepting new sax
+    // excitation and lets its already-charged delay/reverb decay.
+    {
+        constexpr auto saxTailSampleRate = 8000.0;
+        constexpr auto saxTailBlockSize = 400;
+        constexpr auto saxMemory = EcosystemEngine::midiMemoryCount;
+        constexpr auto saxFrequency = 173.0;
+        constexpr auto saxInputLevel = 0.12f;
+
+        std::vector<float> saxTailInput(
+            static_cast<std::size_t>(saxTailBlockSize));
+        const float* saxTailInputPointer = saxTailInput.data();
+        int64_t saxTailSamplePosition = 0;
+        const auto fillSaxTailInput = [&]
+        {
+            for (int sample = 0; sample < saxTailBlockSize; ++sample)
+                saxTailInput[static_cast<std::size_t>(sample)]
+                    = saxInputLevel * static_cast<float>(std::sin(
+                        juce::MathConstants<double>::twoPi * saxFrequency
+                        * static_cast<double>(saxTailSamplePosition + sample)
+                        / saxTailSampleRate));
+            saxTailSamplePosition += saxTailBlockSize;
+        };
+
+        auto saxBypassEngineStorage = std::make_unique<EcosystemEngine>();
+        auto& saxBypassEngine = *saxBypassEngineStorage;
+        saxBypassEngine.setSaxStereoInput(false);
+        saxBypassEngine.prepare(saxTailSampleRate, saxTailBlockSize);
+        saxBypassEngine.setFreeTailEnabled(saxMemory, true);
+        OutputBlock<EcosystemEngine::logicalOutputBusCount> saxBypassOutput(
+            saxTailBlockSize);
+        const auto renderSaxBypass = [&](EcosystemEngine::SaxPathMode mode)
+        {
+            saxBypassEngine.setSaxPathMode(mode);
+            fillSaxTailInput();
+            saxBypassOutput.clear();
+            process(saxBypassEngine, &saxTailInputPointer, 1,
+                    saxBypassOutput.pointers.data(),
+                    EcosystemEngine::logicalOutputBusCount,
+                    saxTailBlockSize);
+            auto maximumDryError = 0.0f;
+            for (int sample = 0; sample < saxTailBlockSize; ++sample)
+                maximumDryError = std::max(maximumDryError, std::abs(
+                    saxBypassOutput.storage[EcosystemEngine::saxLeftBus][
+                        static_cast<std::size_t>(sample)]
+                    - saxTailInput[static_cast<std::size_t>(sample)] * 0.58f));
+            return maximumDryError;
+        };
+        const auto directTailBypassError = renderSaxBypass(
+            EcosystemEngine::SaxPathMode::direct);
+        const auto cleanTailBypassError = renderSaxBypass(
+            EcosystemEngine::SaxPathMode::cleanLooper);
+        passed &= expect(saxBypassEngine.isFreeTailEnabled(saxMemory)
+                             && directTailBypassError < 0.000001f
+                             && cleanTailBypassError < 0.000001f,
+                         "CODA su RESPIRO non deve colorare DIRECT o il looper pulito");
+
+        auto saxTailEngineStorage = std::make_unique<EcosystemEngine>();
+        auto& saxTailEngine = *saxTailEngineStorage;
+        saxTailEngine.setScenarioIndex(1); // PING PONG LIQUIDO.
+        saxTailEngine.setSaxPathMode(
+            EcosystemEngine::SaxPathMode::sceneEffects);
+        saxTailEngine.setSaxStereoInput(false);
+        saxTailEngine.setDelayLevel(saxMemory, 1.0f);
+        saxTailEngine.prepare(saxTailSampleRate, saxTailBlockSize);
+        OutputBlock<EcosystemEngine::logicalOutputBusCount> saxTailOutput(
+            saxTailBlockSize);
+        const auto renderSaxTail = [&]
+        {
+            fillSaxTailInput();
+            saxTailOutput.clear();
+            process(saxTailEngine, &saxTailInputPointer, 1,
+                    saxTailOutput.pointers.data(),
+                    EcosystemEngine::logicalOutputBusCount,
+                    saxTailBlockSize);
+        };
+        const auto saxOutputEnergy = [&]
+        {
+            auto energy = 0.0;
+            for (int channel = EcosystemEngine::saxLeftBus;
+                 channel <= EcosystemEngine::saxRightBus; ++channel)
+                for (int sample = 0; sample < saxTailBlockSize; ++sample)
+                {
+                    const auto value = static_cast<double>(
+                        saxTailOutput.storage[static_cast<std::size_t>(channel)][
+                            static_cast<std::size_t>(sample)]);
+                    energy += value * value;
+                }
+            return energy / static_cast<double>(2 * saxTailBlockSize);
+        };
+
+        auto chargedSaxEnergy = 0.0;
+        for (int block = 0; block < 36; ++block)
+        {
+            renderSaxTail();
+            if (block >= 28)
+                chargedSaxEnergy += saxOutputEnergy();
+        }
+        chargedSaxEnergy /= 8.0;
+
+        saxTailEngine.setFreeTailEnabled(saxMemory, true);
+        auto saxTailStayedFinite = true;
+        auto saxTailPeak = 0.0f;
+        auto saxTailEarlyEnergy = 0.0;
+        auto saxTailLateEnergy = 0.0;
+        for (int block = 0; block < 64; ++block)
+        {
+            renderSaxTail();
+            saxTailStayedFinite &= saxTailOutput.finite(saxTailBlockSize);
+            saxTailPeak = std::max(saxTailPeak,
+                std::max(saxTailOutput.peak(EcosystemEngine::saxLeftBus,
+                                            saxTailBlockSize),
+                         saxTailOutput.peak(EcosystemEngine::saxRightBus,
+                                            saxTailBlockSize)));
+            if (block >= 5 && block < 17)
+                saxTailEarlyEnergy += saxOutputEnergy();
+            if (block >= 52)
+                saxTailLateEnergy += saxOutputEnergy();
+        }
+        saxTailEarlyEnergy /= 12.0;
+        saxTailLateEnergy /= 12.0;
+        passed &= expect(saxTailEngine.isFreeTailEnabled(saxMemory)
+                             && saxTailEarlyEnergy > 0.00000001
+                             && saxTailLateEnergy < saxTailEarlyEnergy * 0.80
+                             && saxTailLateEnergy < chargedSaxEnergy * 0.55,
+                         "CODA su RESPIRO deve lasciare gli FX udibili e decadenti senza nuova eccitazione");
+        passed &= expect(saxTailStayedFinite && saxTailPeak < 0.90f,
+                         "la coda RESPIRO deve restare finita e con headroom");
+    }
+
+    // DIRADA is decided only at a MIDI-loop boundary. Two enabled engines
+    // must therefore publish the same single owner for exactly one rotation,
+    // while an engine left OFF remains the bit-identical reference.
+    {
+        constexpr auto thinningSampleRate = 8000.0;
+        constexpr auto thinningBlockSize = 400;
+        constexpr auto thinningLoopBlocks = 19;
+        constexpr std::array<int, 3> thinningMemories { 1, 2, 3 };
+        constexpr std::array<int, 3> thinningChannels { 2, 3, 4 };
+        constexpr std::array<int, 3> thinningNotes { 48, 55, 62 };
+
+        auto thinningEngineStorage = std::make_unique<EcosystemEngine>();
+        auto thinningTwinStorage = std::make_unique<EcosystemEngine>();
+        auto thinningOffReferenceStorage
+            = std::make_unique<EcosystemEngine>();
+        auto& thinningEngine = *thinningEngineStorage;
+        auto& thinningTwin = *thinningTwinStorage;
+        auto& thinningOffReference = *thinningOffReferenceStorage;
+        std::array<EcosystemEngine*, 3> thinningEngines {
+            &thinningEngine, &thinningTwin, &thinningOffReference
+        };
+        for (auto* engine : thinningEngines)
+        {
+            engine->setScenarioIndex(0);
+            for (const auto memory : thinningMemories)
+                engine->setDelayLevel(memory, 0.0f);
+            engine->prepare(thinningSampleRate, thinningBlockSize);
+        }
+
+        OutputBlock<EcosystemEngine::logicalOutputBusCount> thinningOutput(
+            thinningBlockSize);
+        OutputBlock<EcosystemEngine::logicalOutputBusCount> thinningTwinOutput(
+            thinningBlockSize);
+        OutputBlock<EcosystemEngine::logicalOutputBusCount> thinningOffOutput(
+            thinningBlockSize);
+        std::array<OutputBlock<EcosystemEngine::logicalOutputBusCount>*, 3>
+            thinningOutputs {
+                &thinningOutput, &thinningTwinOutput, &thinningOffOutput
+            };
+        const auto renderThinning = [=](EcosystemEngine& engine,
+                                        auto& output)
+        {
+            output.clear();
+            process(engine, nullptr, 0, output.pointers.data(),
+                    EcosystemEngine::logicalOutputBusCount,
+                    thinningBlockSize);
+        };
+        const auto recordThinningLoops = [&](EcosystemEngine& engine,
+                                              auto& output)
+        {
+            for (const auto memory : thinningMemories)
+                engine.toggleRecording(memory);
+            for (std::size_t index = 0; index < thinningMemories.size();
+                 ++index)
+                engine.enqueueMidiMessage(juce::MidiMessage::noteOn(
+                    thinningChannels[index], thinningNotes[index], 0.72f));
+            for (int block = 0; block < thinningLoopBlocks - 1; ++block)
+                renderThinning(engine, output);
+            for (std::size_t index = 0; index < thinningMemories.size();
+                 ++index)
+                engine.enqueueMidiMessage(juce::MidiMessage::noteOff(
+                    thinningChannels[index], thinningNotes[index]));
+            renderThinning(engine, output);
+            for (const auto memory : thinningMemories)
+                engine.toggleRecording(memory);
+            renderThinning(engine, output);
+        };
+        for (std::size_t index = 0; index < thinningEngines.size(); ++index)
+            recordThinningLoops(*thinningEngines[index],
+                                *thinningOutputs[index]);
+
+        const auto thinningDifference = [=](const auto& first,
+                                             const auto& second)
+        {
+            auto difference = 0.0f;
+            for (int channel = EcosystemEngine::ambientLeftBus;
+                 channel <= EcosystemEngine::ambientRightBus; ++channel)
+                for (int sample = 0; sample < thinningBlockSize; ++sample)
+                    difference = std::max(difference, std::abs(
+                        first.storage[static_cast<std::size_t>(channel)][
+                            static_cast<std::size_t>(sample)]
+                        - second.storage[static_cast<std::size_t>(channel)][
+                            static_cast<std::size_t>(sample)]));
+            return difference;
+        };
+
+        auto thinningDefaultOffParity = true;
+        auto thinningOriginalMaterialIntact = true;
+        for (int block = 0; block < thinningLoopBlocks + 2; ++block)
+        {
+            for (std::size_t index = 0; index < thinningEngines.size(); ++index)
+                renderThinning(*thinningEngines[index],
+                               *thinningOutputs[index]);
+            thinningDefaultOffParity &= thinningEngine.getThinnedMemoryIndex()
+                    == -1
+                && thinningTwin.getThinnedMemoryIndex() == -1
+                && thinningOffReference.getThinnedMemoryIndex() == -1
+                && thinningDifference(thinningOutput, thinningTwinOutput)
+                    < 0.000001f
+                && thinningDifference(thinningOutput, thinningOffOutput)
+                    < 0.000001f;
+            for (const auto memory : thinningMemories)
+                thinningOriginalMaterialIntact &= thinningEngine.hasMaterial(
+                        memory)
+                    && thinningEngine.getEventCount(memory) == 2
+                    && std::abs(thinningEngine.getLengthSeconds(memory)
+                                - thinningLoopBlocks * thinningBlockSize
+                                    / thinningSampleRate) < 0.000001;
+        }
+        passed &= expect(thinningDefaultOffParity,
+                         "DIRADA spenta deve attraversare i wrap senza alterare stato o audio");
+
+        thinningEngine.setThinningEnabled(true);
+        thinningTwin.setThinningEnabled(true);
+        auto thinningChoicesStayedDeterministic = true;
+        auto thinningOnlyEligibleOwner = true;
+        auto thinningChangedOnlyAtWrap = true;
+        auto thinningStayedFinite = true;
+        auto thinningPeak = 0.0f;
+        auto thinningBecameAudible = false;
+        auto firstThinnedMemory = -1;
+        auto firstOwnerReleasedEarly = false;
+        auto firstOwnerWraps = 0;
+        auto firstOwnerCompletedOneRotation = false;
+
+        // The musical scheduler deliberately waits 4--6 seconds before the
+        // first event; eight loop lengths cover that wait plus the aligning
+        // wrap without turning this into a wall-clock endurance test.
+        constexpr auto maximumThinningBlocks = thinningLoopBlocks * 8;
+        for (int block = 0; block < maximumThinningBlocks; ++block)
+        {
+            std::array<double, EcosystemEngine::midiMemoryCount> phaseBefore {};
+            for (const auto memory : thinningMemories)
+                phaseBefore[static_cast<std::size_t>(memory)]
+                    = thinningEngine.getPhase(memory);
+            const auto ownerBefore = thinningEngine.getThinnedMemoryIndex();
+
+            renderThinning(thinningEngine, thinningOutput);
+            renderThinning(thinningTwin, thinningTwinOutput);
+            renderThinning(thinningOffReference, thinningOffOutput);
+
+            const auto ownerAfter = thinningEngine.getThinnedMemoryIndex();
+            const auto twinOwnerAfter
+                = thinningTwin.getThinnedMemoryIndex();
+            const auto validOwner = [](int owner)
+            {
+                return owner == -1
+                    || (owner > EcosystemEngine::bassLayerIndex
+                        && owner < EcosystemEngine::midiMemoryCount);
+            };
+            thinningOnlyEligibleOwner &= validOwner(ownerAfter)
+                && ownerAfter != EcosystemEngine::midiMemoryCount;
+            thinningChoicesStayedDeterministic &= ownerAfter == twinOwnerAfter
+                && thinningDifference(thinningOutput, thinningTwinOutput)
+                    < 0.000001f;
+            thinningStayedFinite &= thinningOutput.finite(thinningBlockSize)
+                && thinningTwinOutput.finite(thinningBlockSize)
+                && thinningOffOutput.finite(thinningBlockSize);
+            thinningPeak = std::max(thinningPeak,
+                std::max(thinningOutput.peak(
+                             EcosystemEngine::ambientLeftBus,
+                             thinningBlockSize),
+                         thinningOutput.peak(
+                             EcosystemEngine::ambientRightBus,
+                             thinningBlockSize)));
+            thinningBecameAudible |= thinningDifference(
+                thinningOutput, thinningOffOutput) > 0.00001f;
+
+            const auto wrapped = [&](int memory)
+            {
+                return memory > EcosystemEngine::bassLayerIndex
+                    && memory < EcosystemEngine::midiMemoryCount
+                    && thinningEngine.getPhase(memory) + 0.000001
+                        < phaseBefore[static_cast<std::size_t>(memory)];
+            };
+            if (ownerAfter != ownerBefore)
+            {
+                if (ownerBefore < 0)
+                    thinningChangedOnlyAtWrap &= wrapped(ownerAfter);
+                else
+                    thinningChangedOnlyAtWrap &= wrapped(ownerBefore);
+            }
+
+            if (firstThinnedMemory < 0 && ownerAfter >= 0)
+                firstThinnedMemory = ownerAfter;
+            if (firstThinnedMemory >= 0 && ownerBefore == firstThinnedMemory)
+            {
+                if (wrapped(firstThinnedMemory))
+                {
+                    ++firstOwnerWraps;
+                    firstOwnerCompletedOneRotation
+                        = ownerAfter != firstThinnedMemory;
+                }
+                else if (ownerAfter != firstThinnedMemory)
+                    firstOwnerReleasedEarly = true;
+            }
+
+            for (const auto memory : thinningMemories)
+                thinningOriginalMaterialIntact &= thinningEngine.hasMaterial(
+                        memory)
+                    && thinningEngine.getEventCount(memory) == 2;
+            if (firstOwnerCompletedOneRotation)
+                break;
+        }
+
+        passed &= expect(firstThinnedMemory >= 1
+                             && firstThinnedMemory < EcosystemEngine::midiMemoryCount
+                             && firstOwnerCompletedOneRotation
+                             && firstOwnerWraps == 1
+                             && ! firstOwnerReleasedEarly,
+                         "DIRADA deve iniziare al wrap e durare esattamente un giro della memoria scelta");
+        passed &= expect(thinningOnlyEligibleOwner
+                             && thinningOffReference.getThinnedMemoryIndex()
+                                    == -1,
+                         "DIRADA deve avere al massimo un owner MIDI 1-3, mai basso o RESPIRO");
+        passed &= expect(thinningChoicesStayedDeterministic
+                             && thinningChangedOnlyAtWrap,
+                         "DIRADA deve essere deterministica e cambiare owner soltanto ai wrap");
+        passed &= expect(thinningOriginalMaterialIntact
+                             && thinningStayedFinite && thinningPeak < 0.90f
+                             && thinningBecameAudible,
+                         "DIRADA deve conservare i loop e l'headroom modificando realmente il mix");
+    }
+
+    // Isolate one sustained ambient memory to measure DIRADA's fade down and
+    // fade back up. Clearing it after a mid-cycle disable also verifies that
+    // no suppressed note-on/off pair can leave a voice stuck behind the gain.
+    {
+        constexpr auto thinningSampleRate = 8000.0;
+        constexpr auto thinningBlockSize = 400;
+        constexpr auto thinningLoopBlocks = 19;
+        constexpr auto thinningMemory = 1;
+        constexpr auto thinningChannel = 2;
+        constexpr auto thinningNote = 48;
+
+        auto thinningAudioEngineStorage = std::make_unique<EcosystemEngine>();
+        auto thinningAudioReferenceStorage
+            = std::make_unique<EcosystemEngine>();
+        auto& thinningAudioEngine = *thinningAudioEngineStorage;
+        auto& thinningAudioReference = *thinningAudioReferenceStorage;
+        std::array<EcosystemEngine*, 2> thinningAudioEngines {
+            &thinningAudioEngine, &thinningAudioReference
+        };
+        for (auto* engine : thinningAudioEngines)
+        {
+            engine->setScenarioIndex(0);
+            engine->setDelayLevel(thinningMemory, 0.0f);
+            engine->prepare(thinningSampleRate, thinningBlockSize);
+        }
+        OutputBlock<EcosystemEngine::logicalOutputBusCount> thinningAudioOutput(
+            thinningBlockSize);
+        OutputBlock<EcosystemEngine::logicalOutputBusCount> thinningAudioRefOutput(
+            thinningBlockSize);
+        const auto renderThinningAudioSamples = [=](EcosystemEngine& engine,
+                                                     auto& output,
+                                                     int samples)
+        {
+            output.clear();
+            process(engine, nullptr, 0, output.pointers.data(),
+                    EcosystemEngine::logicalOutputBusCount,
+                    samples);
+        };
+        const auto renderThinningAudio = [&](EcosystemEngine& engine,
+                                              auto& output)
+        {
+            renderThinningAudioSamples(engine, output, thinningBlockSize);
+        };
+        const auto recordThinningAudioLoop = [&](EcosystemEngine& engine,
+                                                  auto& output)
+        {
+            engine.toggleRecording(thinningMemory);
+            engine.enqueueMidiMessage(juce::MidiMessage::noteOn(
+                thinningChannel, thinningNote, 0.78f));
+            for (int block = 0; block < thinningLoopBlocks - 1; ++block)
+                renderThinningAudio(engine, output);
+            engine.enqueueMidiMessage(juce::MidiMessage::noteOff(
+                thinningChannel, thinningNote));
+            renderThinningAudio(engine, output);
+            engine.toggleRecording(thinningMemory);
+            renderThinningAudio(engine, output);
+        };
+        recordThinningAudioLoop(thinningAudioEngine, thinningAudioOutput);
+        recordThinningAudioLoop(thinningAudioReference,
+                                thinningAudioRefOutput);
+
+        const auto thinningAudioEnergy = [=](const auto& output)
+        {
+            auto energy = 0.0;
+            for (int channel = EcosystemEngine::ambientLeftBus;
+                 channel <= EcosystemEngine::ambientRightBus; ++channel)
+                for (int sample = 0; sample < thinningBlockSize; ++sample)
+                {
+                    const auto value = static_cast<double>(output.storage[
+                        static_cast<std::size_t>(channel)][
+                            static_cast<std::size_t>(sample)]);
+                    energy += value * value;
+                }
+            return energy / static_cast<double>(2 * thinningBlockSize);
+        };
+        const auto renderThinningAudioPair = [&]
+        {
+            renderThinningAudio(thinningAudioEngine, thinningAudioOutput);
+            renderThinningAudio(thinningAudioReference,
+                                thinningAudioRefOutput);
+        };
+        const auto renderThinningAudioPairSamples = [&](int samples)
+        {
+            renderThinningAudioSamples(thinningAudioEngine,
+                                       thinningAudioOutput, samples);
+            renderThinningAudioSamples(thinningAudioReference,
+                                       thinningAudioRefOutput, samples);
+        };
+
+        for (int block = 0; block < 3; ++block)
+            renderThinningAudioPair();
+        // Move the otherwise block-aligned loop by a prime-sized partial
+        // callback. Its following wraps now land inside a 400-sample block,
+        // making the exact transition boundary observable without timestamps
+        // or sleeps.
+        renderThinningAudioPairSamples(137);
+        thinningAudioEngine.setThinningEnabled(true);
+        auto selectedAtWrap = false;
+        auto selectionPrefixStayedIdentical = false;
+        auto selectionBoundaryOffset = -1;
+        const auto thinningLoopSamples = static_cast<int>(std::llround(
+            thinningAudioEngine.getLengthSeconds(thinningMemory)
+                * thinningSampleRate));
+        constexpr auto maximumThinningWaitBlocks = 260; // 13 seconds.
+        for (int block = 0; block < maximumThinningWaitBlocks; ++block)
+        {
+            const auto phaseBefore = thinningAudioEngine.getPhase(
+                thinningMemory);
+            const auto positionBefore = juce::jlimit(
+                0, thinningLoopSamples - 1,
+                static_cast<int>(std::llround(
+                    phaseBefore * thinningLoopSamples)));
+            const auto samplesUntilWrap = thinningLoopSamples
+                - positionBefore;
+            renderThinningAudioPair();
+            if (thinningAudioEngine.getThinnedMemoryIndex() == thinningMemory)
+            {
+                selectedAtWrap = thinningAudioEngine.getPhase(thinningMemory)
+                        + 0.000001 < phaseBefore;
+                selectionBoundaryOffset = samplesUntilWrap;
+                auto prefixDifference = 0.0f;
+                if (selectionBoundaryOffset > 0
+                    && selectionBoundaryOffset < thinningBlockSize)
+                    for (int channel = EcosystemEngine::ambientLeftBus;
+                         channel <= EcosystemEngine::ambientRightBus;
+                         ++channel)
+                        for (int sample = 0;
+                             sample < selectionBoundaryOffset; ++sample)
+                            prefixDifference = std::max(
+                                prefixDifference, std::abs(
+                                    thinningAudioOutput.storage[
+                                        static_cast<std::size_t>(channel)][
+                                            static_cast<std::size_t>(sample)]
+                                    - thinningAudioRefOutput.storage[
+                                        static_cast<std::size_t>(channel)][
+                                            static_cast<std::size_t>(sample)]));
+                selectionPrefixStayedIdentical
+                    = selectionBoundaryOffset > 0
+                    && selectionBoundaryOffset < thinningBlockSize
+                    && prefixDifference < 0.000001f;
+                break;
+            }
+        }
+
+        std::array<float, 2> previousThinningSamples {
+            thinningAudioOutput.storage[
+                EcosystemEngine::ambientLeftBus].back(),
+            thinningAudioOutput.storage[
+                EcosystemEngine::ambientRightBus].back()
+        };
+        auto thinningMaximumStep = 0.0f;
+        auto thinningAudioFinite = true;
+        auto thinningEntryEnergy = 0.0;
+        auto thinningMutedEnergy = 0.0;
+        auto thinningMutedReferenceEnergy = 0.0;
+        for (int block = 0; block < thinningLoopBlocks - 1; ++block)
+        {
+            renderThinningAudioPair();
+            thinningAudioFinite &= thinningAudioOutput.finite(
+                thinningBlockSize);
+            for (int channel = EcosystemEngine::ambientLeftBus;
+                 channel <= EcosystemEngine::ambientRightBus; ++channel)
+            {
+                const auto index = static_cast<std::size_t>(channel);
+                auto previous = previousThinningSamples[index];
+                for (const auto sample : thinningAudioOutput.storage[index])
+                {
+                    thinningMaximumStep = std::max(
+                        thinningMaximumStep, std::abs(sample - previous));
+                    previous = sample;
+                }
+                previousThinningSamples[index] = previous;
+            }
+            if (block < 2)
+                thinningEntryEnergy += thinningAudioEnergy(
+                    thinningAudioOutput);
+            if (block >= 6 && block < 14)
+            {
+                thinningMutedEnergy += thinningAudioEnergy(
+                    thinningAudioOutput);
+                thinningMutedReferenceEnergy += thinningAudioEnergy(
+                    thinningAudioRefOutput);
+            }
+        }
+        thinningEntryEnergy /= 2.0;
+        thinningMutedEnergy /= 8.0;
+        thinningMutedReferenceEnergy /= 8.0;
+
+        auto naturalReturnReached = false;
+        for (int block = 0; block < 3; ++block)
+        {
+            renderThinningAudioPair();
+            naturalReturnReached |= thinningAudioEngine.getThinnedMemoryIndex()
+                != thinningMemory;
+        }
+        auto thinningRestoredEnergy = 0.0;
+        auto thinningRestoredReferenceEnergy = 0.0;
+        for (int block = 0; block < 16; ++block)
+        {
+            renderThinningAudioPair();
+            if (block >= 10)
+            {
+                thinningRestoredEnergy += thinningAudioEnergy(
+                    thinningAudioOutput);
+                thinningRestoredReferenceEnergy += thinningAudioEnergy(
+                    thinningAudioRefOutput);
+            }
+        }
+
+        passed &= expect(selectedAtWrap && selectionPrefixStayedIdentical
+                             && naturalReturnReached
+                             && thinningEntryEnergy > thinningMutedEnergy * 2.0
+                             && thinningMutedEnergy
+                                    < thinningMutedReferenceEnergy * 0.20,
+                         "DIRADA deve sfumare soltanto dal campione esatto del wrap intra-blocco");
+        passed &= expect(thinningRestoredEnergy
+                                    > thinningRestoredReferenceEnergy * 0.35
+                             && thinningAudioFinite
+                             && thinningMaximumStep < 0.20f,
+                         "a fine giro DIRADA deve far rientrare la memoria senza click");
+
+        // Resetting OFF then ON creates a fresh deterministic selection. If
+        // OFF arrives halfway through the silent rotation, keep that owner to
+        // its wrap: an early resume would have missed the skipped note-on.
+        // The same boundary starts the fade back and OFF must schedule no new
+        // rests afterwards.
+        thinningAudioEngine.setThinningEnabled(false);
+        renderThinningAudioPair();
+        thinningAudioEngine.setThinningEnabled(true);
+        auto selectedForDisable = false;
+        for (int block = 0; block < maximumThinningWaitBlocks; ++block)
+        {
+            renderThinningAudioPair();
+            if (thinningAudioEngine.getThinnedMemoryIndex() == thinningMemory)
+            {
+                selectedForDisable = true;
+                break;
+            }
+        }
+        for (int block = 0; block < 7; ++block)
+            renderThinningAudioPair();
+        thinningAudioEngine.setThinningEnabled(false);
+        thinningAudioEngine.setThinningEnabled(false);
+        const auto disabledOwnerStayedPublished
+            = thinningAudioEngine.getThinnedMemoryIndex() == thinningMemory;
+        auto disabledOwnerStayedUntilWrap = true;
+        auto disabledOwnerClearedAtWrap = false;
+        auto disabledScheduledNoNewOwner = true;
+        auto disabledMutedEnergy = 0.0;
+        auto disabledMutedReferenceEnergy = 0.0;
+        for (int block = 0; block < thinningLoopBlocks + 2; ++block)
+        {
+            const auto phaseBefore = thinningAudioEngine.getPhase(
+                thinningMemory);
+            renderThinningAudioPair();
+            const auto wrapped = thinningAudioEngine.getPhase(thinningMemory)
+                    + 0.000001 < phaseBefore;
+            const auto ownerAfter
+                = thinningAudioEngine.getThinnedMemoryIndex();
+            if (! wrapped)
+            {
+                disabledOwnerStayedUntilWrap &= ownerAfter == thinningMemory;
+                disabledMutedEnergy += thinningAudioEnergy(
+                    thinningAudioOutput);
+                disabledMutedReferenceEnergy += thinningAudioEnergy(
+                    thinningAudioRefOutput);
+            }
+            else
+            {
+                disabledOwnerClearedAtWrap = ownerAfter == -1;
+                break;
+            }
+        }
+        auto disabledRestoreEnergy = 0.0;
+        auto disabledRestoreReferenceEnergy = 0.0;
+        for (int block = 0; block < thinningLoopBlocks * 2; ++block)
+        {
+            renderThinningAudioPair();
+            disabledScheduledNoNewOwner
+                &= thinningAudioEngine.getThinnedMemoryIndex() == -1;
+            if (block >= 10 && block < 16)
+            {
+                disabledRestoreEnergy += thinningAudioEnergy(
+                    thinningAudioOutput);
+                disabledRestoreReferenceEnergy += thinningAudioEnergy(
+                    thinningAudioRefOutput);
+            }
+        }
+        passed &= expect(selectedForDisable
+                             && ! thinningAudioEngine.isThinningEnabled()
+                             && disabledOwnerStayedPublished
+                             && disabledOwnerStayedUntilWrap
+                             && disabledOwnerClearedAtWrap
+                             && disabledScheduledNoNewOwner
+                             && disabledMutedEnergy
+                                    < disabledMutedReferenceEnergy * 0.20
+                             && disabledRestoreEnergy
+                                    > disabledRestoreReferenceEnergy * 0.35,
+                         "DIRADA spenta deve completare il giro, rientrare al wrap e non creare nuovi owner");
+
+        const auto preservedThinningEvents
+            = thinningAudioEngine.getEventCount(thinningMemory);
+        const auto preservedThinningLength
+            = thinningAudioEngine.getLengthSeconds(thinningMemory);
+        thinningAudioEngine.clearMemory(thinningMemory);
+        renderThinningAudio(thinningAudioEngine, thinningAudioOutput);
+        auto thinningLateTailPeak = 0.0f;
+        // ABISSO's first ambient layer has a nine-second release. Fifteen
+        // seconds lets that envelope and its existing reverb decay naturally;
+        // a genuinely stuck sustain would remain plainly above this floor.
+        constexpr auto thinningReleaseBlocks = 300;
+        for (int block = 0; block < thinningReleaseBlocks; ++block)
+        {
+            renderThinningAudio(thinningAudioEngine, thinningAudioOutput);
+            if (block >= thinningReleaseBlocks - 20)
+                thinningLateTailPeak = std::max(thinningLateTailPeak,
+                    std::max(thinningAudioOutput.peak(
+                                 EcosystemEngine::ambientLeftBus,
+                                 thinningBlockSize),
+                             thinningAudioOutput.peak(
+                                 EcosystemEngine::ambientRightBus,
+                                 thinningBlockSize)));
+        }
+        passed &= expect(preservedThinningEvents == 2
+                             && preservedThinningLength > 0.0
+                             && ! thinningAudioEngine.hasMaterial(
+                                 thinningMemory)
+                             && thinningAudioEngine.getThinnedMemoryIndex()
+                                    == -1
+                             && thinningLateTailPeak < 0.00001f,
+                         "DIRADA non deve perdere note-off o lasciare voci MIDI bloccate");
+    }
+
+    // A loop shorter than the hardware block can wrap several times in one
+    // callback. DIRADA must start on the last usable wrap, not start and end
+    // invisibly in that same callback.
+    {
+        constexpr auto shortLoopSampleRate = 8000.0;
+        constexpr auto shortLoopBlockSize = 400;
+        constexpr auto shortCaptureSamples = 90;
+        constexpr auto shortLoopMemory = 1;
+
+        auto shortLoopEngineStorage = std::make_unique<EcosystemEngine>();
+        auto shortLoopReferenceStorage = std::make_unique<EcosystemEngine>();
+        auto& shortLoopEngine = *shortLoopEngineStorage;
+        auto& shortLoopReference = *shortLoopReferenceStorage;
+        std::array<EcosystemEngine*, 2> shortLoopEngines {
+            &shortLoopEngine, &shortLoopReference
+        };
+        for (auto* engine : shortLoopEngines)
+        {
+            engine->setScenarioIndex(1); // GOCCE: transienti leggibili.
+            engine->setDelayLevel(shortLoopMemory, 0.0f);
+            engine->prepare(shortLoopSampleRate, shortLoopBlockSize);
+        }
+        OutputBlock<EcosystemEngine::logicalOutputBusCount> shortLoopOutput(
+            shortLoopBlockSize);
+        OutputBlock<EcosystemEngine::logicalOutputBusCount> shortLoopRefOutput(
+            shortLoopBlockSize);
+        const auto renderShortLoop = [=](EcosystemEngine& engine,
+                                         auto& output, int samples)
+        {
+            output.clear();
+            process(engine, nullptr, 0, output.pointers.data(),
+                    EcosystemEngine::logicalOutputBusCount, samples);
+        };
+        const auto recordShortLoop = [&](EcosystemEngine& engine,
+                                          auto& output)
+        {
+            engine.toggleRecording(shortLoopMemory);
+            engine.enqueueMidiMessage(
+                juce::MidiMessage::noteOn(2, 60, 0.76f));
+            renderShortLoop(engine, output, shortCaptureSamples);
+            engine.enqueueMidiMessage(juce::MidiMessage::noteOff(2, 60));
+            renderShortLoop(engine, output, shortCaptureSamples);
+            engine.toggleRecording(shortLoopMemory);
+            renderShortLoop(engine, output, shortLoopBlockSize);
+        };
+        recordShortLoop(shortLoopEngine, shortLoopOutput);
+        recordShortLoop(shortLoopReference, shortLoopRefOutput);
+        const auto shortLoopSamples = static_cast<int>(std::llround(
+            shortLoopEngine.getLengthSeconds(shortLoopMemory)
+                * shortLoopSampleRate));
+
+        shortLoopEngine.setThinningEnabled(true);
+        auto shortOwnerWasObservable = false;
+        auto shortFadeWasAudible = false;
+        auto shortLoopStayedFinite = true;
+        auto shortLoopPeak = 0.0f;
+        for (int block = 0; block < 140; ++block)
+        {
+            renderShortLoop(shortLoopEngine, shortLoopOutput,
+                            shortLoopBlockSize);
+            renderShortLoop(shortLoopReference, shortLoopRefOutput,
+                            shortLoopBlockSize);
+            shortLoopStayedFinite &= shortLoopOutput.finite(
+                shortLoopBlockSize);
+            shortLoopPeak = std::max(shortLoopPeak,
+                std::max(shortLoopOutput.peak(
+                             EcosystemEngine::ambientLeftBus,
+                             shortLoopBlockSize),
+                         shortLoopOutput.peak(
+                             EcosystemEngine::ambientRightBus,
+                             shortLoopBlockSize)));
+            if (shortLoopEngine.getThinnedMemoryIndex() == shortLoopMemory)
+            {
+                shortOwnerWasObservable = true;
+                for (int channel = EcosystemEngine::ambientLeftBus;
+                     channel <= EcosystemEngine::ambientRightBus; ++channel)
+                    for (int sample = 0; sample < shortLoopBlockSize; ++sample)
+                        shortFadeWasAudible |= std::abs(
+                            shortLoopOutput.storage[
+                                static_cast<std::size_t>(channel)][
+                                    static_cast<std::size_t>(sample)]
+                            - shortLoopRefOutput.storage[
+                                static_cast<std::size_t>(channel)][
+                                    static_cast<std::size_t>(sample)])
+                                > 0.000001f;
+                break;
+            }
+        }
+
+        shortLoopEngine.setThinningEnabled(false);
+        renderShortLoop(shortLoopEngine, shortLoopOutput, shortLoopBlockSize);
+        renderShortLoop(shortLoopReference, shortLoopRefOutput,
+                        shortLoopBlockSize);
+        const auto shortOwnerReturned
+            = shortLoopEngine.getThinnedMemoryIndex() == -1;
+        auto shortReturnEnergy = 0.0;
+        auto shortReferenceEnergy = 0.0;
+        for (int block = 0; block < 16; ++block)
+        {
+            renderShortLoop(shortLoopEngine, shortLoopOutput,
+                            shortLoopBlockSize);
+            renderShortLoop(shortLoopReference, shortLoopRefOutput,
+                            shortLoopBlockSize);
+            shortLoopStayedFinite &= shortLoopOutput.finite(
+                shortLoopBlockSize);
+            if (block >= 10)
+                for (int channel = EcosystemEngine::ambientLeftBus;
+                     channel <= EcosystemEngine::ambientRightBus; ++channel)
+                    for (int sample = 0; sample < shortLoopBlockSize; ++sample)
+                    {
+                        const auto actual = shortLoopOutput.storage[
+                            static_cast<std::size_t>(channel)][
+                                static_cast<std::size_t>(sample)];
+                        const auto reference = shortLoopRefOutput.storage[
+                            static_cast<std::size_t>(channel)][
+                                static_cast<std::size_t>(sample)];
+                        shortReturnEnergy += actual * actual;
+                        shortReferenceEnergy += reference * reference;
+                    }
+        }
+        passed &= expect(shortLoopSamples > 0
+                             && shortLoopSamples < shortLoopBlockSize
+                             && shortOwnerWasObservable && shortOwnerReturned,
+                         "DIRADA multi-wrap deve pubblicare l'owner oltre il callback di avvio");
+        passed &= expect(shortFadeWasAudible && shortLoopStayedFinite
+                             && shortLoopPeak < 0.90f,
+                         "DIRADA multi-wrap deve produrre una sfumatura finita e contenuta");
+        passed &= expect(shortReturnEnergy > shortReferenceEnergy * 0.20,
+                         "DIRADA multi-wrap deve far rientrare il loop breve");
     }
 
     // The sax footswitch is a source-aware MIDI Learn control, not another
@@ -440,13 +1528,13 @@ int main()
         // Performance controls and panic CCs keep their fixed meanings and
         // cannot accidentally become the sax footswitch during MIDI Learn.
         pedalEngine.beginSaxFootswitchLearn();
-        for (const auto controller : { 80, 81, 82, 120, 123 })
+        for (const auto controller : { 80, 81, 82, 83, 84, 120, 123 })
             pedalEngine.enqueueMidiMessage(
                 juce::MidiMessage::controllerEvent(2, controller, 127),
                 MidiRole::keyStep);
         passed &= expect(pedalEngine.isSaxFootswitchLearning()
                              && ! pedalEngine.hasSaxFootswitchBinding(),
-                         "CC80-82 e CC120/123 non devono essere apprendibili");
+                         "CC80-84 e CC120/123 non devono essere apprendibili");
         pedalEngine.cancelSaxFootswitchLearn();
         pedalEngine.releaseMomentaryGestures();
         pedalEngine.setSaxListenAmount(0.0f);
