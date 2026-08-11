@@ -62,6 +62,86 @@ constexpr std::array<float, EcosystemEngine::memoryCount> defaultDelayLevels {
 
 constexpr auto minimumPerformanceLevelDb = -48.0;
 constexpr auto defaultPerformanceLevelDb = -6.0;
+constexpr auto saxFootswitchRoleSettingKey = "saxFootswitchRole";
+constexpr auto saxFootswitchTypeSettingKey = "saxFootswitchType";
+constexpr auto saxFootswitchNumberSettingKey = "saxFootswitchNumber";
+
+bool isMidiControlEndpoint(const juce::String& name)
+{
+    return name.containsIgnoreCase("daw")
+        || name.containsIgnoreCase("control")
+        || name.containsIgnoreCase("ctrl");
+}
+
+bool isModel12SecondaryMidiEndpoint(const juce::String& name)
+{
+    // Windows exposes the DAW port as "MIDIIN2 (Model 12 MIDI)" without the
+    // words DAW/CONTROL. Linux may suffix the two USB MIDI ports with 1/2.
+    // The DIN MIDI IN is port 1; port 2 belongs to DAW control.
+    return name.containsIgnoreCase("midiin2")
+        || name.containsIgnoreCase("midi in 2")
+        || name.containsIgnoreCase("midi 2")
+        || name.containsIgnoreCase("port 2");
+}
+
+bool looksLikeKeyStepMidi(const juce::String& name)
+{
+    return ! isMidiControlEndpoint(name)
+        && (name.containsIgnoreCase("keystep pro")
+            || (name.containsIgnoreCase("arturia")
+                && name.containsIgnoreCase("keystep")));
+}
+
+bool looksLikeModel12Midi(const juce::String& name)
+{
+    return looksLikeModel12(name)
+        && ! isMidiControlEndpoint(name)
+        && ! isModel12SecondaryMidiEndpoint(name);
+}
+
+EcosystemEngine::MidiInputRole midiInputRoleForName(const juce::String& name)
+{
+    if (looksLikeKeyStepMidi(name))
+        return EcosystemEngine::MidiInputRole::keyStep;
+    if (looksLikeModel12Midi(name))
+        return EcosystemEngine::MidiInputRole::model12;
+    return EcosystemEngine::MidiInputRole::generic;
+}
+
+bool sameSaxFootswitchBinding(
+    const EcosystemEngine::SaxFootswitchBinding& first,
+    const EcosystemEngine::SaxFootswitchBinding& second) noexcept
+{
+    return first.role == second.role
+        && first.type == second.type
+        && first.number == second.number;
+}
+
+juce::String saxFootswitchBindingText(
+    const EcosystemEngine::SaxFootswitchBinding& binding)
+{
+    if (! binding.valid())
+        return "PEDALE SAX: NON ASSOCIATO";
+
+    juce::String source;
+    switch (binding.role)
+    {
+        case EcosystemEngine::MidiInputRole::keyStep: source = "KEYSTEP PRO"; break;
+        case EcosystemEngine::MidiInputRole::model12: source = "MODEL 12"; break;
+        case EcosystemEngine::MidiInputRole::generic: source = "MIDI"; break;
+    }
+
+    juce::String message;
+    switch (binding.type)
+    {
+        case EcosystemEngine::SaxFootswitchMessageType::controller:
+            message = "CC " + juce::String(binding.number);
+            break;
+        case EcosystemEngine::SaxFootswitchMessageType::none:
+            break;
+    }
+    return "PEDALE SAX: " + source + " / " + message;
+}
 
 juce::String performanceLevelText(float gain)
 {
@@ -418,6 +498,8 @@ MainComponent::MainComponent()
     styleButton(applyAudioButton, juce::Colour(0xff5da8a1));
     styleButton(rescanAudioButton, juce::Colour(0xff7895b8));
     styleButton(keyStepRoutingButton, juce::Colour(0xff8aa6d6));
+    styleButton(saxFootswitchLearnButton, memoryColours[4]);
+    styleButton(saxFootswitchClearButton, juce::Colour(0xffad496a));
     styleButton(saxModeButton, memoryColours[4]);
     styleButton(resetPerformanceLevelButton, juce::Colour(0xff8299bd));
     styleButton(toggleDelayDryButton, juce::Colour(0xff8299bd));
@@ -435,6 +517,8 @@ MainComponent::MainComponent()
     addChildComponent(applyAudioButton);
     addChildComponent(rescanAudioButton);
     addChildComponent(keyStepRoutingButton);
+    addChildComponent(saxFootswitchLearnButton);
+    addChildComponent(saxFootswitchClearButton);
     addChildComponent(saxModeButton);
     addAndMakeVisible(resetPerformanceLevelButton);
     addAndMakeVisible(toggleDelayDryButton);
@@ -460,7 +544,19 @@ MainComponent::MainComponent()
     midiConnectionLabel.setJustificationType(juce::Justification::centred);
     midiConnectionLabel.setFont(juce::FontOptions(20.0f));
     midiConnectionLabel.setColour(juce::Label::textColourId, juce::Colour(quietText));
+    midiConnectionLabel.setMinimumHorizontalScale(0.55f);
     addChildComponent(midiConnectionLabel);
+
+    saxFootswitchBindingLabel.setJustificationType(
+        juce::Justification::centredLeft);
+    saxFootswitchBindingLabel.setFont(juce::FontOptions(17.0f,
+                                                        juce::Font::bold));
+    saxFootswitchBindingLabel.setColour(juce::Label::textColourId,
+                                        juce::Colour(paleText));
+    saxFootswitchBindingLabel.setColour(juce::Label::backgroundColourId,
+                                        juce::Colour(0xff18202d));
+    saxFootswitchBindingLabel.setMinimumHorizontalScale(0.55f);
+    addChildComponent(saxFootswitchBindingLabel);
 
     const auto makeChoice = [this](std::unique_ptr<ConnectionChoice>& target,
                                    const juce::String& name)
@@ -552,6 +648,22 @@ MainComponent::MainComponent()
     applyAudioButton.onClick = [this] { applyAudioConfiguration(); };
     rescanAudioButton.onClick = [this] { scanAudioDevices(); };
     keyStepRoutingButton.onClick = [this] { configureKeyStepMidi(); };
+    saxFootswitchLearnButton.onClick = [this]
+    {
+        if (engine.isSaxFootswitchLearning())
+            engine.cancelSaxFootswitchLearn();
+        else
+            engine.beginSaxFootswitchLearn();
+        updateSaxFootswitchControls();
+    };
+    saxFootswitchClearButton.onClick = [this]
+    {
+        engine.cancelSaxFootswitchLearn();
+        engine.releaseSaxFootswitch();
+        engine.clearSaxFootswitchBinding();
+        saveSaxFootswitchBinding(true);
+        updateSaxFootswitchControls();
+    };
     saxModeButton.onClick = [this]
     {
         engine.setSaxStereoInput(! engine.isSaxStereoInput());
@@ -819,6 +931,8 @@ MainComponent::MainComponent()
         ? savedSettings->getIntValue("scenario", 0) : 0;
     engine.setTextureAmount(static_cast<float>(savedSettings != nullptr
         ? savedSettings->getDoubleValue("texture", 0.0) : 0.0));
+    loadSaxFootswitchBinding();
+    updateSaxFootswitchControls();
     updateTextureButton();
     applyScenario(savedScenario);
     selectMemory(0);
@@ -831,6 +945,7 @@ MainComponent::~MainComponent()
 {
     juce::Timer::stopTimer();
     savePerformanceLevels(false);
+    saveSaxFootswitchBinding(false);
     properties.saveIfNeeded();
     deviceManager.removeMidiInputDeviceCallback({}, this);
     deviceManager.removeAudioCallback(&audioRouter);
@@ -991,6 +1106,63 @@ void MainComponent::savePerformanceLevels(bool flushToDisk)
         settings->saveIfNeeded();
 }
 
+void MainComponent::loadSaxFootswitchBinding()
+{
+    auto binding = EcosystemEngine::SaxFootswitchBinding {};
+    if (const auto* settings = properties.getUserSettings())
+    {
+        binding.role = static_cast<EcosystemEngine::MidiInputRole>(
+            settings->getIntValue(saxFootswitchRoleSettingKey,
+                static_cast<int>(EcosystemEngine::MidiInputRole::generic)));
+        binding.type = static_cast<EcosystemEngine::SaxFootswitchMessageType>(
+            settings->getIntValue(saxFootswitchTypeSettingKey,
+                static_cast<int>(EcosystemEngine::SaxFootswitchMessageType::none)));
+        binding.number = settings->getIntValue(
+            saxFootswitchNumberSettingKey, -1);
+    }
+
+    if (binding.valid())
+        engine.setSaxFootswitchBinding(binding);
+    else
+        engine.clearSaxFootswitchBinding();
+    persistedSaxFootswitchBinding = engine.getSaxFootswitchBinding();
+}
+
+void MainComponent::saveSaxFootswitchBinding(bool flushToDisk)
+{
+    auto* settings = properties.getUserSettings();
+    if (settings == nullptr)
+        return;
+
+    const auto binding = engine.getSaxFootswitchBinding();
+    settings->setValue(saxFootswitchRoleSettingKey,
+                       static_cast<int>(binding.role));
+    settings->setValue(saxFootswitchTypeSettingKey,
+                       static_cast<int>(binding.type));
+    settings->setValue(saxFootswitchNumberSettingKey, binding.number);
+    if (flushToDisk)
+        settings->saveIfNeeded();
+    persistedSaxFootswitchBinding = binding;
+}
+
+void MainComponent::updateSaxFootswitchControls()
+{
+    const auto learning = engine.isSaxFootswitchLearning();
+    const auto binding = engine.getSaxFootswitchBinding();
+    saxFootswitchLearnButton.setButtonText(
+        learning ? "ANNULLA APPRENDIMENTO" : "IMPARA PEDALE SAX");
+    saxFootswitchLearnButton.setToggleState(learning,
+                                            juce::dontSendNotification);
+    saxFootswitchClearButton.setEnabled(binding.valid());
+    saxFootswitchBindingLabel.setText(
+        learning ? "PEDALE SAX: APPRENDIMENTO - PREMI IL PEDALE"
+                 : saxFootswitchBindingText(binding),
+        juce::dontSendNotification);
+    saxFootswitchBindingLabel.setColour(
+        juce::Label::textColourId,
+        learning ? juce::Colour(0xffffd08a) : juce::Colour(paleText));
+}
+
 void MainComponent::initialiseAudio()
 {
     // Start closed: the selected profile is applied later as one transaction.
@@ -1006,34 +1178,51 @@ void MainComponent::initialiseAudio()
 
 void MainComponent::configureKeyStepMidi()
 {
-    // Re-reading or losing the controller is also the explicit panic path for
-    // a missing CC release. Latched controls such as ASCOLTO are unaffected.
+    // Re-reading or losing a controller is also the explicit panic path for a
+    // missing release. The saved footswitch assignment is deliberately kept.
     engine.releaseMomentaryGestures();
+    engine.releaseSaxFootswitch();
+    engine.cancelSaxFootswitchLearn();
     const auto devices = juce::MidiInput::getAvailableDevices();
     keyStepInputName.clear();
-    juce::String selectedIdentifier;
+    model12MidiInputName.clear();
+    juce::String keyStepIdentifier;
+    juce::String model12Identifier;
 
     for (const auto& device : devices)
     {
-        const auto isKeyStep = device.name.containsIgnoreCase("keystep pro")
-            || (device.name.containsIgnoreCase("arturia")
-                && device.name.containsIgnoreCase("keystep"));
-        if (isKeyStep && selectedIdentifier.isEmpty())
+        if (looksLikeKeyStepMidi(device.name) && keyStepIdentifier.isEmpty())
         {
-            selectedIdentifier = device.identifier;
+            keyStepIdentifier = device.identifier;
             keyStepInputName = device.name;
+        }
+        else if (looksLikeModel12Midi(device.name)
+                 && model12Identifier.isEmpty())
+        {
+            model12Identifier = device.identifier;
+            model12MidiInputName = device.name;
         }
     }
 
     for (const auto& device : devices)
+    {
+        const auto shouldEnable = device.identifier == keyStepIdentifier
+            || device.identifier == model12Identifier;
         deviceManager.setMidiInputDeviceEnabled(
-            device.identifier, device.identifier == selectedIdentifier);
+            device.identifier, shouldEnable);
+    }
 
-    midiConnectionLabel.setText(
-        keyStepInputName.isNotEmpty()
-            ? "ATTIVA\n" + keyStepInputName
-            : "NON TROVATA\nCollega la tastiera via USB e premi RIPROVA",
-        juce::dontSendNotification);
+    juce::String connectionText;
+    if (keyStepInputName.isNotEmpty() && model12MidiInputName.isNotEmpty())
+        connectionText = "2 PORTE MIDI ATTIVE\nKEYSTEP PRO + MODEL 12";
+    else if (keyStepInputName.isNotEmpty())
+        connectionText = "MIDI ATTIVO\n" + keyStepInputName;
+    else if (model12MidiInputName.isNotEmpty())
+        connectionText = "MIDI ATTIVO\n" + model12MidiInputName;
+    else
+        connectionText = "MIDI NON TROVATO\nCollega KeyStep Pro o Model 12";
+    midiConnectionLabel.setText(connectionText, juce::dontSendNotification);
+    updateSaxFootswitchControls();
 }
 
 juce::AudioIODeviceType* MainComponent::getDraftDeviceType()
@@ -1868,10 +2057,13 @@ void MainComponent::applyAudioConfiguration()
     }
 }
 
-void MainComponent::handleIncomingMidiMessage(juce::MidiInput*,
+void MainComponent::handleIncomingMidiMessage(juce::MidiInput* source,
                                                const juce::MidiMessage& message)
 {
-    engine.enqueueMidiMessage(message);
+    const auto role = source != nullptr
+        ? midiInputRoleForName(source->getName())
+        : EcosystemEngine::MidiInputRole::generic;
+    engine.enqueueMidiMessage(message, role);
 }
 
 void MainComponent::timerCallback()
@@ -1886,6 +2078,10 @@ void MainComponent::timerCallback()
     updateClearHold();
     updateControls();
     updateScenarioLabels();
+    const auto binding = engine.getSaxFootswitchBinding();
+    if (! sameSaxFootswitchBinding(binding, persistedSaxFootswitchBinding))
+        saveSaxFootswitchBinding(true);
+    updateSaxFootswitchControls();
     updateHardwareIndicators();
 }
 
@@ -1951,19 +2147,28 @@ void MainComponent::updateHardwareIndicators()
             ? juce::Colour(0xff17463e) : juce::Colour(0xff482b34));
 
     auto keyStepPresent = false;
+    auto model12MidiPresent = false;
     for (const auto& device : juce::MidiInput::getAvailableDevices())
+    {
         if (device.name == keyStepInputName)
             keyStepPresent = true;
+        if (device.name == model12MidiInputName)
+            model12MidiPresent = true;
+    }
 
     const auto droppedMidi = engine.getDroppedMidiMessageCount();
+    const auto midiInputCount = static_cast<int>(keyStepPresent)
+        + static_cast<int>(model12MidiPresent);
     midiStatusLabel.setText(
         droppedMidi > 0 ? "!  MIDI " + juce::String(droppedMidi)
-                        : (keyStepPresent ? "OK  KEYSTEP" : "--  KEYSTEP"),
+                        : (midiInputCount > 0
+                            ? "OK  MIDI " + juce::String(midiInputCount)
+                            : "--  MIDI"),
         juce::dontSendNotification);
     midiStatusLabel.setColour(
         juce::Label::backgroundColourId,
-        keyStepPresent && droppedMidi == 0 ? juce::Colour(0xff17463e)
-                                          : juce::Colour(0xff482b34));
+        midiInputCount > 0 && droppedMidi == 0 ? juce::Colour(0xff17463e)
+                                              : juce::Colour(0xff482b34));
 
     if (settingsVisible)
     {
@@ -2168,6 +2373,9 @@ void MainComponent::updateControls()
 void MainComponent::toggleSettings()
 {
     settingsVisible = ! settingsVisible;
+    // Never leave a hidden learn or a held edge behind when crossing pages.
+    engine.releaseSaxFootswitch();
+    engine.cancelSaxFootswitchLearn();
     if (settingsVisible)
     {
         engine.releaseMomentaryGestures();
@@ -2199,6 +2407,9 @@ void MainComponent::toggleSettings()
     connectionStatusLabel.setVisible(settingsVisible);
     hardwareRouteLabel.setVisible(settingsVisible);
     midiConnectionLabel.setVisible(settingsVisible);
+    saxFootswitchBindingLabel.setVisible(settingsVisible);
+    saxFootswitchLearnButton.setVisible(settingsVisible);
+    saxFootswitchClearButton.setVisible(settingsVisible);
     for (auto* choice : { profileChoice.get(), backendChoice.get(),
                          inputDeviceChoice.get(), outputDeviceChoice.get(),
                          sampleRateChoice.get(), bufferChoice.get(),
@@ -2276,20 +2487,27 @@ void MainComponent::resized()
     if (settingsVisible)
     {
         auto connectionArea = bounds.reduced(18, 10);
-        connectionStatusLabel.setBounds(connectionArea.removeFromTop(54));
-        auto effectiveRow = connectionArea.removeFromTop(64);
-        midiConnectionLabel.setBounds(effectiveRow.removeFromRight(280).reduced(5));
+        connectionStatusLabel.setBounds(connectionArea.removeFromTop(44));
+        auto effectiveRow = connectionArea.removeFromTop(52);
+        midiConnectionLabel.setBounds(effectiveRow.removeFromRight(340).reduced(5));
         hardwareRouteLabel.setBounds(effectiveRow.reduced(5));
 
-        auto actionRow = connectionArea.removeFromBottom(82);
-        rescanAudioButton.setBounds(actionRow.removeFromLeft(285).reduced(5, 7));
-        keyStepRoutingButton.setBounds(actionRow.removeFromRight(285).reduced(5, 7));
-        applyAudioButton.setBounds(actionRow.withSizeKeepingCentre(390, 70));
+        auto pedalRow = connectionArea.removeFromTop(54);
+        saxFootswitchClearButton.setBounds(
+            pedalRow.removeFromRight(150).reduced(4, 3));
+        saxFootswitchLearnButton.setBounds(
+            pedalRow.removeFromRight(275).reduced(4, 3));
+        saxFootswitchBindingLabel.setBounds(pedalRow.reduced(8, 3));
 
-        connectionArea.reduce(0, 6);
+        auto actionRow = connectionArea.removeFromBottom(70);
+        rescanAudioButton.setBounds(actionRow.removeFromLeft(285).reduced(5));
+        keyStepRoutingButton.setBounds(actionRow.removeFromRight(285).reduced(5));
+        applyAudioButton.setBounds(actionRow.withSizeKeepingCentre(390, 60));
+
+        connectionArea.reduce(0, 4);
         constexpr int columns = 3;
         constexpr int rows = 4;
-        constexpr int gap = 12;
+        constexpr int gap = 8;
         std::array<ConnectionChoice*, columns * rows> choices {
             profileChoice.get(), backendChoice.get(), inputDeviceChoice.get(),
             outputDeviceChoice.get(), sampleRateChoice.get(), bufferChoice.get(),

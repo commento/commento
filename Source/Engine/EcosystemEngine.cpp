@@ -16,6 +16,68 @@ constexpr std::uint8_t midiGestureBit = 2u;
 constexpr int freezeController = 80;
 constexpr int echoThrowController = 81;
 constexpr int saxListenController = 82;
+constexpr std::uint32_t saxFootswitchNumberMask = 0xffu;
+constexpr std::uint32_t saxFootswitchTypeShift = 8u;
+constexpr std::uint32_t saxFootswitchTypeMask = 0x7u << saxFootswitchTypeShift;
+constexpr std::uint32_t saxFootswitchRoleShift = 11u;
+constexpr std::uint32_t saxFootswitchRoleMask = 0x3u << saxFootswitchRoleShift;
+constexpr std::uint32_t saxFootswitchBindingMask
+    = saxFootswitchNumberMask | saxFootswitchTypeMask | saxFootswitchRoleMask;
+constexpr std::uint32_t saxFootswitchHeldBit = 1u << 30u;
+constexpr std::uint32_t saxFootswitchLearningBit = 1u << 31u;
+
+[[nodiscard]] bool isReservedPerformanceController(int controller) noexcept
+{
+    return controller == freezeController
+        || controller == echoThrowController
+        || controller == saxListenController
+        || controller == 120 || controller == 123;
+}
+
+[[nodiscard]] std::uint32_t encodeSaxFootswitchBinding(
+    EcosystemEngine::SaxFootswitchBinding binding) noexcept
+{
+    if (! binding.valid())
+        return 0u;
+    return static_cast<std::uint32_t>(binding.number + 1)
+        | (static_cast<std::uint32_t>(binding.type)
+            << saxFootswitchTypeShift)
+        | (static_cast<std::uint32_t>(binding.role)
+            << saxFootswitchRoleShift);
+}
+
+[[nodiscard]] EcosystemEngine::SaxFootswitchBinding
+decodeSaxFootswitchBinding(std::uint32_t state) noexcept
+{
+    EcosystemEngine::SaxFootswitchBinding binding;
+    binding.number = static_cast<int>(state & saxFootswitchNumberMask) - 1;
+    binding.type = static_cast<EcosystemEngine::SaxFootswitchMessageType>(
+        (state & saxFootswitchTypeMask) >> saxFootswitchTypeShift);
+    binding.role = static_cast<EcosystemEngine::MidiInputRole>(
+        (state & saxFootswitchRoleMask) >> saxFootswitchRoleShift);
+    return binding;
+}
+
+[[nodiscard]] EcosystemEngine::SaxFootswitchBinding
+saxFootswitchCandidate(const juce::MidiMessage& message,
+                       EcosystemEngine::MidiInputRole role) noexcept
+{
+    using MessageType = EcosystemEngine::SaxFootswitchMessageType;
+    EcosystemEngine::SaxFootswitchBinding binding;
+    binding.role = role;
+
+    if (message.isController())
+    {
+        const auto controller = message.getControllerNumber();
+        if (message.getControllerValue() >= 64
+            && ! isReservedPerformanceController(controller))
+        {
+            binding.type = MessageType::controller;
+            binding.number = controller;
+        }
+    }
+    return binding;
+}
 
 #if JUCE_LINUX
 [[nodiscard]] int enableRealtimeAudioScheduling() noexcept
@@ -120,9 +182,153 @@ EcosystemEngine::EcosystemEngine()
     activeScenario.store(0);
 }
 
-void EcosystemEngine::enqueueMidiMessage(const juce::MidiMessage& message)
+void EcosystemEngine::beginSaxFootswitchLearn() noexcept
+{
+    auto state = saxFootswitchState.load(std::memory_order_relaxed);
+    for (;;)
+    {
+        const auto desired = (state & saxFootswitchBindingMask)
+            | saxFootswitchLearningBit;
+        if (saxFootswitchState.compare_exchange_weak(
+                state, desired, std::memory_order_release,
+                std::memory_order_relaxed))
+            return;
+    }
+}
+
+void EcosystemEngine::cancelSaxFootswitchLearn() noexcept
+{
+    saxFootswitchState.fetch_and(saxFootswitchBindingMask,
+                                 std::memory_order_release);
+}
+
+void EcosystemEngine::clearSaxFootswitchBinding() noexcept
+{
+    saxFootswitchState.store(0u, std::memory_order_release);
+}
+
+bool EcosystemEngine::isSaxFootswitchLearning() const noexcept
+{
+    return (saxFootswitchState.load(std::memory_order_acquire)
+            & saxFootswitchLearningBit) != 0u;
+}
+
+bool EcosystemEngine::hasSaxFootswitchBinding() const noexcept
+{
+    return getSaxFootswitchBinding().valid();
+}
+
+EcosystemEngine::SaxFootswitchBinding
+EcosystemEngine::getSaxFootswitchBinding() const noexcept
+{
+    return decodeSaxFootswitchBinding(
+        saxFootswitchState.load(std::memory_order_acquire));
+}
+
+void EcosystemEngine::setSaxFootswitchBinding(
+    SaxFootswitchBinding binding) noexcept
+{
+    if (binding.type == SaxFootswitchMessageType::controller
+        && isReservedPerformanceController(binding.number))
+        binding = {};
+    saxFootswitchState.store(encodeSaxFootswitchBinding(binding),
+                             std::memory_order_release);
+}
+
+void EcosystemEngine::releaseSaxFootswitch() noexcept
+{
+    saxFootswitchState.fetch_and(~saxFootswitchHeldBit,
+                                 std::memory_order_release);
+}
+
+bool EcosystemEngine::consumeSaxFootswitchMessage(
+    const juce::MidiMessage& message, MidiInputRole role) noexcept
+{
+    const auto candidate = saxFootswitchCandidate(message, role);
+    auto state = saxFootswitchState.load(std::memory_order_acquire);
+
+    if (candidate.valid())
+    {
+        auto arrivedDuringLearn = false;
+        while ((state & saxFootswitchLearningBit) != 0u)
+        {
+            arrivedDuringLearn = true;
+            auto learnedState = encodeSaxFootswitchBinding(candidate);
+            learnedState |= saxFootswitchHeldBit;
+
+            if (saxFootswitchState.compare_exchange_weak(
+                    state, learnedState, std::memory_order_acq_rel,
+                    std::memory_order_acquire))
+                return true;
+        }
+
+        // Another input may have won the learn CAS. This event still belonged
+        // to the learning gesture and must never start/stop the sax recorder.
+        if (arrivedDuringLearn)
+            return true;
+    }
+
+    if ((state & saxFootswitchLearningBit) != 0u)
+        return false;
+
+    const auto binding = decodeSaxFootswitchBinding(state);
+    if (! binding.valid() || binding.role != role)
+        return false;
+
+    const auto packedBinding = encodeSaxFootswitchBinding(binding);
+    const auto stillMatches = [packedBinding](std::uint32_t value) noexcept
+    {
+        return (value & saxFootswitchLearningBit) == 0u
+            && (value & saxFootswitchBindingMask) == packedBinding;
+    };
+    const auto toggleOnPress = [this, &state, &stillMatches]() noexcept
+    {
+        for (;;)
+        {
+            if (! stillMatches(state))
+                return false;
+            if ((state & saxFootswitchHeldBit) != 0u)
+                return true;
+            if (saxFootswitchState.compare_exchange_weak(
+                    state, state | saxFootswitchHeldBit,
+                    std::memory_order_acq_rel, std::memory_order_acquire))
+            {
+                toggleRecording(midiMemoryCount);
+                return true;
+            }
+        }
+    };
+    const auto releaseHeld = [this, &state, &stillMatches]() noexcept
+    {
+        for (;;)
+        {
+            if (! stillMatches(state))
+                return false;
+            if ((state & saxFootswitchHeldBit) == 0u)
+                return true;
+            if (saxFootswitchState.compare_exchange_weak(
+                    state, state & ~saxFootswitchHeldBit,
+                    std::memory_order_acq_rel, std::memory_order_acquire))
+                return true;
+        }
+    };
+
+    if (binding.type == SaxFootswitchMessageType::controller
+        && message.isController()
+        && message.getControllerNumber() == binding.number)
+        return message.getControllerValue() >= 64
+            ? toggleOnPress() : releaseHeld();
+
+    return false;
+}
+
+void EcosystemEngine::enqueueMidiMessage(const juce::MidiMessage& message,
+                                         MidiInputRole role)
 {
     if (message.isActiveSense() || message.isMidiClock())
+        return;
+
+    if (consumeSaxFootswitchMessage(message, role))
         return;
 
     if (message.isController())
@@ -195,7 +401,12 @@ void EcosystemEngine::toggleRecording(int memoryIndex)
     else if (memoryIndex == midiMemoryCount)
     {
         auto& requested = audioMemory.recordingRequested;
-        requested.store(! requested.load());
+        auto expected = requested.load(std::memory_order_relaxed);
+        while (! requested.compare_exchange_weak(
+            expected, ! expected, std::memory_order_release,
+            std::memory_order_relaxed))
+        {
+        }
     }
 }
 

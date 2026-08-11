@@ -37,6 +37,38 @@ public:
         reverse
     };
 
+    enum class MidiInputRole : int
+    {
+        generic = 0,
+        keyStep,
+        model12
+    };
+
+    enum class SaxFootswitchMessageType : int
+    {
+        none = 0,
+        controller
+    };
+
+    struct SaxFootswitchBinding
+    {
+        MidiInputRole role = MidiInputRole::generic;
+        SaxFootswitchMessageType type = SaxFootswitchMessageType::none;
+        int number = -1;
+
+        [[nodiscard]] bool valid() const noexcept
+        {
+            const auto validRole = role >= MidiInputRole::generic
+                && role <= MidiInputRole::model12;
+            if (! validRole)
+                return false;
+
+            if (type == SaxFootswitchMessageType::controller)
+                return juce::isPositiveAndBelow(number, 128);
+            return false;
+        }
+    };
+
     static constexpr int midiMemoryCount = 4;
     static constexpr int memoryCount = 5;
     static constexpr int bassLayerIndex = 0;
@@ -51,9 +83,19 @@ public:
 
     EcosystemEngine();
 
-    void enqueueMidiMessage(const juce::MidiMessage& message);
+    void enqueueMidiMessage(
+        const juce::MidiMessage& message,
+        MidiInputRole role = MidiInputRole::generic);
     void toggleRecording(int memoryIndex);
     void clearMemory(int memoryIndex);
+    void beginSaxFootswitchLearn() noexcept;
+    void cancelSaxFootswitchLearn() noexcept;
+    void clearSaxFootswitchBinding() noexcept;
+    [[nodiscard]] bool isSaxFootswitchLearning() const noexcept;
+    [[nodiscard]] bool hasSaxFootswitchBinding() const noexcept;
+    [[nodiscard]] SaxFootswitchBinding getSaxFootswitchBinding() const noexcept;
+    void setSaxFootswitchBinding(SaxFootswitchBinding binding) noexcept;
+    void releaseSaxFootswitch() noexcept;
 
     [[nodiscard]] bool isRecording(int memoryIndex) const;
     [[nodiscard]] bool isWaitingForFirstNote(int memoryIndex) const;
@@ -245,6 +287,8 @@ private:
     void setMidiFreezeEnabled(bool shouldFreeze) noexcept;
     void setMidiEchoThrowEnabled(bool shouldThrow) noexcept;
     void clearMomentaryGestures() noexcept;
+    [[nodiscard]] bool consumeSaxFootswitchMessage(
+        const juce::MidiMessage& message, MidiInputRole role) noexcept;
 
     std::array<MidiMemory, midiMemoryCount> midiMemories;
     std::array<std::unique_ptr<AmbientSynth>, midiMemoryCount> internalSynths;
@@ -270,6 +314,9 @@ private:
     std::atomic<int> gestureTarget { bassLayerIndex };
     std::atomic<int> midiFreezeTarget { -1 };
     std::atomic<int> midiEchoThrowTarget { -1 };
+    // Binding, learn and edge state share one lock-free word, so MIDI input and
+    // UI threads cannot observe a partially published learned assignment.
+    std::atomic<std::uint32_t> saxFootswitchState { 0u };
     std::array<juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear>,
                memoryCount> echoThrowMixes;
     std::array<float, memoryCount> echoThrowBlockAmounts {};

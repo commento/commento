@@ -61,6 +61,9 @@ private:
     void saveAudioConfiguration();
     [[nodiscard]] juce::AudioIODeviceType* getDraftDeviceType();
     void configureKeyStepMidi();
+    void loadSaxFootswitchBinding();
+    void saveSaxFootswitchBinding(bool flushToDisk);
+    void updateSaxFootswitchControls();
     void updateHardwareIndicators();
     void updateClearHold();
     void changeScenario(int delta);
@@ -96,10 +99,13 @@ private:
     juce::TextButton saxListenButton { "ASCOLTO: SPENTO" };
     juce::TextButton applyAudioButton { "APPLICA AUDIO" };
     juce::TextButton rescanAudioButton { "RILEGGI DISPOSITIVI" };
-    juce::TextButton keyStepRoutingButton { "RIPROVA KEYSTEP PRO" };
+    juce::TextButton keyStepRoutingButton { "RILEGGI MIDI" };
     juce::Label connectionStatusLabel;
     juce::Label hardwareRouteLabel;
     juce::Label midiConnectionLabel;
+    juce::Label saxFootswitchBindingLabel;
+    juce::TextButton saxFootswitchLearnButton { "IMPARA PEDALE SAX" };
+    juce::TextButton saxFootswitchClearButton { "RIMUOVI" };
     juce::TextButton saxModeButton { "MONO DA INGRESSO 7" };
     juce::Slider decaySlider;
     juce::Label decayLabel;
@@ -146,6 +152,8 @@ private:
     bool settingsVisible = false;
     bool audioReady = false;
     juce::String keyStepInputName;
+    juce::String model12MidiInputName;
+    EcosystemEngine::SaxFootswitchBinding persistedSaxFootswitchBinding;
     double clearHoldStartedAt = -1.0;
     bool clearHoldTriggered = false;
     double animationPhase = 0.0;

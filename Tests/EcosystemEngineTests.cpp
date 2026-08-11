@@ -393,6 +393,287 @@ int main()
                          "GELO/ECO devono restare finiti, rilasciarsi e non cambiare DELAY");
     }
 
+    // The sax footswitch is a source-aware MIDI Learn control, not another
+    // selectable memory. Learning must consume the gesture that establishes
+    // the binding, then a complete release/press edge always addresses the
+    // audio memory regardless of the currently selected performance target.
+    {
+        using MidiRole = EcosystemEngine::MidiInputRole;
+        using PedalType = EcosystemEngine::SaxFootswitchMessageType;
+        using PedalBinding = EcosystemEngine::SaxFootswitchBinding;
+        constexpr auto pedalSampleRate = 8000.0;
+        constexpr auto pedalBlockSize = 400;
+        constexpr auto saxMemory = EcosystemEngine::midiMemoryCount;
+
+        EcosystemEngine pedalEngine;
+        pedalEngine.setSaxPathMode(EcosystemEngine::SaxPathMode::cleanLooper);
+        pedalEngine.setSaxStereoInput(false);
+        pedalEngine.prepare(pedalSampleRate, pedalBlockSize);
+        OutputBlock<EcosystemEngine::logicalOutputBusCount> pedalOutput(
+            pedalBlockSize);
+        std::vector<float> pedalInput(static_cast<std::size_t>(pedalBlockSize));
+        for (int sample = 0; sample < pedalBlockSize; ++sample)
+            pedalInput[static_cast<std::size_t>(sample)]
+                = 0.12f * static_cast<float>(std::sin(
+                    juce::MathConstants<double>::twoPi * 173.0
+                    * static_cast<double>(sample) / pedalSampleRate));
+        const float* pedalInputPointer = pedalInput.data();
+        const auto renderPedal = [&](bool withInput)
+        {
+            pedalOutput.clear();
+            process(pedalEngine,
+                    withInput ? &pedalInputPointer : nullptr,
+                    withInput ? 1 : 0, pedalOutput.pointers.data(),
+                    EcosystemEngine::logicalOutputBusCount, pedalBlockSize);
+        };
+        const auto bindingMatches = [](PedalBinding binding, MidiRole role,
+                                       PedalType type, int number)
+        {
+            return binding.valid() && binding.role == role
+                && binding.type == type && binding.number == number;
+        };
+
+        passed &= expect(! pedalEngine.hasSaxFootswitchBinding()
+                             && ! pedalEngine.isSaxFootswitchLearning(),
+                         "il pedale sax deve partire senza associazione o learn attivo");
+
+        // Performance controls and panic CCs keep their fixed meanings and
+        // cannot accidentally become the sax footswitch during MIDI Learn.
+        pedalEngine.beginSaxFootswitchLearn();
+        for (const auto controller : { 80, 81, 82, 120, 123 })
+            pedalEngine.enqueueMidiMessage(
+                juce::MidiMessage::controllerEvent(2, controller, 127),
+                MidiRole::keyStep);
+        passed &= expect(pedalEngine.isSaxFootswitchLearning()
+                             && ! pedalEngine.hasSaxFootswitchBinding(),
+                         "CC80-82 e CC120/123 non devono essere apprendibili");
+        pedalEngine.cancelSaxFootswitchLearn();
+        pedalEngine.releaseMomentaryGestures();
+        pedalEngine.setSaxListenAmount(0.0f);
+        passed &= expect(! pedalEngine.isSaxFootswitchLearning()
+                             && ! pedalEngine.hasSaxFootswitchBinding(),
+                         "annullare un learn senza candidato deve lasciare il pedale libero");
+
+        // Musical notes, Program Change and transport must never win Learn:
+        // they may already be flowing from a running KeyStep sequence and
+        // cannot be distinguished safely from ordinary performance controls.
+        pedalEngine.beginSaxFootswitchLearn();
+        pedalEngine.enqueueMidiMessage(
+            juce::MidiMessage::noteOn(1, 47, 1.0f), MidiRole::model12);
+        pedalEngine.enqueueMidiMessage(
+            juce::MidiMessage::programChange(1, 19), MidiRole::keyStep);
+        pedalEngine.enqueueMidiMessage(juce::MidiMessage::midiStart(),
+                                       MidiRole::keyStep);
+        pedalEngine.enqueueMidiMessage(
+            juce::MidiMessage::midiMachineControlCommand(
+                juce::MidiMessage::mmc_play),
+            MidiRole::keyStep);
+        renderPedal(false);
+        passed &= expect(pedalEngine.isSaxFootswitchLearning()
+                             && ! pedalEngine.hasSaxFootswitchBinding()
+                             && ! pedalEngine.isRecording(saxMemory),
+                         "note, Program Change e transport non devono essere apprendibili");
+        pedalEngine.cancelSaxFootswitchLearn();
+
+        // Learn the common KeyStep sustain pedal. Its initial high message
+        // establishes a held binding: repeated highs are inert until the first
+        // low, so learning with the pedal down can never start a capture.
+        pedalEngine.beginSaxFootswitchLearn();
+        pedalEngine.enqueueMidiMessage(
+            juce::MidiMessage::controllerEvent(1, 64, 127),
+            MidiRole::keyStep);
+        renderPedal(false);
+        const auto learnedCc = pedalEngine.getSaxFootswitchBinding();
+        const auto ccLearnWasInert
+            = bindingMatches(learnedCc, MidiRole::keyStep,
+                             PedalType::controller, 64)
+            && ! pedalEngine.isSaxFootswitchLearning()
+            && ! pedalEngine.isRecording(saxMemory);
+        pedalEngine.enqueueMidiMessage(
+            juce::MidiMessage::controllerEvent(1, 64, 127),
+            MidiRole::keyStep);
+        pedalEngine.enqueueMidiMessage(
+            juce::MidiMessage::controllerEvent(1, 64, 127),
+            MidiRole::keyStep);
+        renderPedal(false);
+        passed &= expect(ccLearnWasInert
+                             && ! pedalEngine.isRecording(saxMemory),
+                         "il CC appreso e i doppi valori alti non devono ritoggle prima del rilascio");
+
+        pedalEngine.setGestureTarget(3);
+        pedalEngine.enqueueMidiMessage(
+            juce::MidiMessage::controllerEvent(1, 64, 0),
+            MidiRole::keyStep);
+        pedalEngine.enqueueMidiMessage(
+            juce::MidiMessage::controllerEvent(1, 64, 127),
+            MidiRole::keyStep);
+        pedalEngine.enqueueMidiMessage(
+            juce::MidiMessage::controllerEvent(1, 64, 127),
+            MidiRole::keyStep);
+        renderPedal(true);
+        auto pedalTargetsOnlySax = pedalEngine.isRecording(saxMemory);
+        for (int memory = 0; memory < EcosystemEngine::midiMemoryCount;
+             ++memory)
+            pedalTargetsOnlySax &= ! pedalEngine.isRecording(memory);
+        renderPedal(true);
+        const auto seededAudioStayedFinite = pedalOutput.finite(pedalBlockSize);
+
+        pedalEngine.enqueueMidiMessage(
+            juce::MidiMessage::controllerEvent(1, 64, 0),
+            MidiRole::keyStep);
+        pedalEngine.enqueueMidiMessage(
+            juce::MidiMessage::controllerEvent(1, 64, 127),
+            MidiRole::keyStep);
+        renderPedal(false);
+        const auto capturedLength = pedalEngine.getLengthSeconds(saxMemory);
+        const auto closedCycle = ! pedalEngine.isRecording(saxMemory)
+            && pedalEngine.hasMaterial(saxMemory)
+            && std::abs(capturedLength
+                        - 2.0 * pedalBlockSize / pedalSampleRate) < 0.000001;
+
+        pedalEngine.enqueueMidiMessage(
+            juce::MidiMessage::controllerEvent(1, 64, 0),
+            MidiRole::keyStep);
+        pedalEngine.enqueueMidiMessage(
+            juce::MidiMessage::controllerEvent(1, 64, 127),
+            MidiRole::keyStep);
+        renderPedal(true);
+        const auto startedNurture = pedalEngine.isRecording(saxMemory)
+            && pedalEngine.hasMaterial(saxMemory);
+        pedalEngine.enqueueMidiMessage(
+            juce::MidiMessage::controllerEvent(1, 64, 0),
+            MidiRole::keyStep);
+        pedalEngine.enqueueMidiMessage(
+            juce::MidiMessage::controllerEvent(1, 64, 127),
+            MidiRole::keyStep);
+        renderPedal(false);
+        const auto stoppedNurture = ! pedalEngine.isRecording(saxMemory)
+            && pedalEngine.hasMaterial(saxMemory)
+            && std::abs(pedalEngine.getLengthSeconds(saxMemory)
+                        - capturedLength) < 0.000001;
+        passed &= expect(pedalTargetsOnlySax && seededAudioStayedFinite
+                             && closedCycle && startedNurture
+                             && stoppedNurture,
+                         "il pedale deve compiere SEMINA/CHIUDI/NUTRI/STOP sempre su RESPIRO");
+
+        // A bound CC is removed before the ordinary MIDI FIFO, both on press
+        // and release. Record a known note around pedal activity and verify the
+        // loop retains exactly note-on and note-off.
+        pedalEngine.enqueueMidiMessage(
+            juce::MidiMessage::controllerEvent(2, 64, 0),
+            MidiRole::keyStep);
+        pedalEngine.toggleRecording(1);
+        pedalEngine.enqueueMidiMessage(
+            juce::MidiMessage::noteOn(2, 55, 0.7f), MidiRole::keyStep);
+        renderPedal(false);
+        pedalEngine.enqueueMidiMessage(
+            juce::MidiMessage::controllerEvent(2, 64, 127),
+            MidiRole::keyStep);
+        pedalEngine.enqueueMidiMessage(
+            juce::MidiMessage::controllerEvent(2, 64, 127),
+            MidiRole::keyStep);
+        pedalEngine.enqueueMidiMessage(
+            juce::MidiMessage::noteOff(2, 55), MidiRole::keyStep);
+        renderPedal(false);
+        pedalEngine.enqueueMidiMessage(
+            juce::MidiMessage::controllerEvent(2, 64, 0),
+            MidiRole::keyStep);
+        pedalEngine.enqueueMidiMessage(
+            juce::MidiMessage::controllerEvent(2, 64, 127),
+            MidiRole::keyStep);
+        pedalEngine.toggleRecording(1);
+        renderPedal(false);
+        passed &= expect(pedalEngine.hasMaterial(1)
+                             && pedalEngine.getEventCount(1) == 2
+                             && ! pedalEngine.isRecording(1)
+                             && ! pedalEngine.isRecording(saxMemory),
+                         "il binding del pedale deve essere consumato e mai registrato nei loop MIDI");
+
+        // The input role is part of the saved assignment. A matching message
+        // from the other physical port remains ordinary MIDI and cannot operate
+        // RESPIRO. set/get also reject reserved performance CCs.
+        pedalEngine.setSaxFootswitchBinding(
+            { MidiRole::model12, PedalType::controller, 11 });
+        const auto savedBinding = pedalEngine.getSaxFootswitchBinding();
+        pedalEngine.enqueueMidiMessage(
+            juce::MidiMessage::controllerEvent(1, 11, 0),
+            MidiRole::keyStep);
+        pedalEngine.enqueueMidiMessage(
+            juce::MidiMessage::controllerEvent(1, 11, 127),
+            MidiRole::keyStep);
+        renderPedal(false);
+        const auto wrongSourceWasIgnored
+            = ! pedalEngine.isRecording(saxMemory);
+        pedalEngine.enqueueMidiMessage(
+            juce::MidiMessage::controllerEvent(1, 11, 0),
+            MidiRole::model12);
+        pedalEngine.enqueueMidiMessage(
+            juce::MidiMessage::controllerEvent(1, 11, 127),
+            MidiRole::model12);
+        renderPedal(false);
+        const auto rightSourceWorked = pedalEngine.isRecording(saxMemory);
+        pedalEngine.toggleRecording(saxMemory);
+        renderPedal(false);
+        pedalEngine.setSaxFootswitchBinding(
+            { MidiRole::keyStep, PedalType::controller, 80 });
+        passed &= expect(bindingMatches(savedBinding, MidiRole::model12,
+                                        PedalType::controller, 11)
+                             && wrongSourceWasIgnored && rightSourceWorked
+                             && ! pedalEngine.hasSaxFootswitchBinding(),
+                         "set/get deve conservare la sorgente e rifiutare CC riservati");
+
+        // Deterministic UI/MIDI interleavings contain two user actions and
+        // therefore cancel as a pair; neither ordering may lose one toggle.
+        pedalEngine.setSaxFootswitchBinding(
+            { MidiRole::keyStep, PedalType::controller, 64 });
+        pedalEngine.enqueueMidiMessage(
+            juce::MidiMessage::controllerEvent(1, 64, 0),
+            MidiRole::keyStep);
+        pedalEngine.enqueueMidiMessage(
+            juce::MidiMessage::controllerEvent(1, 64, 127),
+            MidiRole::keyStep);
+        pedalEngine.toggleRecording(saxMemory);
+        renderPedal(false);
+        const auto midiThenUiCancelled
+            = ! pedalEngine.isRecording(saxMemory);
+        pedalEngine.enqueueMidiMessage(
+            juce::MidiMessage::controllerEvent(1, 64, 0),
+            MidiRole::keyStep);
+        pedalEngine.toggleRecording(saxMemory);
+        pedalEngine.enqueueMidiMessage(
+            juce::MidiMessage::controllerEvent(1, 64, 127),
+            MidiRole::keyStep);
+        renderPedal(false);
+        const auto uiThenMidiCancelled
+            = ! pedalEngine.isRecording(saxMemory);
+
+        // Panic-release creates a fresh edge; clearing while held removes the
+        // binding as well as its held state, so subsequent physical repeats are
+        // harmless until a new assignment is installed.
+        pedalEngine.releaseSaxFootswitch();
+        pedalEngine.enqueueMidiMessage(
+            juce::MidiMessage::controllerEvent(1, 64, 127),
+            MidiRole::keyStep);
+        renderPedal(false);
+        const auto releaseCreatedFreshEdge
+            = pedalEngine.isRecording(saxMemory);
+        pedalEngine.clearSaxFootswitchBinding();
+        pedalEngine.enqueueMidiMessage(
+            juce::MidiMessage::controllerEvent(1, 64, 127),
+            MidiRole::keyStep);
+        renderPedal(false);
+        const auto clearIgnoredHeldRepeat
+            = pedalEngine.isRecording(saxMemory)
+            && ! pedalEngine.hasSaxFootswitchBinding();
+        pedalEngine.toggleRecording(saxMemory);
+        renderPedal(false);
+        passed &= expect(midiThenUiCancelled && uiThenMidiCancelled
+                             && releaseCreatedFreshEdge
+                             && clearIgnoredHeldRepeat
+                             && ! pedalEngine.isRecording(saxMemory),
+                         "UI/MIDI, panic e clear devono mantenere coerenti i fronti del pedale");
+    }
+
     // Run the dry and ducked render sequentially so the 120-second sax memory
     // of one engine is released before constructing the next. The schedules
     // and signals are identical, making bass/sax equality deterministic while

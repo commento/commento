@@ -28,7 +28,10 @@ Il nome **Commento** e' provvisorio.
 - router configurabile a cinque bus logici: ambiente stereo, basso mono e sax
   stereo, con ingresso e uscite fisiche scegliibili in base all'interfaccia
   collegata;
-- rilevamento automatico del Keystep Pro, senza MIDI thru esterno;
+- rilevamento automatico simultaneo del Keystep Pro e della porta MIDI standard
+  della Model 12, senza MIDI thru esterno;
+- MIDI Learn persistente per associare un footswitch al comando di registrazione
+  di RESPIRO, indipendentemente dalla card selezionata;
 - interfaccia touch a quattro organismi MIDI e una fascia RESPIRO, con stati
   espliciti, meter del sax e controlli grandi;
 - un livello indipendente e anti-click per canale I, MIDI 2/3/4 e sax, richiamato
@@ -41,10 +44,10 @@ Il nome **Commento** e' provvisorio.
 - build macOS e Raspberry Pi OS 64 bit dallo stesso codice.
 
 Questa versione non salva ancora i loop su disco. Salva invece l'ultimo scenario
-selezionato, il livello di GRANA, i cinque livelli di performance e l'ultima
-configurazione audio applicata. GELO ed ECO THROW sono momentanei; ASCOLTO riparte
-spento a ogni avvio. I parametri sonori sono scelti per il live e non espongono
-ancora un pannello di sintesi dettagliato.
+selezionato, il livello di GRANA, i cinque livelli di performance, l'ultima
+configurazione audio applicata e l'eventuale associazione del pedale sax. GELO ed
+ECO THROW sono momentanei; ASCOLTO riparte spento a ogni avvio. I parametri sonori
+sono scelti per il live e non espongono ancora un pannello di sintesi dettagliato.
 
 ## Flusso del sistema autonomo
 
@@ -57,10 +60,12 @@ Sax -> ingressi AUDIO 7/8 -> RESPIRO + effetti -> ritorno AUDIO 7/8 Model 12
 ```
 
 All'avvio Commento legge i sistemi e i dispositivi audio disponibili, ripristina
-l'ultima configurazione riuscita e cerca il Keystep Pro. Alla prima esecuzione
-prova il profilo MODEL 12; se non trova un dispositivo adatto, ripiega sul
-profilo stereo generico. Il riepilogo mostra il dispositivo realmente aperto,
-frequenza, buffer, numero di ingressi/uscite attivi e xrun.
+l'ultima configurazione riuscita e cerca sia il Keystep Pro sia la porta MIDI
+standard della Model 12. Le due sorgenti possono restare abilitate insieme; gli
+endpoint che nel nome contengono `DAW` o `CONTROL` vengono esclusi. Alla prima
+esecuzione prova il profilo MODEL 12; se non trova un dispositivo adatto, ripiega
+sul profilo stereo generico. Il riepilogo mostra il dispositivo realmente
+aperto, frequenza, buffer, numero di ingressi/uscite attivi e xrun.
 
 ### Pagina CONNESSIONI
 
@@ -85,7 +90,37 @@ I profili sono punti di partenza, non vincoli:
 Le frecce modificano soltanto una bozza. Il dispositivo viene riaperto e il
 routing diventa effettivo solo premendo **APPLICA AUDIO**; se l'apertura fallisce,
 Commento conserva la configurazione precedente. **RILEGGI DISPOSITIVI** aggiorna
-l'elenco e **RIPROVA KEYSTEP PRO** ripete la ricerca MIDI.
+l'elenco e **RILEGGI MIDI** ripete la ricerca di KeyStep Pro e Model 12.
+
+Nella stessa pagina, **IMPARA PEDALE SAX** mette Commento in ascolto del prossimo
+Control Change MIDI con valore almeno 64. Fermare temporaneamente sequenze e
+automazioni MIDI, poi premere una volta il footswitch: l'associazione mostrata a
+schermo viene salvata e, da quel momento, il pedale aziona sempre il grande
+pulsante di RESPIRO (`SEMINA`, `CHIUDI IL CICLO`, `NUTRI / OVERDUB` o
+`FERMA NUTRI`) anche quando e' selezionata un'altra card. **RIMUOVI** cancella
+soltanto questa associazione. Il messaggio associato viene consumato dal comando
+RESPIRO e non viene registrato nelle memorie MIDI. Una nuova scansione MIDI o
+l'apertura di CONNESSIONI interrompe un apprendimento in corso e rilascia un
+pedale rimasto
+premuto, ma non cancella l'associazione gia' salvata.
+
+Per collegare il pedale sono previste due possibilita':
+
+- **KeyStep Pro:** collegare un pedale momentaneo al jack Sustain prima di
+  accendere la tastiera, senza tenerlo premuto durante l'accensione. Se necessario
+  usare la MIDI Console di Arturia MIDI Control Center per verificare che venga
+  trasmesso un CC momentaneo, tipicamente con valori 127/0, poi usare
+  **IMPARA PEDALE SAX**. Se il firmware espone soltanto comandi MMC/trasporto,
+  questi non vengono appresi per evitare conflitti con PLAY/STOP;
+- **Model 12:** usare un foot controller che generi MIDI, collegarlo al MIDI IN
+  DIN della Model 12 e collegare la Model 12 via USB al Raspberry Pi. Configurare
+  il controller in modalita' momentanea/gate con un CC libero e valori 127/0.
+  Commento ascolta la porta MIDI standard, non la seconda porta DAW/control
+  (`MIDIIN2` su Windows).
+
+Il jack `FOOTSWITCH` passivo della Model 12 comanda funzioni interne del mixer e
+non espone il pedale come messaggio MIDI a Commento: non puo' quindi essere usato
+direttamente per questo MIDI Learn.
 
 `NESSUNO - CAPTURE OFF` nel campo dispositivo di ingresso apre davvero solo
 l'uscita audio: nessun flusso di cattura viene richiesto al driver. E' diverso da
@@ -163,8 +198,10 @@ durante il collegamento.
   per GELO, `CC81` per ECO THROW e `CC82` per ASCOLTO. I primi due sono
   momentanei (`0-63` rilascia, `64-127` preme); CC82 controlla direttamente
   l'intensita' `0-127`. Questi tre CC sono consumati dal motore e non finiscono
-  nelle memorie MIDI. Il sustain `CC64` resta libero. Se si perde un rilascio
-  MIDI, aprire **CONNESSIONI** o usare **RIPROVA KEYSTEP PRO** come panic; anche
+  nelle memorie MIDI. Il sustain `CC64` resta libero finche' non viene appreso
+  esplicitamente come pedale RESPIRO; dopo l'associazione viene consumato dal
+  comando del looper. Se si perde un rilascio
+  MIDI, aprire **CONNESSIONI** o usare **RILEGGI MIDI** come panic; anche
   `CC120/123` rilasciano entrambi i momentanei;
 - su BASSO LIVE usare **MUTA BASSO LIVE** / **RIATTIVA BASSO LIVE**; e' un mute
   rapido e il MIDI 5 suona il basso senza essere registrato in una memoria MIDI;
