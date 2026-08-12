@@ -142,6 +142,20 @@ public:
     void setSaxFootswitchBinding(SaxFootswitchBinding binding) noexcept;
     void releaseSaxFootswitch() noexcept;
     void releaseNm2Gestures() noexcept;
+    // What the dedicated endpoint last sent. Without this a controller whose
+    // preset no longer matches the factory grid is swallowed in silence and
+    // looks identical to one that is not connected at all.
+    struct Nm2Diagnostics
+    {
+        enum class Kind : int { none = 0, noteOn, noteOff, controller, other };
+        Kind kind = Kind::none;
+        int number = -1;
+        int channel = 0;
+        int value = 0;
+        int messageCount = 0;
+    };
+
+    [[nodiscard]] Nm2Diagnostics getNm2Diagnostics() const noexcept;
     [[nodiscard]] std::uint32_t getNm2HeldMask() const noexcept;
     [[nodiscard]] bool isNm2GestureHeld(Nm2Gesture gesture) const noexcept;
     [[nodiscard]] float getNm2TiltDepth() const noexcept;
@@ -438,6 +452,11 @@ private:
     std::atomic<int> midiEchoThrowTarget { -1 };
     std::atomic<int> midiFreeTailTarget { -1 };
     std::atomic<std::uint32_t> nm2HeldMask { 0u };
+    std::atomic<int> nm2LastEventKind { 0 };
+    std::atomic<int> nm2LastEventNumber { -1 };
+    std::atomic<int> nm2LastEventChannel { 0 };
+    std::atomic<int> nm2LastEventValue { 0 };
+    std::atomic<int> nm2EventCount { 0 };
     // Only MIDI/device-management threads enter this very short critical
     // section. The audio callback merely reads the atomics above/below.
     juce::SpinLock nm2ControlLock;

@@ -1541,15 +1541,41 @@ void MainComponent::configureKeyStepMidi()
     if (nm2MidiInputName.isNotEmpty())
         activeSources.add(nm2IsBluetooth ? "NM2 BLE" : "NM2");
 
+    // The NM2 is recognised only by the name its endpoint exposes. When that
+    // name does not match, the port is never enabled and the controller looks
+    // simply dead, with nothing on screen saying why. Listing what was
+    // actually found turns that silent failure into something readable from
+    // the instrument, without needing a terminal on the Raspberry Pi.
+    juce::StringArray unmatchedEndpoints;
+    for (const auto& device : devices)
+        if (device.identifier != keyStepIdentifier
+            && device.identifier != model12Identifier
+            && device.identifier != nm2MidiInputIdentifier
+            && device.name.isNotEmpty())
+            unmatchedEndpoints.add(device.name);
+    unmatchedEndpoints.removeDuplicates(true);
+
+    auto nm2Text = nm2MidiInputName.isEmpty()
+        ? juce::String("\nNM2: ATTESA USB / BLE")
+        : "\nNM2: PRONTO  /  " + nm2MidiInputName;
+    if (nm2MidiInputName.isEmpty() && ! unmatchedEndpoints.isEmpty())
+    {
+        constexpr auto maximumListed = 4;
+        auto listed = unmatchedEndpoints;
+        const auto hidden = listed.size() - maximumListed;
+        if (hidden > 0)
+            listed.removeRange(maximumListed, hidden);
+        nm2Text += "\nPORTE VISTE: " + listed.joinIntoString(" | ")
+                 + (hidden > 0 ? " | +" + juce::String(hidden) : juce::String());
+    }
+
     const auto connectionText = activeSources.isEmpty()
-        ? juce::String("MIDI NON TROVATO\nNM2: ATTESA USB / BLE")
+        ? "MIDI NON TROVATO" + nm2Text
         : juce::String(activeSources.size())
             + (activeSources.size() == 1
                 ? " PORTA MIDI ATTIVA  /  " : " PORTE MIDI ATTIVE  /  ")
             + activeSources.joinIntoString(" + ")
-            + (nm2MidiInputName.isEmpty()
-                ? "\nNM2: ATTESA USB / BLE"
-                : "\nNM2: PRONTO  /  " + nm2MidiInputName);
+            + nm2Text;
     midiConnectionLabel.setText(connectionText, juce::dontSendNotification);
     updateSaxFootswitchControls();
 }
@@ -2771,10 +2797,39 @@ void MainComponent::updateControls()
     }
     else
     {
+        // Say what the endpoint actually sent. A controller whose preset no
+        // longer matches the factory grid used to look exactly like one that
+        // was never plugged in, which is impossible to tell apart on stage.
+        const auto diagnostics = engine.getNm2Diagnostics();
+        juce::String traffic;
+        if (diagnostics.messageCount > 0)
+        {
+            const auto kindName = [&]() -> juce::String
+            {
+                using Kind = EcosystemEngine::Nm2Diagnostics::Kind;
+                switch (diagnostics.kind)
+                {
+                    case Kind::noteOn: return "NOTA";
+                    case Kind::noteOff: return "NOTA OFF";
+                    case Kind::controller: return "CC";
+                    case Kind::other: return "ALTRO";
+                    case Kind::none: break;
+                }
+                return "?";
+            }();
+            traffic = "  /  ULTIMO: " + kindName + " "
+                    + juce::String(diagnostics.number) + " CH"
+                    + juce::String(diagnostics.channel) + "  /  "
+                    + juce::String(diagnostics.messageCount) + " MSG";
+        }
+        else if (nm2InputWasPresent)
+            traffic = "  /  NESSUN MESSAGGIO RICEVUTO";
+
         gesturesHintLabel.setText(
-            nm2InputWasPresent
+            (nm2InputWasPresent
                 ? "NM2 PRONTO  /  COLORI SU SAX + RESPIRO  /  ASCOLTO APRE IL TAPPETO"
-                : "NM2 IN ATTESA  /  COLLEGA USB O ESPONI BLE MIDI  /  I GESTI TOUCH RESTANO ATTIVI",
+                : "NM2 IN ATTESA  /  COLLEGA USB O ESPONI BLE MIDI  /  I GESTI TOUCH RESTANO ATTIVI")
+                + traffic,
             juce::dontSendNotification);
         gesturesHintLabel.setColour(juce::Label::textColourId,
                                     juce::Colour(quietText));

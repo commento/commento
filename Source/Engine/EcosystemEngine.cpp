@@ -265,6 +265,19 @@ void EcosystemEngine::releaseSaxFootswitch() noexcept
                                  std::memory_order_release);
 }
 
+EcosystemEngine::Nm2Diagnostics
+EcosystemEngine::getNm2Diagnostics() const noexcept
+{
+    Nm2Diagnostics diagnostics;
+    diagnostics.kind = static_cast<Nm2Diagnostics::Kind>(
+        nm2LastEventKind.load(std::memory_order_relaxed));
+    diagnostics.number = nm2LastEventNumber.load(std::memory_order_relaxed);
+    diagnostics.channel = nm2LastEventChannel.load(std::memory_order_relaxed);
+    diagnostics.value = nm2LastEventValue.load(std::memory_order_relaxed);
+    diagnostics.messageCount = nm2EventCount.load(std::memory_order_relaxed);
+    return diagnostics;
+}
+
 std::uint32_t EcosystemEngine::getNm2HeldMask() const noexcept
 {
     return nm2HeldMask.load(std::memory_order_acquire);
@@ -441,6 +454,39 @@ bool EcosystemEngine::consumeNm2Message(
 {
     if (role != MidiInputRole::nm2)
         return false;
+
+    // Record every message from the endpoint before any of it is interpreted,
+    // so a controller sending something Commento does not recognise can still
+    // be seen to be alive and can be read on the GESTI page.
+    {
+        using Kind = Nm2Diagnostics::Kind;
+        auto kind = Kind::other;
+        auto number = -1;
+        auto value = 0;
+        if (message.isNoteOn())
+        {
+            kind = Kind::noteOn;
+            number = message.getNoteNumber();
+            value = message.getVelocity();
+        }
+        else if (message.isNoteOff())
+        {
+            kind = Kind::noteOff;
+            number = message.getNoteNumber();
+        }
+        else if (message.isController())
+        {
+            kind = Kind::controller;
+            number = message.getControllerNumber();
+            value = message.getControllerValue();
+        }
+        nm2LastEventKind.store(static_cast<int>(kind), std::memory_order_relaxed);
+        nm2LastEventNumber.store(number, std::memory_order_relaxed);
+        nm2LastEventChannel.store(message.getChannel(),
+                                  std::memory_order_relaxed);
+        nm2LastEventValue.store(value, std::memory_order_relaxed);
+        nm2EventCount.fetch_add(1, std::memory_order_relaxed);
+    }
 
     const juce::SpinLock::ScopedLockType controlLock(nm2ControlLock);
 
