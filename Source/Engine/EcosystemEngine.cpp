@@ -23,10 +23,13 @@ constexpr int thinningController = 84;
 constexpr std::uint32_t saxFootswitchNumberMask = 0xffu;
 
 // Depth a colour reaches from the pad alone, before the player moves the
-// instrument. It is deliberately short of full: the remaining travel is what
-// the tilt sensor buys, and a pad that already gave everything would leave
-// the movement nothing to say.
-constexpr float nm2TiltBaseDepth = 0.70f;
+// instrument. At 1.0 the pad already gives everything and the tilt is inert,
+// which is the default: a pad has to hit at full force, and on BLE the CC
+// stream the sensor produces competes with the Note Offs of the pads
+// themselves. Lower this to hand the remaining travel to the movement of the
+// instrument - 0.70 is a strong, clearly audible range - once the link has
+// been shown to keep up, ideally over USB-C.
+constexpr float nm2TiltBaseDepth = 1.00f;
 // Fraction of the sensor's range, away from the pose held when the phrase
 // started, that reaches full depth. About a fifth of the travel keeps the
 // gesture inside a movement a player can make while still playing.
@@ -1034,6 +1037,15 @@ void EcosystemEngine::setLoopPlaying(int memoryIndex,
         || ! juce::isPositiveAndBelow(memoryIndex, memoryCount))
         return;
 
+    // Asking for PLAY from the screen always wins over a held NM2 pad. A lost
+    // Note Off used to leave PAUSA latched onto RESPIRO forever: the button
+    // kept writing this request while isLoopPlaying() kept answering false,
+    // so the loop could never be recovered without restarting. The person at
+    // the instrument has to be able to overrule the controller.
+    if (shouldPlay
+        && nm2PauseTarget.load(std::memory_order_acquire) == memoryIndex)
+        nm2PauseTarget.store(-1, std::memory_order_release);
+
     loopPlayingRequested[static_cast<std::size_t>(memoryIndex)].store(
         shouldPlay, std::memory_order_release);
 }
@@ -1404,6 +1416,10 @@ void EcosystemEngine::prepare(double newSampleRate, int maximumBlockSize)
         -juce::MathConstants<double>::twoPi * safeGrainCutoff / sampleRate));
     grainHoldCounter = 0;
     grainFilterNeedsPrime = true;
+    nm2GrainHeldSamples.fill(0.0f);
+    nm2GrainFilteredSamples.fill(0.0f);
+    nm2GrainHoldCounter = 0;
+    nm2GrainFilterNeedsPrime = true;
     audioEvolutionFilteredSamples.fill(0.0f);
     audioLoopLastSamples.fill(0.0f);
     constexpr auto audioEvolutionCutoffHz = 6000.0;
@@ -1967,13 +1983,13 @@ void EcosystemEngine::updateNm2ColourFilter() noexcept
     // straight away while its corner is still climbing.
     const auto darkCutoff = juce::jmap(
         juce::jlimit(0.0f, 1.0f, nm2DarkEnvelope.getCurrentValue()),
-        1500.0f, 480.0f);
+        900.0f, 200.0f);
     const auto radioCutoff = juce::jmap(
         juce::jlimit(0.0f, 1.0f, nm2RadioEnvelope.getCurrentValue()),
-        700.0f, 1150.0f);
+        600.0f, 1300.0f);
     const auto bladeCutoff = juce::jmap(
         juce::jlimit(0.0f, 1.0f, nm2BladeEnvelope.getCurrentValue()),
-        500.0f, 2100.0f);
+        700.0f, 3800.0f);
 
     // Blending in the logarithmic domain keeps two colours held together
     // meeting at the musically expected corner instead of at an arithmetic
@@ -1983,9 +1999,11 @@ void EcosystemEngine::updateNm2ColourFilter() noexcept
                          + bladeWeight * std::log(bladeCutoff);
     const auto cutoff = juce::jlimit(
         60.0f, static_cast<float>(sampleRate * 0.45), std::exp(logCutoff));
-    const auto q = juce::jmax(0.4f, darkWeight * 1.10f
-                                  + radioWeight * 3.20f
-                                  + bladeWeight * 1.80f);
+    // Resonance is what turns a corner frequency into a character. RADIO in
+    // particular only sounds like a radio when the band is genuinely narrow.
+    const auto q = juce::jmax(0.4f, darkWeight * 2.40f
+                                  + radioWeight * 8.00f
+                                  + bladeWeight * 3.20f);
 
     nm2ColourK = 1.0f / q;
     nm2ColourG = static_cast<float>(std::tan(
@@ -1999,12 +2017,15 @@ void EcosystemEngine::updateNm2ColourFilter() noexcept
     // turns RADIO into a unity-gain band rather than a resonant boost.
     nm2ColourBandWeight = radioWeight * nm2ColourK;
     nm2ColourHighWeight = bladeWeight;
-    // Every colour throws away part of the spectrum. Compensating here is what
-    // stops a pad from changing how loud the player is instead of only how
-    // they sound.
-    nm2ColourMakeup = darkWeight * 1.70f
+    // Every colour throws away part of the spectrum, and compensating for that
+    // is what stops a pad from changing how loud the player is instead of only
+    // how they sound. RADIO and LAMA are compensated deliberately less than
+    // OMBRA: restoring their level fully would put back the very body they
+    // exist to remove, and a band-pass that comes back at the same loudness
+    // stops reading as a band-pass at all.
+    nm2ColourMakeup = darkWeight * 2.60f
                     + radioWeight * 2.00f
-                    + bladeWeight * 2.00f;
+                    + bladeWeight * 1.70f;
 }
 
 void EcosystemEngine::updateNm2EffectTargets(int numSamples) noexcept
@@ -2042,30 +2063,30 @@ void EcosystemEngine::updateNm2EffectTargets(int numSamples) noexcept
     setTarget(nm2FuzzMix, active(Nm2Gesture::fuzz) ? 1.0f : 0.0f,
               0.035, 0.35);
     setTarget(nm2DarkMix,
-              active(Nm2Gesture::ombra) ? 1.0f : (abisso ? 0.78f : 0.0f),
+              active(Nm2Gesture::ombra) ? 1.0f : (abisso ? 0.90f : 0.0f),
               0.080, 0.48);
     setTarget(nm2RadioMix, active(Nm2Gesture::radio) ? 1.0f : 0.0f,
               0.055, 0.40);
     setTarget(nm2NarrowMix, active(Nm2Gesture::stretto) ? 1.0f : 0.0f,
               0.070, 0.60);
     setTarget(nm2EmptyMix,
-              active(Nm2Gesture::vuoto) ? 1.0f : (abisso ? 0.42f : 0.0f),
+              active(Nm2Gesture::vuoto) ? 1.0f : (abisso ? 0.55f : 0.0f),
               0.100, 0.70);
     setTarget(nm2BladeMix, active(Nm2Gesture::lama) ? 1.0f : 0.0f,
               0.055, 0.42);
-    setTarget(nm2PulseMix, active(Nm2Gesture::pulso) ? 0.78f : 0.0f,
+    setTarget(nm2PulseMix, active(Nm2Gesture::pulso) ? 1.0f : 0.0f,
               0.040, 0.32);
-    setTarget(nm2MetalMix, active(Nm2Gesture::ferro) ? 0.68f : 0.0f,
+    setTarget(nm2MetalMix, active(Nm2Gesture::ferro) ? 0.92f : 0.0f,
               0.030, 0.36);
-    setTarget(nm2OrbitMix, active(Nm2Gesture::orbita) ? 0.82f : 0.0f,
+    setTarget(nm2OrbitMix, active(Nm2Gesture::orbita) ? 1.0f : 0.0f,
               0.100, 0.80);
 
     setTarget(nm2DarkEnvelope, active(Nm2Gesture::ombra) || abisso ? 1.0f : 0.0f,
-              0.70, 0.35);
+              0.45, 0.35);
     setTarget(nm2RadioEnvelope, active(Nm2Gesture::radio) ? 1.0f : 0.0f,
               0.20, 0.25);
     setTarget(nm2BladeEnvelope, active(Nm2Gesture::lama) ? 1.0f : 0.0f,
-              0.28, 0.30);
+              0.22, 0.30);
 
     // Free-running LFOs give the same pad a different result on every press:
     // sometimes it opens on a peak, sometimes on a trough. Starting each one
@@ -2508,6 +2529,12 @@ void EcosystemEngine::processPerformanceEffects(
     // the existing per-bus safety protection.
     constexpr int holdSamples = 8;
     constexpr float quantisationSteps = 64.0f;
+    // Roughly four bits and a 4 kHz hold at 48 kHz, against the six bits and
+    // 6 kHz above. The scenario texture stays where the factory bass levels
+    // were calibrated; the wearable pad is the one that has to announce
+    // itself over a live horn.
+    constexpr int nm2HoldSamples = 12;
+    constexpr float nm2QuantisationSteps = 20.0f;
     const auto tilt = juce::jlimit(
         0.0f, 1.0f, nm2TiltBlockDepth.load(std::memory_order_relaxed));
     for (int sample = 0; sample < numSamples; ++sample)
@@ -2543,6 +2570,32 @@ void EcosystemEngine::processPerformanceEffects(
         }
         --grainHoldCounter;
 
+        const auto nm2GrainAudible = nm2Grain > 0.0001f;
+        if (nm2GrainAudible && nm2GrainHoldCounter <= 0)
+        {
+            for (const auto channel : { saxLeftBus, saxRightBus })
+            {
+                if (! juce::isPositiveAndBelow(channel, channels))
+                    continue;
+                const auto* data = outputs[channel];
+                const auto input = data != nullptr
+                                && std::isfinite(data[sample])
+                    ? data[sample] : 0.0f;
+                auto& held = nm2GrainHeldSamples[
+                    static_cast<std::size_t>(channel)];
+                held = std::round(input * nm2QuantisationSteps)
+                     / nm2QuantisationSteps;
+                if (nm2GrainFilterNeedsPrime)
+                    nm2GrainFilteredSamples[
+                        static_cast<std::size_t>(channel)] = held;
+            }
+            nm2GrainFilterNeedsPrime = false;
+            nm2GrainHoldCounter = nm2HoldSamples;
+        }
+        if (! nm2GrainAudible)
+            nm2GrainFilterNeedsPrime = true;
+        --nm2GrainHoldCounter;
+
         for (int channel = 0; channel < channels; ++channel)
         {
             auto* data = outputs[channel];
@@ -2560,19 +2613,30 @@ void EcosystemEngine::processPerformanceEffects(
             // three ambient loops stable underneath the performed gesture.
             const auto isSaxChannel = channel == saxLeftBus
                                    || channel == saxRightBus;
-            const auto effectiveGrain = isSaxChannel
-                ? juce::jmax(grain, nm2Grain) : grain;
-            const auto effectiveFuzz = isSaxChannel
-                ? juce::jmax(fuzz, nm2Fuzz) : fuzz;
-            const auto crushed = dry
-                + (filtered - dry) * effectiveGrain;
-            // Clipping raises the average level on its own. At the old 0.45
-            // the quiet part of a phrase came back about 5 dB louder, so FUZZ
-            // read as a volume pedal as much as a colour.
+            auto shaped = dry + (filtered - dry) * grain;
             const auto hardFuzz = juce::jlimit(-1.0f, 1.0f,
-                                               crushed * 4.0f) * 0.30f;
-            data[sample] = crushed
-                + (hardFuzz - crushed) * effectiveFuzz;
+                                               shaped * 4.0f) * 0.45f;
+            shaped += (hardFuzz - shaped) * fuzz;
+
+            // The NM2 versions are applied on top, with their own far harder
+            // constants. When no pad is held both blends are by zero and the
+            // sax bus comes out bit-identical to the global path above.
+            if (isSaxChannel)
+            {
+                auto& nm2Filtered = nm2GrainFilteredSamples[
+                    static_cast<std::size_t>(channel)];
+                nm2Filtered += grainLowPassCoefficient
+                    * (nm2GrainHeldSamples[static_cast<std::size_t>(channel)]
+                       - nm2Filtered);
+                shaped += (nm2Filtered - shaped) * nm2Grain;
+                // The drive decides how distorted the sound is, the scale how
+                // loud it comes back: clipping this hard would otherwise
+                // return several dB louder and read as a volume pedal.
+                const auto nm2HardFuzz = juce::jlimit(-1.0f, 1.0f,
+                                                      shaped * 14.0f) * 0.20f;
+                shaped += (nm2HardFuzz - shaped) * nm2Fuzz;
+            }
+            data[sample] = shaped;
         }
     }
 }
@@ -2695,12 +2759,12 @@ void EcosystemEngine::processNm2Effects(
                                     * nm2ColourMakeup;
                 coloured = input + (filtered - input) * colour;
             }
-            const auto emptyGain = 1.0f - empty * 0.94f;
-            const auto pulseGain = 1.0f - pulse * 0.72f * pulseCurve;
+            const auto emptyGain = 1.0f - empty * 0.995f;
+            const auto pulseGain = 1.0f - pulse * 0.94f * pulseCurve;
             // Crossfade into a true bipolar ring modulation. Unlike PULSO it
             // changes the spectrum, not merely the loudness envelope.
             const auto metalGain = (1.0f - metal)
-                + metal * 0.82f * metalMakeup * metalWave;
+                + metal * metalMakeup * metalWave;
             frame[static_cast<std::size_t>(channel)]
                 = coloured * emptyGain * pulseGain * metalGain;
         }
@@ -2715,12 +2779,12 @@ void EcosystemEngine::processNm2Effects(
             auto& right = frame[static_cast<std::size_t>(rightChannel)];
             const auto mid = 0.5f * (left + right);
             const auto side = 0.5f * (left - right)
-                * (1.0f - narrow * 0.92f);
+                * (1.0f - narrow);
             left = mid + side;
             right = mid - side;
-            left *= 1.0f - orbit * 0.72f
+            left *= 1.0f - orbit * 0.97f
                 * (0.5f + 0.5f * orbitWave);
-            right *= 1.0f - orbit * 0.72f
+            right *= 1.0f - orbit * 0.97f
                 * (0.5f - 0.5f * orbitWave);
         };
         processPair(saxLeftBus, saxRightBus);

@@ -5054,6 +5054,25 @@ int main()
         const auto pauseDidNotOverrideNewUiIntent
             = ! nm2Engine.isLoopPlaying(nm2SaxMemory);
         nm2Engine.setLoopPlaying(nm2SaxMemory, true);
+        // A lost Note Off must never be able to strand RESPIRO. Simulate the
+        // pad staying latched and check the screen can still start the loop:
+        // without this the button kept writing PLAY while isLoopPlaying()
+        // answered false, and the loop was unrecoverable without a restart.
+        nm2Engine.enqueueMidiMessage(
+            juce::MidiMessage::noteOn(nm2Channel, pauseNote, 1.0f),
+            MidiRole::nm2);
+        const auto stuckPadPausedRespiro
+            = ! nm2Engine.isLoopPlaying(nm2SaxMemory);
+        nm2Engine.setLoopPlaying(nm2SaxMemory, true);
+        const auto uiRecoveredFromStuckPad
+            = nm2Engine.isLoopPlaying(nm2SaxMemory);
+        nm2Engine.enqueueMidiMessage(
+            juce::MidiMessage::noteOff(nm2Channel, pauseNote), MidiRole::nm2);
+        renderNm2();
+        passed &= expect(stuckPadPausedRespiro && uiRecoveredFromStuckPad
+                             && nm2Engine.isLoopPlaying(nm2SaxMemory),
+                         "PLAY dallo schermo deve riprendere RESPIRO anche con PAUSA incastrata");
+
         passed &= expect(pauseLoopWasSeeded && onlySaxLoopPaused
                              && pauseReleasedToPreviousPlay
                              && pauseDidNotOverrideNewUiIntent
@@ -5213,9 +5232,10 @@ int main()
             = ! silentSensorEngine.hasNm2TiltSensor()
             && std::abs(silentSensorEngine.getNm2TiltDepth() - 1.0f) < 0.001f;
 
-        // With the sensor alive the depth is measured from the pose held when
-        // the phrase started, so a pad pressed without moving the instrument
-        // sits at the base depth and travels up from there.
+        // With the sensor alive the depth is still measured from the pose held
+        // when the phrase started, but the base depth ships at full: a pad has
+        // to hit at full force by default, so moving the instrument must never
+        // make a gesture quieter than pressing the pad alone.
         const auto sendTilt = [&](int value)
         {
             nm2Engine.enqueueMidiMessage(
@@ -5240,10 +5260,11 @@ int main()
         renderNm2();
         passed &= expect(depthIsFullWithoutSensor
                              && nm2Engine.hasNm2TiltSensor()
-                             && restingDepth < 0.99f
-                             && movedDepth > restingDepth + 0.05f
-                             && movedDepth <= 1.0f,
-                         "il tilt deve partire dalla posa della pressione e approfondire il gesto");
+                             && restingDepth >= movedDepth - 0.0001f
+                             && movedDepth <= 1.0f
+                             && restingDepth <= 1.0f
+                             && std::abs(restingDepth - 1.0f) < 0.001f,
+                         "il tilt non deve mai indebolire un gesto rispetto alla sola pressione");
 
         // A reference pose captured for one phrase must not leak into the
         // next: after the pads are released a new press starts from wherever
@@ -5281,12 +5302,23 @@ int main()
             probeBlockSize);
         OutputBlock<EcosystemEngine::logicalOutputBusCount> referenceOutput(
             probeBlockSize);
+        // A reed-like harmonic series rather than a single sine. A band-pass
+        // or a high-pass measured against one low sine says almost nothing:
+        // the tone either survives or vanishes, and the number that comes out
+        // has no relation to what the filter does to a real horn.
         std::vector<float> saxInput(static_cast<std::size_t>(probeBlockSize));
         for (int sample = 0; sample < probeBlockSize; ++sample)
-            saxInput[static_cast<std::size_t>(sample)]
-                = 0.16f * static_cast<float>(std::sin(
+        {
+            auto value = 0.0;
+            for (int partial = 1; partial <= 8; ++partial)
+                value += std::sin(
                     juce::MathConstants<double>::twoPi * 211.0
-                    * static_cast<double>(sample) / probeSampleRate));
+                    * static_cast<double>(partial)
+                    * static_cast<double>(sample) / probeSampleRate)
+                    / static_cast<double>(partial);
+            saxInput[static_cast<std::size_t>(sample)]
+                = 0.09f * static_cast<float>(value);
+        }
         const float* saxInputPointer = saxInput.data();
         const auto renderPair = [&]()
         {
@@ -5340,6 +5372,27 @@ int main()
         const auto colourFilterIsTransparentAtRest
             = saxDifferenceFromReference() <= 0.0f;
 
+        // How much of the sax bus a gesture actually rewrites, relative to the
+        // untouched signal. A colour that scores a few percent is one the
+        // player cannot hear over a live horn, which is exactly the failure
+        // this suite missed the first time round.
+        const auto saxReferenceEnergy = [&]()
+        {
+            auto energy = 0.0f;
+            for (const auto channel : { EcosystemEngine::saxLeftBus,
+                                        EcosystemEngine::saxRightBus })
+            {
+                const auto index = static_cast<std::size_t>(channel);
+                for (int sample = 0; sample < probeBlockSize; ++sample)
+                    energy += std::abs(
+                        referenceOutput.storage[index][
+                            static_cast<std::size_t>(sample)]);
+            }
+            return energy;
+        };
+        auto weakestColourStrength = 1.0f;
+        std::string weakestColourName = "nessuno";
+
         const auto inspectPair = [&]()
         {
             nm2AudioFinite &= activeOutput.finite(probeBlockSize)
@@ -5390,6 +5443,38 @@ int main()
                 }
                 ombraChangedSax = saxDifference > 0.0001f;
             }
+
+            // STRETTO is excluded on purpose: the probe feeds a mono source,
+            // where collapsing the stereo pair has almost nothing to collapse.
+            const auto gesture = static_cast<EcosystemEngine::Nm2Gesture>(index);
+            const auto isMeasurableColour
+                = gesture == EcosystemEngine::Nm2Gesture::ombra
+               || gesture == EcosystemEngine::Nm2Gesture::radio
+               || gesture == EcosystemEngine::Nm2Gesture::lama
+               || gesture == EcosystemEngine::Nm2Gesture::grana
+               || gesture == EcosystemEngine::Nm2Gesture::fuzz
+               || gesture == EcosystemEngine::Nm2Gesture::ferro
+               || gesture == EcosystemEngine::Nm2Gesture::pulso
+               || gesture == EcosystemEngine::Nm2Gesture::orbita
+               || gesture == EcosystemEngine::Nm2Gesture::vuoto;
+            if (isMeasurableColour)
+            {
+                // Let the attack ramp finish before measuring.
+                for (int block = 0; block < 6; ++block)
+                {
+                    renderPair();
+                    inspectPair();
+                }
+                const auto energy = saxReferenceEnergy();
+                const auto strength = energy > 0.0001f
+                    ? saxDifferenceFromReference() / energy : 0.0f;
+                if (strength < weakestColourStrength)
+                {
+                    weakestColourStrength = strength;
+                    weakestColourName
+                        = EcosystemEngine::getNm2GestureName(gesture);
+                }
+            }
             active.enqueueMidiMessage(
                 juce::MidiMessage::noteOff(
                     EcosystemEngine::nm2MidiChannel, note),
@@ -5405,6 +5490,13 @@ int main()
                          "i colori NM2 devono elaborare SAX/RESPIRO senza tingere i loop ambiente");
         passed &= expect(colourFilterIsTransparentAtRest,
                          "senza colori premuti il filtro risonante deve essere trasparente");
+        if (weakestColourStrength < 0.30f)
+            std::cerr << "colore piu' debole: " << weakestColourName << " a "
+                      << static_cast<int>(std::round(
+                             weakestColourStrength * 100.0f))
+                      << "% del bus sax\n";
+        passed &= expect(weakestColourStrength >= 0.30f,
+                         "ogni colore NM2 deve riscrivere almeno il 30% del bus sax");
     }
 
     // CADUTA and SCATTO live entirely inside the sax delay, which only runs

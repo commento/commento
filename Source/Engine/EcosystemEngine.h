@@ -535,6 +535,14 @@ private:
         fuzzEffectMix;
     std::array<float, logicalOutputBusCount> grainHeldSamples {};
     std::array<float, logicalOutputBusCount> grainFilteredSamples {};
+    // The NM2 crush is far harsher than the scenario texture, and the two
+    // cannot share a hold counter or a quantisation: the factory bass levels
+    // are calibrated against the global one, so it has to stay exactly as it
+    // is while the wearable pad hits much harder on the sax bus alone.
+    std::array<float, logicalOutputBusCount> nm2GrainHeldSamples {};
+    std::array<float, logicalOutputBusCount> nm2GrainFilteredSamples {};
+    int nm2GrainHoldCounter = 0;
+    bool nm2GrainFilterNeedsPrime = true;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear>
         nm2GrainMix;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear>

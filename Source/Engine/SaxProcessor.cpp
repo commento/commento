@@ -10,13 +10,13 @@ constexpr double freezeAttackSeconds = 0.080;
 constexpr double freezeReleaseSeconds = 0.350;
 
 // CADUTA. Reading a tap that grows by this fraction of a sample per sample
-// transposes the tail by 1 - rate, so 0.33 is a fall of roughly seven
-// semitones regardless of the scenario's own delay time. Coming back is
-// slower than going down: the release still bends upwards, but by a musical
-// third rather than by the same seven semitones.
+// transposes the tail by 1 - rate, so 0.50 is a fall of a full octave
+// regardless of the scenario's own delay time. Coming back is slower than
+// going down: the release still bends upwards, but by a fifth rather than by
+// the same octave.
 constexpr double diveFallSeconds = 0.90;
 constexpr double diveReturnSeconds = 1.60;
-constexpr float diveFallRate = 0.33f;
+constexpr float diveFallRate = 0.50f;
 
 // SCATTO. Short enough to read as a stutter rather than as a delay, long
 // enough to hold a recognisable fragment of a phrase.
@@ -446,7 +446,7 @@ void SaxProcessor::process(juce::AudioBuffer<float>& buffer, int numSamples)
         const auto rightMovement = 1.0f - tremolo
             + tremolo * (0.5f - 0.5f * tremoloWave);
         const auto gain = outputGain.getNextValue();
-        const auto dryGain = (1.0f - wet * 0.28f) * (1.0f - tailFocus * 0.85f);
+        const auto dryGain = (1.0f - wet * 0.28f) * (1.0f - tailFocus * 0.94f);
         left[sample] = (filtered[0] * dryGain + echoLeft * wet)
                      * leftMovement * gain;
         right[sample] = (filtered[1] * dryGain + echoRight * wet)

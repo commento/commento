@@ -166,19 +166,19 @@ Legenda sonora, durante la pressione:
 | CODA LIBERA | Sul sax sfuma il diretto e lascia parlare delay/riverbero di RESPIRO. |
 | ECO THROW | Spinge wet e feedback del delay sax, poi lascia rientrare lentamente la coda. |
 | GELO | Congela gradualmente il ricircolo del delay del sax/RESPIRO. |
-| CADUTA | Allunga il tap del delay a rampa costante: la coda scende di circa sette semitoni in 0,9 s mentre il diretto si fa da parte. Al rilascio risale piu' lentamente, con una curva verso l'alto di circa una terza. |
+| CADUTA | Allunga il tap del delay a rampa costante: la coda scende di un'ottava piena in 0,9 s mentre il diretto si fa da parte. Al rilascio risale piu' lentamente, con una curva verso l'alto di circa una quinta. |
 | SCATTO | Congela la linea e la rilegge a 125 ms: l'ultimo frammento di frase ricircola come loop breve. Nessun glissato all'entrata e nessuna giunta, perche' il tap corto entra in crossfade invece che in sweep. |
 | ABISSO | ECO THROW su RESPIRO + OMBRA e VUOTO attenuati sul sax. |
-| OMBRA | Passa-basso risonante che sprofonda da 1500 a 480 Hz in 0,7 s e resta giu' finche' il pad e' premuto. |
-| RADIO | Passa-banda risonante a Q 3,2 che si sintonizza da 700 a 1150 Hz in 0,2 s. |
-| LAMA | Passa-alto risonante udibile subito, con l'angolo che sale da 500 a 2100 Hz in 0,28 s. |
-| GRANA | Downsample/bit-crush filtrato sul solo bus sax. |
-| FUZZ | Saturazione dura momentanea sul solo bus sax, compensata in livello. |
+| OMBRA | Passa-basso risonante a Q 2,4 che sprofonda da 900 a 200 Hz in 0,45 s e resta giu' finche' il pad e' premuto. |
+| RADIO | Passa-banda stretto a Q 8 che si sintonizza da 600 a 1300 Hz in 0,2 s. Torna volutamente piu' magro e piu' piano: un passa-banda compensato del tutto smette di sembrare un passa-banda. |
+| LAMA | Passa-alto risonante a Q 3,2 udibile subito, con l'angolo che sale da 700 a 3800 Hz in 0,22 s. |
+| GRANA | Downsample a 4 kHz e quantizzazione a circa quattro bit sul solo bus sax, con costanti proprie molto piu' dure di quelle della texture di scena. |
+| FUZZ | Clipping duro sul solo bus sax, con costanti proprie: molta piu' distorsione della versione touch, riportata allo stesso livello. |
 | FERRO | Ring modulation bipolare a 37 Hz: piu' metallica e distinta da PULSO. |
-| PULSO | Tremolo profondo a 3,1 Hz con curva sagomata, non sinusoidale. |
-| ORBITA | Movimento stereo lento ma percepibile a 0,24 Hz sul solo bus sax. |
-| STRETTO | Porta verso il centro la coppia stereo del sax; su una sorgente mono il cambiamento e' minimo. |
-| VUOTO | Porta quasi al silenzio il solo bus sax, senza spegnere ambiente e basso. |
+| PULSO | Tremolo quasi totale a 3,1 Hz con curva sagomata, non sinusoidale. |
+| ORBITA | Panning stereo pieno a 0,24 Hz sul solo bus sax. |
+| STRETTO | Collassa a mono la coppia stereo del sax; su una sorgente gia' mono il cambiamento e' minimo. |
+| VUOTO | Azzera il solo bus sax, senza spegnere ambiente e basso. |
 | ASCOLTO | Porta al massimo il ducking del bus ambiente guidato dal sax live. |
 | PAUSA | Ferma soltanto il loop RESPIRO; il sax live continua a passare. |
 
@@ -226,13 +226,22 @@ Il sensore di movimento e' l'unica dimensione continua disponibile, ed e' propri
 il gesto naturale di chi ha il controller montato sul sax. Commento legge i due
 assi di fabbrica, `CC 74` e `CC 75`, e li usa come **profondita'** dei colori.
 
-La profondita' e' misurata rispetto alla posa in cui si trovava lo strumento
-quando e' iniziata la frase, non rispetto a una posizione di riposo assoluta:
+**Di fabbrica il tilt e' neutro**: `nm2TiltBaseDepth` vale `1.0`, quindi il pad
+da solo da' gia' tutto e muovere lo strumento non cambia nulla. E' voluto. Un
+pad deve colpire a piena forza, e su BLE il flusso continuo di CC del sensore
+compete con i `Note Off` dei pad: un `Note Off` perso su PAUSA lasciava RESPIRO
+in pausa permanente. Per attivare la modulazione basta abbassare quella
+costante in [`EcosystemEngine.cpp`](Source/Engine/EcosystemEngine.cpp) - `0.70`
+da' un intervallo ampio e chiaramente udibile - preferibilmente su USB-C.
+
+Quando e' attiva, la profondita' e' misurata rispetto alla posa in cui si
+trovava lo strumento quando e' iniziata la frase, non rispetto a una posizione
+di riposo assoluta:
 
 - alla pressione del primo pad Commento cattura la posa corrente come
   riferimento;
 - finche' il pad resta premuto, la deviazione assoluta sull'asse che si e'
-  mosso di piu' porta il colore dal 70% al 100%;
+  mosso di piu' porta il colore dalla profondita' di base al 100%;
 - al rilascio di tutti i pad il riferimento decade, e la frase successiva
   ricattura la posa di allora.
 
@@ -246,9 +255,15 @@ PULSO, FERRO, ORBITA - e non sui gesti strutturali: GELO, PAUSA, CODA LIBERA,
 ECO THROW, ABISSO, CADUTA e SCATTO restano a piena forza, perche' un comando di
 trasporto premuto a meta' non vorrebbe dire nulla.
 
-**Se il sensore resta disabilitato non arriva mai un CC e ogni gesto conserva la
-piena intensita'**: il comportamento e' identico a quello di prima. Abilitare il
-tilt nella NM2 Web App e' quindi l'unico interruttore della funzione.
+**Il tilt non puo' mai indebolire un gesto rispetto alla sola pressione**, ed e'
+questo che i test verificano. Se il sensore resta disabilitato non arriva mai un
+CC e non cambia comunque nulla.
+
+PLAY dallo schermo ha sempre la precedenza su un pad NM2 tenuto premuto: se
+PAUSA resta incastrata per un `Note Off` perso, premere PLAY LOOP libera il
+blocco e RESPIRO riparte. Senza questa via d'uscita il pulsante continuava a
+chiedere PLAY mentre il motore rispondeva "in pausa", e il loop era
+irrecuperabile senza riavviare.
 
 Le note 60-77 sul canale 1 vengono consumate soltanto quando arrivano
 dall'endpoint riconosciuto come NM2: non vengono registrate nei loop MIDI, non
