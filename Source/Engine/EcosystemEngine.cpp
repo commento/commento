@@ -169,6 +169,9 @@ EcosystemEngine::EcosystemEngine()
         mask.store(0u, std::memory_order_relaxed);
     for (auto& mask : freeTailGestureMasks)
         mask.store(0u, std::memory_order_relaxed);
+    for (auto& playing : loopPlayingRequested)
+        playing.store(true, std::memory_order_relaxed);
+    loopPlayingApplied.fill(true);
 
     const auto& initialScenario = CommentoScenarios::get(0);
     for (int index = 0; index < midiMemoryCount; ++index)
@@ -399,6 +402,10 @@ void EcosystemEngine::toggleRecording(int memoryIndex)
     if (juce::isPositiveAndBelow(memoryIndex, midiMemoryCount)
         && ! isLiveBassLayer(memoryIndex))
     {
+        // Recording owns the playhead.  Starting or closing a take from a
+        // paused card always normalises that card to PLAY.
+        loopPlayingRequested[static_cast<std::size_t>(memoryIndex)].store(
+            true, std::memory_order_relaxed);
         auto& memory = midiMemories[static_cast<size_t>(memoryIndex)];
         const auto shouldRecord = ! memory.recordingRequested.load();
         if (shouldRecord)
@@ -417,6 +424,8 @@ void EcosystemEngine::toggleRecording(int memoryIndex)
     }
     else if (memoryIndex == midiMemoryCount)
     {
+        loopPlayingRequested[static_cast<std::size_t>(memoryIndex)].store(
+            true, std::memory_order_relaxed);
         auto& requested = audioMemory.recordingRequested;
         auto expected = requested.load(std::memory_order_relaxed);
         while (! requested.compare_exchange_weak(
@@ -431,9 +440,18 @@ void EcosystemEngine::clearMemory(int memoryIndex)
 {
     if (juce::isPositiveAndBelow(memoryIndex, midiMemoryCount)
         && ! isLiveBassLayer(memoryIndex))
+    {
+        loopPlayingRequested[static_cast<std::size_t>(memoryIndex)].store(
+            true, std::memory_order_relaxed);
         midiMemories[static_cast<size_t>(memoryIndex)].clearRequested.store(true);
+    }
     else if (memoryIndex == midiMemoryCount)
+    {
+        // A paused RESPIRO must remain inaudible throughout its one-second
+        // dissolve. finishAudioMemoryClear() restores PLAY only after the old
+        // buffer can no longer reappear.
         audioMemory.clearRequested.store(true);
+    }
 }
 
 bool EcosystemEngine::isRecording(int memoryIndex) const
@@ -770,6 +788,30 @@ int EcosystemEngine::getThinnedMemoryIndex() const noexcept
     return thinnedMemoryForDisplay.load(std::memory_order_relaxed);
 }
 
+void EcosystemEngine::setLoopPlaying(int memoryIndex,
+                                     bool shouldPlay) noexcept
+{
+    if (memoryIndex <= bassLayerIndex
+        || ! juce::isPositiveAndBelow(memoryIndex, memoryCount))
+        return;
+
+    loopPlayingRequested[static_cast<std::size_t>(memoryIndex)].store(
+        shouldPlay, std::memory_order_release);
+}
+
+bool EcosystemEngine::isLoopPlaying(int memoryIndex) const noexcept
+{
+    // BASSO LIVE and invalid indices are not loop transports. Treating them
+    // as PLAY keeps callers fail-safe and prevents a disabled card from ever
+    // appearing paused.
+    if (memoryIndex <= bassLayerIndex
+        || ! juce::isPositiveAndBelow(memoryIndex, memoryCount))
+        return true;
+
+    return loopPlayingRequested[static_cast<std::size_t>(memoryIndex)].load(
+        std::memory_order_acquire);
+}
+
 void EcosystemEngine::setSaxListenAmount(float amount) noexcept
 {
     const auto safeAmount = std::isfinite(amount) ? amount : 0.0f;
@@ -961,6 +1003,7 @@ void EcosystemEngine::prepare(double newSampleRate, int maximumBlockSize)
 
     sampleRate = preparedSampleRate;
     clearMomentaryGestures();
+    resetLoopTransportState(true);
     dspLoad.store(0.0f, std::memory_order_relaxed);
     dspNearOverloadCount.store(0, std::memory_order_relaxed);
     callbackIntervalLoad.store(0.0f, std::memory_order_relaxed);
@@ -988,6 +1031,7 @@ void EcosystemEngine::prepare(double newSampleRate, int maximumBlockSize)
         audioMemory.gainTransitionSamplesRemaining = 0;
         audioMemory.gainTransitionSamplesTotal = 0;
         audioMemory.clearAfterGainTransition = false;
+        audioMemory.clearStartedWhilePaused = false;
         audioMemory.phase.store(0.0);
         audioMemory.lengthSeconds.store(0.0);
         audioMemory.buffer.setSize(2, maximumSamples, false, true, false);
@@ -1083,6 +1127,7 @@ void EcosystemEngine::prepare(double newSampleRate, int maximumBlockSize)
     grainHoldCounter = 0;
     grainFilterNeedsPrime = true;
     audioEvolutionFilteredSamples.fill(0.0f);
+    audioLoopLastSamples.fill(0.0f);
     constexpr auto audioEvolutionCutoffHz = 6000.0;
     const auto safeEvolutionCutoff = juce::jmin(
         audioEvolutionCutoffHz, sampleRate * 0.40);
@@ -1152,6 +1197,7 @@ void EcosystemEngine::audioDeviceStopped()
     saxRecoverySamples = 0;
     saxSafetyGain = 1.0f;
     clearMomentaryGestures();
+    resetLoopTransportState(true);
     for (int index = 0; index < midiMemoryCount; ++index)
     {
         auto& memory = midiMemories[static_cast<size_t>(index)];
@@ -1167,6 +1213,7 @@ void EcosystemEngine::audioDeviceStopped()
             memory.activeRecordedNotes.fill(false);
             memory.loopLength = memory.recordPosition;
             memory.playbackPosition = 0;
+            resetMidiPlaybackSnapshot(memory);
             const auto usable = memory.loopLength > 0 && ! memory.events.empty();
             memory.containsMaterial.store(usable);
             memory.eventCount.store(static_cast<int>(memory.events.size()));
@@ -1201,6 +1248,7 @@ void EcosystemEngine::audioDeviceStopped()
     audioMemory.gainTransitionSamplesRemaining = 0;
     audioMemory.gainTransitionSamplesTotal = 0;
     audioMemory.clearAfterGainTransition = false;
+    audioMemory.clearStartedWhilePaused = false;
     audioMemory.recordingRequested.store(false);
     audioMemory.recordingActive = false;
     audioMemory.initialCapture = false;
@@ -1286,6 +1334,7 @@ void EcosystemEngine::audioDeviceIOCallbackWithContext(
         applyMidiCommands(midiMemories[static_cast<size_t>(index)],
                           midiChannels[static_cast<size_t>(index)], blockMidiOutput);
     applyAudioCommands();
+    applyLoopTransportCommands(blockMidiOutput);
     recordIncomingMidi(numSamples, blockMidiOutput);
     renderMidiMemories(numSamples, blockMidiOutput);
     renderInternalSynths(outputChannelData, numOutputChannels,
@@ -1582,6 +1631,162 @@ void EcosystemEngine::updateMomentaryGestureTargets(int numSamples) noexcept
     echoThrowBlockAmounts[static_cast<std::size_t>(bassLayerIndex)] = 0.0f;
 }
 
+void EcosystemEngine::resetLoopTransportState(bool resetRequests) noexcept
+{
+    for (int index = 0; index < memoryCount; ++index)
+    {
+        if (resetRequests)
+            loopPlayingRequested[static_cast<std::size_t>(index)].store(
+                true, std::memory_order_relaxed);
+        // Stored loops re-enter through the normal PLAY edge on the first
+        // callback, which reconstructs any sustained MIDI note at a preserved
+        // playhead after a same-rate device reconnect.
+        loopPlayingApplied[static_cast<std::size_t>(index)]
+            = index == bassLayerIndex;
+        auto& gain = loopTransportGains[static_cast<std::size_t>(index)];
+        gain.reset(sampleRate, 0.001);
+        gain.setCurrentAndTargetValue(1.0f);
+    }
+}
+
+void EcosystemEngine::addPrivateLoopPanic(juce::MidiBuffer& output,
+                                           int playbackChannel,
+                                           int ghostChannel,
+                                           int sampleOffset) noexcept
+{
+    const auto offset = juce::jmax(0, sampleOffset);
+    const auto addChannel = [&output, offset](int channel)
+    {
+        if (channel <= 0)
+            return;
+
+        // Releasing sustain on the private channel first makes the following
+        // note-offs definitive without using JUCE's allNotesOff(), which also
+        // clears sustain state belonging to the performer's live channels.
+        output.addEvent(juce::MidiMessage::controllerEvent(channel, 64, 0),
+                        offset);
+        for (int note = 0; note < 128; ++note)
+            output.addEvent(juce::MidiMessage::noteOff(channel, note), offset);
+    };
+
+    addChannel(playbackChannel);
+    if (ghostChannel != playbackChannel)
+        addChannel(ghostChannel);
+}
+
+void EcosystemEngine::resetMidiPlaybackSnapshot(MidiMemory& memory) noexcept
+{
+    memory.playbackKeyDownNotes.fill(false);
+    memory.playbackActiveNotes.fill(false);
+    memory.playbackNoteVelocities.fill(0.0f);
+    memory.playbackSustainDown = false;
+    memory.playbackPitchWheel = 8192;
+    memory.playbackModulation = 0;
+    memory.playbackBrightness = 0;
+    memory.playbackPressure = 0;
+    memory.restorePlaybackNotesNextBlock = false;
+}
+
+void EcosystemEngine::restoreMidiNotesAtPlayhead(
+    int memoryIndex, juce::MidiBuffer& output, int sampleOffset) noexcept
+{
+    if (memoryIndex <= bassLayerIndex
+        || ! juce::isPositiveAndBelow(memoryIndex, midiMemoryCount))
+        return;
+
+    const auto channel = playbackMidiChannels[
+        static_cast<std::size_t>(memoryIndex)];
+    const auto& memory = midiMemories[static_cast<std::size_t>(memoryIndex)];
+    const auto offset = juce::jmax(0, sampleOffset);
+    output.addEvent(juce::MidiMessage::pitchWheel(
+        channel, juce::jlimit(0, 16383, memory.playbackPitchWheel)), offset);
+    output.addEvent(juce::MidiMessage::controllerEvent(
+        channel, 64, memory.playbackSustainDown ? 127 : 0), offset);
+    for (int note = 0; note < 128; ++note)
+        if (memory.playbackActiveNotes[static_cast<std::size_t>(note)])
+            output.addEvent(juce::MidiMessage::noteOn(
+                channel, note,
+                juce::jlimit(0.0f, 1.0f,
+                    memory.playbackNoteVelocities[
+                        static_cast<std::size_t>(note)])), offset);
+    // JUCE dispatches these performance controls only to active voices, so
+    // restore them after the note-ons at the same sample position.
+    output.addEvent(juce::MidiMessage::controllerEvent(
+        channel, 1, juce::jlimit(0, 127, memory.playbackModulation)), offset);
+    output.addEvent(juce::MidiMessage::controllerEvent(
+        channel, 74, juce::jlimit(0, 127, memory.playbackBrightness)), offset);
+    output.addEvent(juce::MidiMessage::channelPressureChange(
+        channel, juce::jlimit(0, 127, memory.playbackPressure)), offset);
+    if (memory.playbackSustainDown)
+        for (int note = 0; note < 128; ++note)
+            if (memory.playbackActiveNotes[static_cast<std::size_t>(note)]
+                && ! memory.playbackKeyDownNotes[
+                    static_cast<std::size_t>(note)])
+                output.addEvent(juce::MidiMessage::noteOff(channel, note),
+                                offset);
+}
+
+void EcosystemEngine::applyLoopTransportCommands(
+    juce::MidiBuffer& output) noexcept
+{
+    for (int index = 1; index < memoryCount; ++index)
+    {
+        auto desired = loopPlayingRequested[static_cast<std::size_t>(index)]
+            .load(std::memory_order_acquire);
+        const auto recording = index < midiMemoryCount
+            ? midiMemories[static_cast<std::size_t>(index)].recordingActive
+            : audioMemory.recordingActive;
+        if (index == midiMemoryCount
+            && audioMemory.clearAfterGainTransition)
+            desired = ! audioMemory.clearStartedWhilePaused;
+        if (recording)
+        {
+            desired = true;
+            loopPlayingRequested[static_cast<std::size_t>(index)].store(
+                true, std::memory_order_release);
+        }
+
+        auto& applied = loopPlayingApplied[static_cast<std::size_t>(index)];
+        if (desired == applied)
+            continue;
+
+        applied = desired;
+        auto& gain = loopTransportGains[static_cast<std::size_t>(index)];
+        const auto current = gain.getCurrentValue();
+        gain.reset(sampleRate, desired ? 0.045 : 0.025);
+        gain.setCurrentAndTargetValue(current);
+        gain.setTargetValue(desired ? 1.0f : 0.0f);
+
+        if (index >= midiMemoryCount)
+            continue;
+
+        cancelThinningForMemory(index);
+        const auto channel = playbackMidiChannels[
+            static_cast<std::size_t>(index)];
+        const auto ghostChannel = evolutionMidiChannels[
+            static_cast<std::size_t>(index)];
+        auto& memory = midiMemories[static_cast<std::size_t>(index)];
+        memory.evolution = LoopEvolution::normal;
+        memory.evolutionForDisplay.store(
+            static_cast<int>(LoopEvolution::normal),
+            std::memory_order_relaxed);
+        if (activeMidiEvolutionMemory == index)
+            activeMidiEvolutionMemory = -1;
+
+        if (desired)
+        {
+            // The fade-out may have left release-stage voices running under
+            // a zero gain. Remove them before reconstructing the frozen
+            // logical state, otherwise a quick PLAY can double those notes.
+            internalSynths[static_cast<std::size_t>(index)]
+                ->hardStopLoopChannels(channel, ghostChannel);
+            restoreMidiNotesAtPlayhead(index, output);
+        }
+        else
+            addPrivateLoopPanic(output, channel, ghostChannel, 0);
+    }
+}
+
 void EcosystemEngine::setThinningGainTarget(int memoryIndex, float target,
                                              int transitionOffset) noexcept
 {
@@ -1614,7 +1819,7 @@ void EcosystemEngine::scheduleNextThinning(bool firstGesture) noexcept
     {
         const auto& memory = midiMemories[static_cast<std::size_t>(index)];
         if (! memory.recordingActive && memory.loopLength > 0
-            && ! memory.events.empty())
+            && ! memory.events.empty() && isLoopPlaying(index))
             candidates[static_cast<std::size_t>(candidateCount++)] = index;
     }
 
@@ -1670,7 +1875,8 @@ void EcosystemEngine::updateThinningState() noexcept
         const auto& memory = midiMemories[
             static_cast<std::size_t>(scheduledThinningMemory)];
         return ! memory.recordingActive && memory.loopLength > 0
-            && ! memory.events.empty();
+            && ! memory.events.empty()
+            && isLoopPlaying(scheduledThinningMemory);
     };
 
     if (! scheduledIsUsable())
@@ -1696,7 +1902,7 @@ void EcosystemEngine::startThinningCycle(int memoryIndex, int outputOffset,
 
     auto& memory = midiMemories[static_cast<std::size_t>(memoryIndex)];
     if (memory.recordingActive || memory.loopLength <= 0
-        || memory.events.empty())
+        || memory.events.empty() || ! isLoopPlaying(memoryIndex))
         return;
 
     // The gain renderer stores one transition point per layer and callback.
@@ -1715,13 +1921,11 @@ void EcosystemEngine::startThinningCycle(int memoryIndex, int outputOffset,
 
     const auto eventOffset = juce::jlimit(0, juce::jmax(0, numSamples - 1),
                                           outputOffset);
-    output.addEvent(juce::MidiMessage::allNotesOff(
-                        midiChannels[static_cast<std::size_t>(memoryIndex)]),
-                    eventOffset);
-    output.addEvent(juce::MidiMessage::allNotesOff(
-                        evolutionMidiChannels[
-                            static_cast<std::size_t>(memoryIndex)]),
-                    eventOffset);
+    addPrivateLoopPanic(
+        output,
+        playbackMidiChannels[static_cast<std::size_t>(memoryIndex)],
+        evolutionMidiChannels[static_cast<std::size_t>(memoryIndex)],
+        eventOffset);
     memory.evolution = LoopEvolution::normal;
     memory.evolutionForDisplay.store(static_cast<int>(LoopEvolution::normal),
                                      std::memory_order_relaxed);
@@ -1730,7 +1934,9 @@ void EcosystemEngine::startThinningCycle(int memoryIndex, int outputOffset,
 }
 
 void EcosystemEngine::finishThinningCycle(int memoryIndex,
-                                           int outputOffset) noexcept
+                                           int outputOffset,
+                                           int blockSamples,
+                                           juce::MidiBuffer& output) noexcept
 {
     if (activeThinnedMemory != memoryIndex)
         return;
@@ -1738,6 +1944,11 @@ void EcosystemEngine::finishThinningCycle(int memoryIndex,
     setThinningGainTarget(memoryIndex, 1.0f, outputOffset);
     activeThinnedMemory = -1;
     thinnedMemoryForDisplay.store(-1, std::memory_order_relaxed);
+    if (outputOffset < blockSamples)
+        restoreMidiNotesAtPlayhead(memoryIndex, output, outputOffset);
+    else
+        midiMemories[static_cast<std::size_t>(memoryIndex)]
+            .restorePlaybackNotesNextBlock = true;
     scheduleNextThinning(false);
 }
 
@@ -1883,6 +2094,9 @@ void EcosystemEngine::applyMidiCommands(MidiMemory& memory, int channel,
                                          juce::MidiBuffer& output)
 {
     const auto memoryIndex = memoryIndexForMidiChannel(channel);
+    const auto playbackChannel = juce::isPositiveAndBelow(
+        memoryIndex, midiMemoryCount)
+        ? playbackMidiChannels[static_cast<std::size_t>(memoryIndex)] : 0;
     const auto ghostChannel = juce::isPositiveAndBelow(
         memoryIndex, midiMemoryCount)
         ? evolutionMidiChannels[static_cast<std::size_t>(memoryIndex)] : 0;
@@ -1904,15 +2118,14 @@ void EcosystemEngine::applyMidiCommands(MidiMemory& memory, int channel,
         memory.lengthSeconds.store(0.0);
         memory.phase.store(0.0);
         memory.activeRecordedNotes.fill(false);
+        resetMidiPlaybackSnapshot(memory);
         memory.evolutionNote = -1;
         memory.evolutionVelocity = 0.25f;
         memory.evolution = LoopEvolution::normal;
         memory.evolutionForDisplay.store(
             static_cast<int>(LoopEvolution::normal),
             std::memory_order_relaxed);
-        output.addEvent(juce::MidiMessage::allNotesOff(channel), 0);
-        if (ghostChannel > 0)
-            output.addEvent(juce::MidiMessage::allNotesOff(ghostChannel), 0);
+        addPrivateLoopPanic(output, playbackChannel, ghostChannel, 0);
         if (activeMidiEvolutionMemory == memoryIndex)
             activeMidiEvolutionMemory = -1;
     }
@@ -1927,9 +2140,7 @@ void EcosystemEngine::applyMidiCommands(MidiMemory& memory, int channel,
     memory.waitingForFirstNoteForDisplay.store(shouldRecord);
     if (shouldRecord)
         cancelThinningForMemory(memoryIndex);
-    output.addEvent(juce::MidiMessage::allNotesOff(channel), 0);
-    if (ghostChannel > 0)
-        output.addEvent(juce::MidiMessage::allNotesOff(ghostChannel), 0);
+    addPrivateLoopPanic(output, playbackChannel, ghostChannel, 0);
 
     if (shouldRecord)
     {
@@ -1944,6 +2155,7 @@ void EcosystemEngine::applyMidiCommands(MidiMemory& memory, int channel,
         memory.lengthSeconds.store(0.0);
         memory.phase.store(0.0);
         memory.activeRecordedNotes.fill(false);
+        resetMidiPlaybackSnapshot(memory);
         memory.evolutionNote = -1;
         memory.evolutionVelocity = 0.25f;
         memory.evolution = LoopEvolution::normal;
@@ -1966,6 +2178,7 @@ void EcosystemEngine::applyMidiCommands(MidiMemory& memory, int channel,
         memory.activeRecordedNotes.fill(false);
         memory.loopLength = memory.recordPosition;
         memory.playbackPosition = 0;
+        resetMidiPlaybackSnapshot(memory);
         const auto usable = memory.loopLength > 0 && ! memory.events.empty();
         memory.containsMaterial.store(usable);
         memory.eventCount.store(static_cast<int>(memory.events.size()));
@@ -1986,6 +2199,8 @@ void EcosystemEngine::applyAudioCommands()
 {
     if (audioMemory.clearRequested.exchange(false))
     {
+        audioMemory.clearStartedWhilePaused = ! loopPlayingApplied[
+            static_cast<std::size_t>(midiMemoryCount)];
         audioMemory.recordingRequested.store(false);
         audioMemory.recordingActive = false;
         audioMemory.recordingForDisplay.store(false);
@@ -2030,6 +2245,7 @@ void EcosystemEngine::applyAudioCommands()
             audioMemory.evolutionForDisplay.store(
                 static_cast<int>(LoopEvolution::normal),
                 std::memory_order_relaxed);
+            audioLoopLastSamples.fill(0.0f);
             resetCosmosHeads();
         }
     }
@@ -2105,6 +2321,8 @@ void EcosystemEngine::advanceAudioMemoryGainTransition() noexcept
 
 void EcosystemEngine::finishAudioMemoryClear() noexcept
 {
+    loopPlayingRequested[static_cast<std::size_t>(midiMemoryCount)].store(
+        true, std::memory_order_release);
     audioMemory.writePosition = 0;
     audioMemory.playbackPosition = 0;
     audioMemory.loopLength = 0;
@@ -2117,6 +2335,7 @@ void EcosystemEngine::finishAudioMemoryClear() noexcept
     audioMemory.gainTransitionSamplesRemaining = 0;
     audioMemory.gainTransitionSamplesTotal = 0;
     audioMemory.clearAfterGainTransition = false;
+    audioMemory.clearStartedWhilePaused = false;
     audioMemory.evolution = LoopEvolution::normal;
     audioMemory.evolutionForDisplay.store(
         static_cast<int>(LoopEvolution::normal),
@@ -2124,6 +2343,7 @@ void EcosystemEngine::finishAudioMemoryClear() noexcept
     audioMemory.evolutionStartPosition = 0;
     audioMemory.evolutionDurationSamples = 0;
     audioMemory.evolutionSourcePosition = 0.0;
+    audioLoopLastSamples.fill(0.0f);
     resetCosmosHeads();
 }
 
@@ -2194,6 +2414,35 @@ void EcosystemEngine::recordIncomingMidi(int numSamples, juce::MidiBuffer& liveM
             lastSampleOffset = sampleOffset;
             auto& memory = midiMemories[static_cast<size_t>(memoryIndex)];
 
+            // Keep a tiny live-state snapshot even outside recording. When
+            // SEMINA is waiting, a pedal or bend may precede the first note;
+            // seeding those values at timestamp zero makes the private
+            // playback channel sound like the take that was actually played.
+            if (message.isController())
+            {
+                const auto controller = message.getControllerNumber();
+                const auto value = message.getControllerValue();
+                if (controller == 64)
+                    memory.liveSustainDown = value >= 64;
+                else if (controller == 1)
+                    memory.liveModulation = value;
+                else if (controller == 74)
+                    memory.liveBrightness = value;
+                else if (controller == 120 || controller == 123)
+                    memory.liveSustainDown = false;
+                else if (controller == 121)
+                {
+                    memory.liveSustainDown = false;
+                    memory.liveModulation = 0;
+                    memory.liveBrightness = 0;
+                    memory.livePressure = 0;
+                }
+            }
+            else if (message.isPitchWheel())
+                memory.livePitchWheel = message.getPitchWheelValue();
+            else if (message.isChannelPressure())
+                memory.livePressure = message.getChannelPressureValue();
+
             // If SEMINA or its cancellation arrived after the command pass at
             // the top of this callback, synchronise at the first following
             // MIDI event. Do not close an already-running capture mid-block;
@@ -2209,6 +2458,7 @@ void EcosystemEngine::recordIncomingMidi(int numSamples, juce::MidiBuffer& liveM
 
             auto& captureStartOffset
                 = captureStartOffsets[static_cast<size_t>(memoryIndex)];
+            auto seedExpressionAfterFirstNote = false;
             if (memory.waitingForFirstNote)
             {
                 if (! message.isNoteOn())
@@ -2224,6 +2474,21 @@ void EcosystemEngine::recordIncomingMidi(int numSamples, juce::MidiBuffer& liveM
                 memory.waitingForFirstNoteForDisplay.store(false);
                 memory.armedAfterTimestampSeconds.store(0.0);
                 captureStartOffset = sampleOffset;
+
+                const auto seedController = [&memory](
+                    const juce::MidiMessage& seed)
+                {
+                    if (static_cast<int>(memory.events.size())
+                        < maximumMidiEvents)
+                        memory.events.push_back({ seed, 0 });
+                };
+                if (memory.livePitchWheel != 8192)
+                    seedController(juce::MidiMessage::pitchWheel(
+                        channel, memory.livePitchWheel));
+                if (memory.liveSustainDown)
+                    seedController(juce::MidiMessage::controllerEvent(
+                        channel, 64, 127));
+                seedExpressionAfterFirstNote = true;
             }
 
             if (static_cast<int>(memory.events.size()) < maximumMidiEvents)
@@ -2243,6 +2508,30 @@ void EcosystemEngine::recordIncomingMidi(int numSamples, juce::MidiBuffer& liveM
                         memory.evolutionVelocity = juce::jlimit(
                             0.12f, 0.42f,
                             message.getFloatVelocity() * 0.38f);
+                    }
+
+                    // Voice-local controls must follow the first note-on;
+                    // JUCE does not cache them for voices that do not yet
+                    // exist on the private playback channel.
+                    const auto seedAfterNote = [&memory, channel](
+                        const juce::MidiMessage& seed)
+                    {
+                        if (static_cast<int>(memory.events.size())
+                            < maximumMidiEvents)
+                            memory.events.push_back({ seed, 0 });
+                    };
+                    if (seedExpressionAfterFirstNote)
+                    {
+                        if (memory.liveModulation != 0)
+                            seedAfterNote(juce::MidiMessage::controllerEvent(
+                                channel, 1, memory.liveModulation));
+                        if (memory.liveBrightness != 0)
+                            seedAfterNote(juce::MidiMessage::controllerEvent(
+                                channel, 74, memory.liveBrightness));
+                        if (memory.livePressure != 0)
+                            seedAfterNote(
+                                juce::MidiMessage::channelPressureChange(
+                                    channel, memory.livePressure));
                     }
                 }
                 else if (message.isNoteOff())
@@ -2294,6 +2583,8 @@ void EcosystemEngine::renderInternalSynths(float* const* outputs, int outputChan
             if (metadata.getMessage().getChannel()
                     == midiChannels[static_cast<size_t>(layer)]
                 || metadata.getMessage().getChannel()
+                    == playbackMidiChannels[static_cast<size_t>(layer)]
+                || metadata.getMessage().getChannel()
                     == evolutionMidiChannels[static_cast<size_t>(layer)])
                 layerMidi.addEvent(metadata.getMessage(), metadata.samplePosition);
 
@@ -2317,6 +2608,15 @@ void EcosystemEngine::renderInternalSynths(float* const* outputs, int outputChan
         synth->setDelayLevel(juce::jmax(getDelayLevel(layer), throwAmount));
         synth->setFreezeEnabled(isFreezeEnabled(layer));
         synth->setFreeTailEnabled(isFreeTailEnabled(layer));
+        auto& transportGain = loopTransportGains[
+            static_cast<std::size_t>(layer)];
+        const auto transportStart = transportGain.getCurrentValue();
+        const auto transportEnd = transportGain.skip(numSamples);
+        synth->setLoopTransportBlock(
+            transportStart, transportEnd,
+            playbackMidiChannels[static_cast<std::size_t>(layer)],
+            evolutionMidiChannels[static_cast<std::size_t>(layer)],
+            numSamples);
         synth->render(
             layerSynthBuffer, layerMidi, 0, numSamples);
         performanceLevels.process(layer, layerSynthBuffer, numSamples);
@@ -2573,6 +2873,14 @@ void EcosystemEngine::renderMidiMemories(int numSamples, juce::MidiBuffer& outpu
         auto& memory = midiMemories[static_cast<size_t>(index)];
         if (memory.recordingActive || memory.loopLength <= 0 || memory.events.empty())
             continue;
+        if (! loopPlayingApplied[static_cast<std::size_t>(index)])
+            continue;
+
+        if (memory.restorePlaybackNotesNextBlock)
+        {
+            restoreMidiNotesAtPlayhead(index, output, 0);
+            memory.restorePlaybackNotesNextBlock = false;
+        }
 
         auto remaining = numSamples;
         auto outputOffset = 0;
@@ -2583,12 +2891,18 @@ void EcosystemEngine::renderMidiMemories(int numSamples, juce::MidiBuffer& outpu
             const auto thinningThisSegment = activeThinnedMemory == index;
             if (! thinningThisSegment)
             {
-                renderMidiSegment(memory, memory.playbackPosition, untilWrap,
-                                  outputOffset, output);
+                renderMidiSegment(memory, index, memory.playbackPosition,
+                                  untilWrap, outputOffset, output);
                 renderMidiEvolutionSegment(memory, index,
                                            memory.playbackPosition,
                                            untilWrap, outputOffset, output);
             }
+            else
+                // DIRADA skips sound, not logical note state. This makes a
+                // subsequent PAUSA/PLAY inside the rest reconstruct exactly
+                // what crosses the frozen playhead.
+                renderMidiSegment(memory, index, memory.playbackPosition,
+                                  untilWrap, outputOffset, output, false);
             memory.playbackPosition += untilWrap;
             remaining -= untilWrap;
             outputOffset += untilWrap;
@@ -2596,12 +2910,14 @@ void EcosystemEngine::renderMidiMemories(int numSamples, juce::MidiBuffer& outpu
             if (memory.playbackPosition >= memory.loopLength)
             {
                 if (memory.evolution != LoopEvolution::normal)
-                    output.addEvent(juce::MidiMessage::allNotesOff(
-                        evolutionMidiChannels[static_cast<std::size_t>(index)]),
+                    addPrivateLoopPanic(
+                        output, 0,
+                        evolutionMidiChannels[static_cast<std::size_t>(index)],
                         juce::jlimit(0, numSamples - 1, outputOffset));
                 memory.playbackPosition = 0;
                 if (activeThinnedMemory == index)
-                    finishThinningCycle(index, outputOffset);
+                    finishThinningCycle(index, outputOffset, numSamples,
+                                        output);
                 chooseMidiEvolution(memory, index);
                 startThinningCycle(index, outputOffset, numSamples, output);
             }
@@ -2679,9 +2995,11 @@ void EcosystemEngine::renderMidiEvolutionSegment(
     }
 }
 
-void EcosystemEngine::renderMidiSegment(MidiMemory& memory, int64_t segmentStart,
+void EcosystemEngine::renderMidiSegment(MidiMemory& memory, int memoryIndex,
+                                         int64_t segmentStart,
                                          int segmentLength, int outputOffset,
-                                         juce::MidiBuffer& output)
+                                         juce::MidiBuffer& output,
+                                         bool emitEvents)
 {
     const auto segmentEnd = segmentStart + segmentLength;
     for (const auto& event : memory.events)
@@ -2690,8 +3008,74 @@ void EcosystemEngine::renderMidiSegment(MidiMemory& memory, int64_t segmentStart
             continue;
         if (event.samplePosition >= segmentEnd)
             break;
-        output.addEvent(event.message,
-                        outputOffset + static_cast<int>(event.samplePosition - segmentStart));
+        const auto& message = event.message;
+        if (emitEvents)
+        {
+            const auto playbackChannel = playbackMidiChannels[
+                static_cast<std::size_t>(memoryIndex)];
+            const auto eventOffset = outputOffset + static_cast<int>(
+                event.samplePosition - segmentStart);
+            if (message.isAllNotesOff() || message.isAllSoundOff())
+                addPrivateLoopPanic(output, playbackChannel, 0, eventOffset);
+            else
+            {
+                auto playbackMessage = message;
+                playbackMessage.setChannel(playbackChannel);
+                output.addEvent(playbackMessage, eventOffset);
+            }
+        }
+        if (message.isNoteOn())
+        {
+            const auto note = static_cast<std::size_t>(message.getNoteNumber());
+            memory.playbackKeyDownNotes[note] = true;
+            memory.playbackActiveNotes[note] = true;
+            memory.playbackNoteVelocities[note] = message.getFloatVelocity();
+        }
+        else if (message.isNoteOff())
+        {
+            const auto note = static_cast<std::size_t>(message.getNoteNumber());
+            memory.playbackKeyDownNotes[note] = false;
+            if (! memory.playbackSustainDown)
+            {
+                memory.playbackActiveNotes[note] = false;
+                memory.playbackNoteVelocities[note] = 0.0f;
+            }
+        }
+        else if (message.isAllNotesOff() || message.isAllSoundOff())
+        {
+            memory.playbackKeyDownNotes.fill(false);
+            memory.playbackActiveNotes.fill(false);
+            memory.playbackNoteVelocities.fill(0.0f);
+            memory.playbackSustainDown = false;
+        }
+        else if (message.isController())
+        {
+            const auto controller = message.getControllerNumber();
+            const auto value = message.getControllerValue();
+            if (controller == 64)
+            {
+                const auto wasDown = memory.playbackSustainDown;
+                memory.playbackSustainDown = value >= 64;
+                if (wasDown && ! memory.playbackSustainDown)
+                    for (int note = 0; note < 128; ++note)
+                        if (! memory.playbackKeyDownNotes[
+                                static_cast<std::size_t>(note)])
+                        {
+                            memory.playbackActiveNotes[
+                                static_cast<std::size_t>(note)] = false;
+                            memory.playbackNoteVelocities[
+                                static_cast<std::size_t>(note)] = 0.0f;
+                        }
+            }
+            else if (controller == 1)
+                memory.playbackModulation = value;
+            else if (controller == 74)
+                memory.playbackBrightness = value;
+        }
+        else if (message.isPitchWheel())
+            memory.playbackPitchWheel = message.getPitchWheelValue();
+        else if (message.isChannelPressure())
+            memory.playbackPressure = message.getChannelPressureValue();
     }
 }
 
@@ -2747,6 +3131,10 @@ void EcosystemEngine::renderAudioMemory(
     const auto evolutionFadeOutLimit = static_cast<int64_t>(
         std::round(sampleRate * 1.0));
     bool closedInitialCaptureAtLimit = false;
+    auto& saxLoopTransportGain = loopTransportGains[
+        static_cast<std::size_t>(saxGestureIndex)];
+    const auto saxLoopPlaying = loopPlayingApplied[
+        static_cast<std::size_t>(saxGestureIndex)];
     if (renderFourHead && audioMemory.loopLength > 0)
         for (std::size_t head = 0; head < cosmosHeadPositions.size(); ++head)
         {
@@ -2774,6 +3162,7 @@ void EcosystemEngine::renderAudioMemory(
         // exactly matches the preceding callback. This also advances/finalises
         // a dissolve while the diagnostic path is DIRECT or MUTO.
         const auto loopPlaybackGain = audioMemory.playbackGain;
+        const auto loopTransportGain = saxLoopTransportGain.getNextValue();
         const auto blockFraction = numSamples > 1
             ? static_cast<float>(sample) / static_cast<float>(numSamples - 1)
             : 1.0f;
@@ -2841,6 +3230,21 @@ void EcosystemEngine::renderAudioMemory(
 
         if (audioMemory.loopLength <= 0)
         {
+            advanceAudioMemoryGainTransition();
+            continue;
+        }
+
+        // PAUSA freezes every read head immediately.  A held copy of the last
+        // rendered loop sample supplies only the short fade-out; the physical
+        // sax monitor above remains completely outside this transport gate.
+        if (! saxLoopPlaying)
+        {
+            if (loopTransportGain > 0.000001f)
+                for (int channel = 0; channel < 2; ++channel)
+                    saxRenderBuffer.addSample(
+                        channel, sample,
+                        audioLoopLastSamples[static_cast<std::size_t>(channel)]
+                            * 0.72f * loopPlaybackGain * loopTransportGain);
             advanceAudioMemoryGainTransition();
             continue;
         }
@@ -2961,8 +3365,11 @@ void EcosystemEngine::renderAudioMemory(
                         audioMemory.loopLength);
                 loopSample += evolutionSample * evolutionGain;
             }
-            saxRenderBuffer.addSample(channel, sample,
-                                      loopSample * 0.72f * loopPlaybackGain);
+            audioLoopLastSamples[static_cast<std::size_t>(channel)]
+                = loopSample;
+            saxRenderBuffer.addSample(
+                channel, sample,
+                loopSample * 0.72f * loopPlaybackGain * loopTransportGain);
         }
 
         if (renderEvolution)

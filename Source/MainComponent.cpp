@@ -361,6 +361,9 @@ public:
         else if (recording)
             detail = "CATTURA  /  "
                 + juce::String(engine.getLengthSeconds(index), 1) + " s";
+        else if (material && ! engine.isLoopPlaying(index))
+            detail = "IN PAUSA  /  "
+                + juce::String(engine.getLengthSeconds(index), 1) + " s";
         else if (material)
             detail = "SUONA  /  " + juce::String(engine.getLengthSeconds(index), 1) + " s";
         else
@@ -607,6 +610,7 @@ MainComponent::MainComponent()
     styleButton(freeTailButton, momentaryGestureColour);
     styleButton(thinningButton, persistentGestureColour);
     styleButton(saxListenButton, persistentGestureColour);
+    styleButton(loopTransportButton, juce::Colour(0xff5da8a1));
     styleButton(applyAudioButton, juce::Colour(0xff5da8a1));
     styleButton(rescanAudioButton, juce::Colour(0xff7895b8));
     styleButton(keyStepRoutingButton, juce::Colour(0xff8aa6d6));
@@ -639,6 +643,7 @@ MainComponent::MainComponent()
     addAndMakeVisible(freeTailButton);
     addAndMakeVisible(thinningButton);
     addAndMakeVisible(saxListenButton);
+    addAndMakeVisible(loopTransportButton);
     addChildComponent(applyAudioButton);
     addChildComponent(rescanAudioButton);
     addChildComponent(keyStepRoutingButton);
@@ -656,7 +661,7 @@ MainComponent::MainComponent()
     addChildComponent(gesturesTitleLabel);
 
     gesturesHintLabel.setText(
-        "TRASFORMAZIONI GLOBALI  /  TIENI I PAD MOMENTANEI  /  UN SOLO BERSAGLIO",
+        "TRASFORMAZIONI E TRASPORTO  /  TIENI I PAD MOMENTANEI  /  UN SOLO BERSAGLIO",
         juce::dontSendNotification);
     gesturesHintLabel.setFont(juce::FontOptions(17.0f, juce::Font::bold));
     gesturesHintLabel.setColour(juce::Label::textColourId,
@@ -827,6 +832,20 @@ MainComponent::MainComponent()
         updateControls();
     };
     saxListenButton.onClick = [this] { toggleSaxListening(); };
+    loopTransportButton.onClick = [this]
+    {
+        const auto isBass = EcosystemEngine::isLiveBassLayer(selectedMemory);
+        const auto waitingForFirstNote = juce::isPositiveAndBelow(
+                selectedMemory, EcosystemEngine::midiMemoryCount)
+            && engine.isWaitingForFirstNote(selectedMemory);
+        if (! isBass && engine.hasMaterial(selectedMemory)
+            && ! engine.isRecording(selectedMemory) && ! waitingForFirstNote)
+        {
+            engine.setLoopPlaying(selectedMemory,
+                                  ! engine.isLoopPlaying(selectedMemory));
+            updateControls();
+        }
+    };
     previousScenarioButton.onClick = [this] { changeScenario(-1); };
     nextScenarioButton.onClick = [this] { changeScenario(1); };
     applyAudioButton.onClick = [this] { applyAudioConfiguration(); };
@@ -2646,6 +2665,13 @@ void MainComponent::updateControls()
               std::round(listening * 100.0f))) + "%");
     saxListenButton.setToggleState(listening > 0.005f,
                                    juce::dontSendNotification);
+    const auto loopPlaying = isBass || engine.isLoopPlaying(selectedMemory);
+    loopTransportButton.setEnabled(! isBass && material && ! recording
+                                   && ! waitingForFirstNote);
+    loopTransportButton.setButtonText(loopPlaying
+        ? "PAUSA LOOP" : "PLAY LOOP");
+    loopTransportButton.setToggleState(! loopPlaying,
+                                       juce::dontSendNotification);
 
     gestureTargetLabel.setText(
         "BERSAGLIO  /  " + memoryNames[static_cast<std::size_t>(selectedMemory)]
@@ -2762,6 +2788,7 @@ void MainComponent::updatePageVisibility()
     freeTailButton.setVisible(gesturesVisible);
     thinningButton.setVisible(gesturesVisible);
     saxListenButton.setVisible(gesturesVisible);
+    loopTransportButton.setVisible(gesturesVisible);
     gesturesTitleLabel.setVisible(gesturesVisible);
     gesturesHintLabel.setVisible(gesturesVisible);
     gestureTargetLabel.setVisible(gesturesVisible);
@@ -2921,11 +2948,16 @@ void MainComponent::resized()
     if (gesturesVisible)
     {
         auto gestureArea = bounds.reduced(16, 10);
-        gesturesTitleLabel.setBounds(gestureArea.removeFromTop(48));
-        gesturesHintLabel.setBounds(gestureArea.removeFromTop(30));
-        gestureArea.removeFromTop(10);
-        gestureTargetLabel.setBounds(gestureArea.removeFromTop(42));
-        auto targetRow = gestureArea.removeFromTop(64);
+        const auto compactGestures = gestureArea.getHeight() < 600;
+        gesturesTitleLabel.setBounds(gestureArea.removeFromTop(
+            compactGestures ? 44 : 48));
+        gesturesHintLabel.setBounds(gestureArea.removeFromTop(
+            compactGestures ? 24 : 30));
+        gestureArea.removeFromTop(compactGestures ? 6 : 10);
+        gestureTargetLabel.setBounds(gestureArea.removeFromTop(
+            compactGestures ? 34 : 42));
+        auto targetRow = gestureArea.removeFromTop(
+            compactGestures ? 48 : 64);
         constexpr int targetGap = 12;
         const auto targetWidth = (targetRow.getWidth()
             - targetGap * (EcosystemEngine::memoryCount - 1))
@@ -2940,13 +2972,12 @@ void MainComponent::resized()
             if (index < EcosystemEngine::memoryCount - 1)
                 targetRow.removeFromLeft(targetGap);
         }
-        const auto compactGestures = gestureArea.getHeight() < 600;
-        const auto sectionGap = compactGestures ? 12 : 18;
+        const auto sectionGap = compactGestures ? 8 : 18;
         gestureArea.removeFromTop(sectionGap);
 
         const auto mainTop = gestureTargetLabel.getY() - 10;
         auto globalRow = gestureArea.removeFromTop(
-            compactGestures ? 82 : 112);
+            compactGestures ? 62 : 112);
         constexpr int gestureGap = 18;
         const auto globalWidth = (globalRow.getWidth() - gestureGap * 2) / 3;
         textureButton.setBounds(globalRow.removeFromLeft(globalWidth));
@@ -2957,7 +2988,7 @@ void MainComponent::resized()
 
         gestureArea.removeFromTop(sectionGap);
         auto momentaryRow = gestureArea.removeFromTop(
-            compactGestures ? 104 : 156);
+            compactGestures ? 72 : 156);
         const auto momentaryWidth
             = (momentaryRow.getWidth() - gestureGap * 2) / 3;
         freezeButton.setBounds(momentaryRow.removeFromLeft(momentaryWidth));
@@ -2968,26 +2999,32 @@ void MainComponent::resized()
 
         gestureArea.removeFromTop(sectionGap);
         auto automaticRow = gestureArea.removeFromTop(
-            compactGestures ? 72 : 104);
+            compactGestures ? 58 : 104);
         const auto automaticWidth
-            = (automaticRow.getWidth() - gestureGap) / 2;
+            = (automaticRow.getWidth() - gestureGap * 2) / 3;
         thinningButton.setBounds(automaticRow.removeFromLeft(automaticWidth));
         automaticRow.removeFromLeft(gestureGap);
-        saxListenButton.setBounds(automaticRow);
+        saxListenButton.setBounds(automaticRow.removeFromLeft(automaticWidth));
+        automaticRow.removeFromLeft(gestureGap);
+        loopTransportButton.setBounds(automaticRow);
         gesturesMainPanelBounds = juce::Rectangle<int>(
             gestureTargetLabel.getX() - 10, mainTop,
             gestureTargetLabel.getWidth() + 20,
             automaticRow.getBottom() - mainTop + 10);
 
-        gestureArea.removeFromTop(compactGestures ? 14 : 20);
+        gestureArea.removeFromTop(compactGestures ? 10 : 20);
         gesturesPedalPanelBounds = gestureArea;
-        auto pedalArea = gestureArea.reduced(22, 12);
-        sustainMonitorLabel.setBounds(pedalArea.removeFromTop(48));
-        pedalArea.removeFromTop(5);
-        saxFootswitchBindingLabel.setBounds(pedalArea.removeFromTop(54));
-        pedalArea.removeFromTop(8);
+        auto pedalArea = gestureArea.reduced(
+            compactGestures ? 14 : 22, compactGestures ? 8 : 12);
+        sustainMonitorLabel.setBounds(pedalArea.removeFromTop(
+            compactGestures ? 32 : 48));
+        pedalArea.removeFromTop(compactGestures ? 3 : 5);
+        saxFootswitchBindingLabel.setBounds(pedalArea.removeFromTop(
+            compactGestures ? 36 : 54));
+        pedalArea.removeFromTop(compactGestures ? 5 : 8);
         auto pedalButtons = pedalArea.removeFromTop(
-            juce::jmin(74, pedalArea.getHeight()));
+            juce::jmin(compactGestures ? 50 : 74,
+                       pedalArea.getHeight()));
         saxFootswitchClearButton.setBounds(
             pedalButtons.removeFromRight(190).reduced(3));
         pedalButtons.removeFromRight(12);

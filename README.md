@@ -41,14 +41,17 @@ Il nome **Commento** e' provvisorio.
   sommata al loop originale;
 - cinque gesti live a costo contenuto: GELO, ECO THROW e CODA LIBERA sulla card
   selezionata, piu' ASCOLTO e DIRADA per articolare il letto ambient;
+- PAUSA/PLAY indipendenti nella pagina GESTI per fermare e riprendere la sola
+  memoria selezionata, comprese MAREA, RADICE, SCINTILLA e RESPIRO;
 - build macOS e Raspberry Pi OS 64 bit dallo stesso codice.
 
 Questa versione non salva ancora i loop su disco. Salva invece l'ultimo scenario
 selezionato, il livello di GRANA, i cinque livelli di performance, l'ultima
 configurazione audio applicata e l'eventuale associazione del pedale sax. GELO,
 ECO THROW e CODA LIBERA sono momentanei; ASCOLTO e DIRADA ripartono spenti a ogni
-avvio. I parametri sonori sono scelti per il live e non espongono ancora un
-pannello di sintesi dettagliato.
+avvio. Anche le pause non vengono salvate: tutte le memorie ripartono in PLAY.
+I parametri sonori sono scelti per il live e non espongono ancora un pannello di
+sintesi dettagliato.
 
 ## Flusso del sistema autonomo
 
@@ -217,6 +220,15 @@ durante il collegamento.
   anche se nel frattempo cambia la selezione. E' disponibile per MAREA, RADICE e
   SCINTILLA, oltre che per RESPIRO nel percorso EFFETTI SCENA; non e' disponibile
   per BASSO LIVE e non crea nuovi buffer o riverberi;
+- usare **PAUSA LOOP** nella pagina GESTI per fermare soltanto la memoria
+  selezionata e **PLAY LOOP** per farla ripartire. MAREA, RADICE, SCINTILLA e
+  RESPIRO hanno stati indipendenti; BASSO LIVE non e' un loop e il controllo e'
+  disabilitato. Il pulsante resta disabilitato anche mentre quella memoria e'
+  armata o in registrazione. La card mostra `IN PAUSA`, la fase resta congelata
+  e PLAY riprende dallo stesso punto. La pausa non cancella il materiale e non
+  viene salvata al riavvio. Su RESPIRO si ferma soltanto il loop registrato: il
+  monitor del sax live continua. SEMINA, RISCRIVI, NUTRI e DIMENTICA riportano
+  automaticamente quella memoria in PLAY;
 - attivare **ASCOLTO** per far arretrare gradualmente soltanto il bus AMBIENTE
   quando il sax live entra, fino a circa 7 dB. BASSO LIVE, RESPIRO e routing
   fisico restano invariati; il follower riusa il meter sax del blocco precedente

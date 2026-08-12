@@ -108,6 +108,7 @@ private:
     juce::TextButton freeTailButton { "CODA LIBERA: TIENI" };
     juce::TextButton thinningButton { "DIRADA: SPENTA" };
     juce::TextButton saxListenButton { "ASCOLTO: SPENTO" };
+    juce::TextButton loopTransportButton { "PAUSA LOOP" };
     juce::Label gesturesTitleLabel;
     juce::Label gesturesHintLabel;
     juce::Label gestureTargetLabel;

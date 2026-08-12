@@ -197,6 +197,17 @@ public:
         return dynamic_cast<AmbientSound*>(sound) != nullptr;
     }
 
+    void setLoopTransportBlock(float startGain, float endGain,
+                               int playbackChannel, int evolutionChannel,
+                               int blockSamples) noexcept
+    {
+        loopTransportStart = juce::jlimit(0.0f, 1.0f, startGain);
+        loopTransportEnd = juce::jlimit(0.0f, 1.0f, endGain);
+        loopPlaybackChannel = playbackChannel;
+        loopEvolutionChannel = evolutionChannel;
+        loopTransportSamples = juce::jmax(1, blockSamples);
+    }
+
     void setPatchImmediate(const SynthPatch& newPatch)
     {
         patch = newPatch;
@@ -332,6 +343,20 @@ public:
         declickSamplesRemaining = declickSamplesTotal = 0;
     }
 
+    void hardStop() noexcept
+    {
+        pendingVoiceRestart = false;
+        envelope.reset();
+        currentFrequency = 0.0;
+        targetFrequency = 0.0;
+        currentMidiNote = -1;
+        velocityLevel = 0.0f;
+        lastOutputLeft = lastOutputRight = 0.0f;
+        declickOffsetLeft = declickOffsetRight = 0.0f;
+        declickSamplesRemaining = declickSamplesTotal = 0;
+        clearCurrentNote();
+    }
+
     void pitchWheelMoved(int value) override
     {
         pitchBend = (static_cast<float>(value) - 8192.0f) / 8192.0f;
@@ -395,6 +420,15 @@ public:
         constexpr auto semitoneToNaturalExponent = 0.057762265046662105;
         const auto vibratoExponentScale = static_cast<double>(modulation)
             * 0.16 * semitoneToNaturalExponent;
+        const auto isStoredLoopVoice
+            = isPlayingChannel(loopPlaybackChannel)
+            || isPlayingChannel(loopEvolutionChannel);
+        const auto transportDelta = loopTransportSamples > 1
+            ? (loopTransportEnd - loopTransportStart)
+                / static_cast<float>(loopTransportSamples - 1)
+            : 0.0f;
+        auto storedLoopGain = loopTransportStart
+            + transportDelta * static_cast<float>(startSample);
 
         for (int offset = 0; offset < numSamples; ++offset)
         {
@@ -425,8 +459,12 @@ public:
             const auto movement = 1.0f - patch.lfoDepth
                 + patch.lfoDepth * (0.5f + 0.5f * lfo);
             const auto expression = 0.84f + pressure * 0.28f;
-            const auto sample = filterStateB * velocityLevel * patch.level * movement
-                              * expression * envelope.getNextSample();
+            const auto transportGain = isStoredLoopVoice
+                ? storedLoopGain
+                : 1.0f;
+            const auto sample = filterStateB * velocityLevel * patch.level
+                              * movement * expression
+                              * envelope.getNextSample();
             auto outputLeft = sample * leftGain;
             auto outputRight = sample * rightGain;
             if (declickSamplesRemaining > 0 && declickSamplesTotal > 0)
@@ -442,6 +480,8 @@ public:
                 if (declickSamplesRemaining == 0)
                     declickOffsetLeft = declickOffsetRight = 0.0f;
             }
+            outputLeft *= transportGain;
+            outputRight *= transportGain;
             if (output.getNumChannels() > 0)
                 output.addSample(0, startSample + offset, outputLeft);
             if (output.getNumChannels() > 1)
@@ -456,6 +496,7 @@ public:
             lfoPhase += twoPi * patch.lfoRateHz / getSampleRate();
             if (lfoPhase >= twoPi)
                 lfoPhase -= twoPi;
+            storedLoopGain += transportDelta;
         }
 
         if (! envelope.isActive())
@@ -631,6 +672,11 @@ private:
     float declickOffsetRight = 0.0f;
     int declickSamplesRemaining = 0;
     int declickSamplesTotal = 0;
+    float loopTransportStart = 1.0f;
+    float loopTransportEnd = 1.0f;
+    int loopPlaybackChannel = 0;
+    int loopEvolutionChannel = 0;
+    int loopTransportSamples = 1;
     double secondaryDetuneRatio = 1.0;
     double secondaryRatioA = 1.5;
     double secondaryRatioB = 0.0;
@@ -780,6 +826,34 @@ void AmbientSynth::setFreeTailEnabled(bool shouldReleaseTail) noexcept
                          requestedFreeTail ? 0.12 : 0.24);
     excitationGain.setCurrentAndTargetValue(current);
     excitationGain.setTargetValue(requestedFreeTail ? 0.0f : 1.0f);
+}
+
+void AmbientSynth::setLoopTransportBlock(
+    float startGain, float endGain, int playbackChannel,
+    int evolutionChannel, int blockSamples) noexcept
+{
+    loopTransportBlockStart = juce::jlimit(0.0f, 1.0f, startGain);
+    loopTransportBlockEnd = juce::jlimit(0.0f, 1.0f, endGain);
+    loopPlaybackChannel = playbackChannel;
+    loopEvolutionChannel = evolutionChannel;
+    loopTransportBlockSamples = juce::jmax(1, blockSamples);
+}
+
+void AmbientSynth::hardStopLoopChannels(int playbackChannel,
+                                        int evolutionChannel) noexcept
+{
+    if (playbackChannel > 0)
+        synthesiser.handleSustainPedal(playbackChannel, false);
+    if (evolutionChannel > 0 && evolutionChannel != playbackChannel)
+        synthesiser.handleSustainPedal(evolutionChannel, false);
+
+    for (int index = 0; index < synthesiser.getNumVoices(); ++index)
+        if (auto* voice = dynamic_cast<AmbientVoice*>(
+                synthesiser.getVoice(index));
+            voice != nullptr
+                && (voice->isPlayingChannel(playbackChannel)
+                    || voice->isPlayingChannel(evolutionChannel)))
+            voice->hardStop();
 }
 
 void AmbientSynth::allNotesOff()
@@ -967,6 +1041,13 @@ void AmbientSynth::render(juce::AudioBuffer<float>& output,
 
     prepareMorphBlock(numSamples);
     renderBuffer.clear(0, numSamples);
+    for (int index = 0; index < synthesiser.getNumVoices(); ++index)
+        if (auto* voice = dynamic_cast<AmbientVoice*>(
+                synthesiser.getVoice(index)))
+            voice->setLoopTransportBlock(
+                loopTransportBlockStart, loopTransportBlockEnd,
+                loopPlaybackChannel, loopEvolutionChannel,
+                loopTransportBlockSamples);
     synthesiser.renderNextBlock(renderBuffer, midi, 0, numSamples);
     for (int index = 0; index < synthesiser.getNumVoices(); ++index)
         if (auto* voice = dynamic_cast<AmbientVoice*>(

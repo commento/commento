@@ -149,6 +149,8 @@ public:
     void setThinningEnabled(bool shouldThin) noexcept;
     [[nodiscard]] bool isThinningEnabled() const noexcept;
     [[nodiscard]] int getThinnedMemoryIndex() const noexcept;
+    void setLoopPlaying(int memoryIndex, bool shouldPlay) noexcept;
+    [[nodiscard]] bool isLoopPlaying(int memoryIndex) const noexcept;
     void setSaxListenAmount(float amount) noexcept;
     [[nodiscard]] float getSaxListenAmount() const noexcept;
     void releaseMomentaryGestures() noexcept;
@@ -203,6 +205,27 @@ private:
         int64_t playbackPosition = 0;
         int64_t loopLength = 0;
         std::array<bool, 128> activeRecordedNotes {};
+        // Logical controller/note state immediately before playbackPosition.
+        // PAUSA silences only the private stored-loop voices but preserves
+        // this fixed-size snapshot, so PLAY can rebuild held and sustained
+        // notes without scanning the event list in the realtime callback.
+        std::array<bool, 128> playbackKeyDownNotes {};
+        std::array<bool, 128> playbackActiveNotes {};
+        std::array<float, 128> playbackNoteVelocities {};
+        bool playbackSustainDown = false;
+        int playbackPitchWheel = 8192;
+        int playbackModulation = 0;
+        int playbackBrightness = 0;
+        int playbackPressure = 0;
+        bool restorePlaybackNotesNextBlock = false;
+        // Latest live controller state seeds a take when SEMINA is armed and
+        // the first note arrives after a pedal/bend message. These values are
+        // audio-thread-owned and do not add events while merely waiting.
+        bool liveSustainDown = false;
+        int livePitchWheel = 8192;
+        int liveModulation = 0;
+        int liveBrightness = 0;
+        int livePressure = 0;
         int evolutionNote = -1;
         float evolutionVelocity = 0.25f;
         std::uint32_t evolutionRandomState = 0x9e3779b9u;
@@ -232,6 +255,7 @@ private:
         int64_t gainTransitionSamplesRemaining = 0;
         int64_t gainTransitionSamplesTotal = 0;
         bool clearAfterGainTransition = false;
+        bool clearStartedWhilePaused = false;
         std::uint32_t evolutionRandomState = 0xa341316cu;
         LoopEvolution evolution = LoopEvolution::normal;
         std::atomic<int> evolutionForDisplay {
@@ -246,8 +270,13 @@ private:
     static constexpr int maximumMidiEvents = 8192;
     static constexpr double maximumAudioSeconds = 120.0;
     static constexpr std::array<int, midiMemoryCount> midiChannels { 5, 2, 3, 4 };
-    static constexpr std::array<int, midiMemoryCount> evolutionMidiChannels {
+    // Stored loop voices use private channels inside each AmbientSynth. Live
+    // keyboard messages stay on 2/3/4, so PAUSA never mutes the performer.
+    static constexpr std::array<int, midiMemoryCount> playbackMidiChannels {
         0, 12, 13, 14
+    };
+    static constexpr std::array<int, midiMemoryCount> evolutionMidiChannels {
+        0, 9, 10, 11
     };
 
     [[nodiscard]] static int memoryIndexForMidiChannel(int midiChannel);
@@ -263,11 +292,22 @@ private:
     void advanceScenarioMorph(int numSamples) noexcept;
     void updatePerformanceEffectTargets() noexcept;
     void updateMomentaryGestureTargets(int numSamples) noexcept;
+    void applyLoopTransportCommands(juce::MidiBuffer& output) noexcept;
+    static void addPrivateLoopPanic(juce::MidiBuffer& output,
+                                    int playbackChannel, int ghostChannel,
+                                    int sampleOffset) noexcept;
+    static void resetMidiPlaybackSnapshot(MidiMemory& memory) noexcept;
+    void restoreMidiNotesAtPlayhead(int memoryIndex,
+                                    juce::MidiBuffer& output,
+                                    int sampleOffset = 0) noexcept;
+    void resetLoopTransportState(bool resetRequests) noexcept;
     void updateThinningState() noexcept;
     void scheduleNextThinning(bool firstGesture) noexcept;
     void startThinningCycle(int memoryIndex, int outputOffset,
                             int numSamples, juce::MidiBuffer& output) noexcept;
-    void finishThinningCycle(int memoryIndex, int outputOffset) noexcept;
+    void finishThinningCycle(int memoryIndex, int outputOffset,
+                             int blockSamples,
+                             juce::MidiBuffer& output) noexcept;
     void cancelThinningForMemory(int memoryIndex) noexcept;
     void setThinningGainTarget(int memoryIndex, float target,
                                int transitionOffset) noexcept;
@@ -276,8 +316,10 @@ private:
                                    int numSamples) noexcept;
     void recordIncomingMidi(int numSamples, juce::MidiBuffer& liveMidi);
     void renderMidiMemories(int numSamples, juce::MidiBuffer& output);
-    void renderMidiSegment(MidiMemory& memory, int64_t segmentStart,
-                           int segmentLength, int outputOffset, juce::MidiBuffer& output);
+    void renderMidiSegment(MidiMemory& memory, int memoryIndex,
+                           int64_t segmentStart, int segmentLength,
+                           int outputOffset, juce::MidiBuffer& output,
+                           bool emitEvents = true);
     void renderMidiEvolutionSegment(const MidiMemory& memory, int memoryIndex,
                                     int64_t segmentStart, int segmentLength,
                                     int outputOffset, juce::MidiBuffer& output);
@@ -337,6 +379,13 @@ private:
                memoryCount> echoThrowMixes;
     std::array<float, memoryCount> echoThrowBlockAmounts {};
     std::array<bool, memoryCount> echoThrowWasActive {};
+    // Requested state is written by UI/control threads; the remaining state
+    // and smoothers belong exclusively to the audio callback.
+    std::array<std::atomic<bool>, memoryCount> loopPlayingRequested;
+    std::array<bool, memoryCount> loopPlayingApplied {};
+    std::array<juce::SmoothedValue<float,
+               juce::ValueSmoothingTypes::Linear>, memoryCount>
+        loopTransportGains;
     std::atomic<bool> thinningEnabled { false };
     std::atomic<int> thinnedMemoryForDisplay { -1 };
     std::array<juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear>,
@@ -395,6 +444,7 @@ private:
     float fourHeadMixBlockStart = 0.0f;
     float fourHeadMixBlockEnd = 0.0f;
     std::array<double, 4> cosmosHeadPositions {};
+    std::array<float, 2> audioLoopLastSamples {};
     double cosmosModulationPhase = 0.0;
     std::array<float, 2> audioEvolutionFilteredSamples {};
     float audioEvolutionLowPassCoefficient = 1.0f;

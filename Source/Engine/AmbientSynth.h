@@ -18,6 +18,11 @@ public:
     void setDelayLevel(float newLevel) noexcept;
     void setFreezeEnabled(bool shouldFreeze) noexcept;
     void setFreeTailEnabled(bool shouldReleaseTail) noexcept;
+    void setLoopTransportBlock(float startGain, float endGain,
+                               int playbackChannel, int evolutionChannel,
+                               int blockSamples) noexcept;
+    void hardStopLoopChannels(int playbackChannel,
+                              int evolutionChannel) noexcept;
     void allNotesOff();
     void render(juce::AudioBuffer<float>& output, const juce::MidiBuffer& midi,
                 int startSample, int numSamples);
@@ -52,6 +57,11 @@ private:
     float requestedDelayLevel = 1.0f;
     bool requestedFreeze = false;
     bool requestedFreeTail = false;
+    float loopTransportBlockStart = 1.0f;
+    float loopTransportBlockEnd = 1.0f;
+    int loopPlaybackChannel = 0;
+    int loopEvolutionChannel = 0;
+    int loopTransportBlockSamples = 1;
     int delayWritePosition = 0;
     double currentSampleRate = 48000.0;
     bool processesAmbientEffects = true;

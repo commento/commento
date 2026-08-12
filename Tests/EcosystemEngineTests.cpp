@@ -4198,6 +4198,679 @@ int main()
     passed &= expect(maximumSilentOverdubPeak < 0.25f,
                      "un loop sax a basso livello non deve avvicinarsi al clipping");
 
+    // The GESTI transport is deliberately per-memory: only the three MIDI
+    // loopers and RESPIRO can be paused.  PAUSA freezes the read head without
+    // erasing material, while the live bass and the other loopers keep
+    // running.  A sustained note crossing the frozen playhead must be rebuilt
+    // on PLAY; simply waiting for its next stored note-on would leave an
+    // audible hole for the rest of that rotation.
+    {
+        constexpr auto transportSampleRate = 8000.0;
+        constexpr auto transportBlockSize = 400;
+        auto transportEngineStorage = std::make_unique<EcosystemEngine>();
+        auto& transportEngine = *transportEngineStorage;
+        transportEngine.setScenarioIndex(1); // GOCCE: quick, measurable tails.
+        for (int memory = 1; memory < EcosystemEngine::midiMemoryCount;
+             ++memory)
+            transportEngine.setDelayLevel(memory, 0.0f);
+        transportEngine.prepare(transportSampleRate, transportBlockSize);
+        OutputBlock<EcosystemEngine::logicalOutputBusCount> transportOutput(
+            transportBlockSize);
+        const auto renderTransport = [&]
+        {
+            transportOutput.clear();
+            process(transportEngine, nullptr, 0,
+                    transportOutput.pointers.data(),
+                    EcosystemEngine::logicalOutputBusCount,
+                    transportBlockSize);
+        };
+        const auto recordTransportLoop = [&](int memory, int channel,
+                                              int note, int blocks,
+                                              int noteOffBlock)
+        {
+            transportEngine.toggleRecording(memory);
+            transportEngine.enqueueMidiMessage(
+                juce::MidiMessage::noteOn(channel, note, 0.82f));
+            for (int block = 0; block < blocks; ++block)
+            {
+                if (block == noteOffBlock)
+                    transportEngine.enqueueMidiMessage(
+                        juce::MidiMessage::noteOff(channel, note));
+                renderTransport();
+            }
+            transportEngine.toggleRecording(memory);
+            renderTransport();
+        };
+
+        auto transportStartsPlaying = true;
+        for (int memory = 1; memory < EcosystemEngine::memoryCount; ++memory)
+            transportStartsPlaying &= transportEngine.isLoopPlaying(memory);
+        const auto bassTransportState
+            = transportEngine.isLoopPlaying(EcosystemEngine::bassLayerIndex);
+        transportEngine.setLoopPlaying(EcosystemEngine::bassLayerIndex, false);
+        transportEngine.setLoopPlaying(-1, false);
+        transportEngine.setLoopPlaying(EcosystemEngine::memoryCount, false);
+        passed &= expect(transportStartsPlaying
+                             && transportEngine.isLoopPlaying(
+                                 EcosystemEngine::bassLayerIndex)
+                                    == bassTransportState,
+                         "PLAY deve essere il default e il basso live non deve accettare PAUSA");
+
+        recordTransportLoop(1, 2, 48, 17, 12);
+        // Park the first loop at its first playback block while the other
+        // memories are captured, so the later pause point is provably between
+        // this note-on and note-off rather than dependent on elapsed helpers.
+        transportEngine.setLoopPlaying(1, false);
+        recordTransportLoop(2, 3, 55, 19, 13);
+        recordTransportLoop(3, 4, 60, 23, 16);
+        transportEngine.setLoopPlaying(1, true);
+        std::array<int, EcosystemEngine::midiMemoryCount>
+            preservedTransportEvents {};
+        std::array<double, EcosystemEngine::midiMemoryCount>
+            preservedTransportLengths {};
+        for (int memory = 1; memory < EcosystemEngine::midiMemoryCount;
+             ++memory)
+        {
+            preservedTransportEvents[static_cast<std::size_t>(memory)]
+                = transportEngine.getEventCount(memory);
+            preservedTransportLengths[static_cast<std::size_t>(memory)]
+                = transportEngine.getLengthSeconds(memory);
+        }
+
+        // Leave memory 1 inside its sustained note, then freeze only that
+        // playhead. The coprime loop lengths ensure memories 2 and 3 cannot
+        // accidentally return to their exact starting phase during this
+        // observation window.
+        renderTransport();
+        renderTransport();
+        const auto phaseOneBeforePause = transportEngine.getPhase(1);
+        const auto phaseTwoBeforePause = transportEngine.getPhase(2);
+        const auto phaseThreeBeforePause = transportEngine.getPhase(3);
+        transportEngine.setLoopPlaying(1, false);
+
+        auto transportFinite = true;
+        auto transportPeak = 0.0f;
+        auto transportMaximumStep = 0.0f;
+        std::array<float, 2> previousTransportSamples {
+            transportOutput.storage[EcosystemEngine::ambientLeftBus].back(),
+            transportOutput.storage[EcosystemEngine::ambientRightBus].back()
+        };
+        for (int block = 0; block < 40; ++block)
+        {
+            renderTransport();
+            transportFinite &= transportOutput.finite(transportBlockSize);
+            for (int channel = EcosystemEngine::ambientLeftBus;
+                 channel <= EcosystemEngine::ambientRightBus; ++channel)
+            {
+                const auto index = static_cast<std::size_t>(channel);
+                auto previous = previousTransportSamples[
+                    static_cast<std::size_t>(
+                        channel - EcosystemEngine::ambientLeftBus)];
+                for (const auto sample : transportOutput.storage[index])
+                {
+                    transportPeak = std::max(transportPeak,
+                                             std::abs(sample));
+                    transportMaximumStep = std::max(
+                        transportMaximumStep, std::abs(sample - previous));
+                    previous = sample;
+                }
+                previousTransportSamples[static_cast<std::size_t>(
+                    channel - EcosystemEngine::ambientLeftBus)] = previous;
+            }
+        }
+        const auto frozenPhaseOne = transportEngine.getPhase(1);
+        const auto otherMidiLoopsAdvanced
+            = std::abs(transportEngine.getPhase(2) - phaseTwoBeforePause)
+                    > 0.000001
+            && std::abs(transportEngine.getPhase(3) - phaseThreeBeforePause)
+                    > 0.000001;
+        auto midiTransportMaterialIntact = true;
+        for (int memory = 1; memory < EcosystemEngine::midiMemoryCount;
+             ++memory)
+            midiTransportMaterialIntact &= transportEngine.hasMaterial(memory)
+                && transportEngine.getEventCount(memory)
+                    == preservedTransportEvents[static_cast<std::size_t>(memory)]
+                && std::abs(transportEngine.getLengthSeconds(memory)
+                    - preservedTransportLengths[static_cast<std::size_t>(memory)])
+                    < 0.000001;
+        passed &= expect(! transportEngine.isLoopPlaying(1)
+                             && transportEngine.isLoopPlaying(2)
+                             && transportEngine.isLoopPlaying(3)
+                             && std::abs(frozenPhaseOne - phaseOneBeforePause)
+                                    < 0.000000001
+                             && otherMidiLoopsAdvanced
+                             && midiTransportMaterialIntact,
+                         "PAUSA MIDI deve essere indipendente e conservare fase e materiale");
+
+        // The live bass remains playable while every stored MIDI loop is
+        // paused.  Keep all ambient loopers stopped long enough for their
+        // release/reverb state to drain, so the following PLAY probe can only
+        // succeed if memory 1 reconstructs the note active at its playhead.
+        const auto phaseTwoBeforeAllPause = transportEngine.getPhase(2);
+        const auto phaseThreeBeforeAllPause = transportEngine.getPhase(3);
+        transportEngine.setLoopPlaying(2, false);
+        transportEngine.setLoopPlaying(3, false);
+        transportEngine.enqueueMidiMessage(
+            juce::MidiMessage::noteOn(5, 43, 0.88f));
+        auto pausedBassPeak = 0.0f;
+        for (int block = 0; block < 8; ++block)
+        {
+            renderTransport();
+            pausedBassPeak = std::max(pausedBassPeak,
+                transportOutput.peak(EcosystemEngine::bassBus,
+                                     transportBlockSize));
+        }
+        transportEngine.enqueueMidiMessage(
+            juce::MidiMessage::noteOff(5, 43));
+        for (int block = 0; block < 120; ++block)
+            renderTransport();
+        // PAUSA belongs only to the stored loop. The same card's live MIDI
+        // channel must remain playable while its private playback channel is
+        // frozen.
+        transportEngine.enqueueMidiMessage(
+            juce::MidiMessage::noteOn(2, 72, 0.82f));
+        auto pausedLayerLivePeak = 0.0f;
+        for (int block = 0; block < 4; ++block)
+        {
+            renderTransport();
+            pausedLayerLivePeak = std::max(
+                pausedLayerLivePeak,
+                std::max(transportOutput.peak(
+                             EcosystemEngine::ambientLeftBus,
+                             transportBlockSize),
+                         transportOutput.peak(
+                             EcosystemEngine::ambientRightBus,
+                             transportBlockSize)));
+        }
+        transportEngine.enqueueMidiMessage(
+            juce::MidiMessage::noteOff(2, 72));
+        for (int block = 0; block < 120; ++block)
+            renderTransport();
+        const auto phaseBeforeResume = transportEngine.getPhase(1);
+        previousTransportSamples = {
+            transportOutput.storage[EcosystemEngine::ambientLeftBus].back(),
+            transportOutput.storage[EcosystemEngine::ambientRightBus].back()
+        };
+        transportEngine.setLoopPlaying(1, true);
+        auto resumedCrossingNotePeak = 0.0f;
+        auto midiFadeInStartEnergy = 0.0;
+        auto midiFadeInEndEnergy = 0.0;
+        constexpr auto transportFadeProbeSamples = 64;
+        for (int block = 0; block < 4; ++block)
+        {
+            renderTransport();
+            transportFinite &= transportOutput.finite(transportBlockSize);
+            resumedCrossingNotePeak = std::max(resumedCrossingNotePeak,
+                std::max(transportOutput.peak(
+                             EcosystemEngine::ambientLeftBus,
+                             transportBlockSize),
+                         transportOutput.peak(
+                             EcosystemEngine::ambientRightBus,
+                             transportBlockSize)));
+            if (block == 0)
+                for (int channel = EcosystemEngine::ambientLeftBus;
+                     channel <= EcosystemEngine::ambientRightBus; ++channel)
+                    for (int sample = 0;
+                         sample < transportFadeProbeSamples; ++sample)
+                    {
+                        const auto first = static_cast<double>(
+                            transportOutput.storage[
+                                static_cast<std::size_t>(channel)][
+                                static_cast<std::size_t>(sample)]);
+                        const auto last = static_cast<double>(
+                            transportOutput.storage[
+                                static_cast<std::size_t>(channel)][
+                                static_cast<std::size_t>(
+                                    transportBlockSize
+                                    - transportFadeProbeSamples + sample)]);
+                        midiFadeInStartEnergy += first * first;
+                        midiFadeInEndEnergy += last * last;
+                    }
+            for (int channel = EcosystemEngine::ambientLeftBus;
+                 channel <= EcosystemEngine::ambientRightBus; ++channel)
+            {
+                const auto previousIndex = static_cast<std::size_t>(
+                    channel - EcosystemEngine::ambientLeftBus);
+                auto previous = previousTransportSamples[previousIndex];
+                for (const auto sample : transportOutput.storage[
+                         static_cast<std::size_t>(channel)])
+                {
+                    transportMaximumStep = std::max(
+                        transportMaximumStep, std::abs(sample - previous));
+                    previous = sample;
+                }
+                previousTransportSamples[previousIndex] = previous;
+            }
+        }
+        passed &= expect(pausedBassPeak > 0.0001f
+                             && pausedLayerLivePeak > 0.0001f
+                             && resumedCrossingNotePeak > 0.0001f
+                             && transportEngine.getPhase(1)
+                                    != phaseBeforeResume
+                             && std::abs(transportEngine.getPhase(2)
+                                    - phaseTwoBeforeAllPause) < 0.000000001
+                             && std::abs(transportEngine.getPhase(3)
+                                    - phaseThreeBeforeAllPause) < 0.000000001
+                             && midiFadeInEndEnergy
+                                    > midiFadeInStartEnergy * 1.5
+                             && transportFinite && transportPeak < 0.90f
+                             && transportMaximumStep < 0.20f,
+                         "PLAY deve ricostruire e sfumare le note attraversate senza fermare il basso o creare click");
+
+        // SEMINA on a paused MIDI memory deliberately returns it to PLAY and
+        // replaces the old loop. DIMENTICA also normalises transport state so
+        // an empty card can never remain marked IN PAUSA.
+        transportEngine.setLoopPlaying(1, false);
+        renderTransport();
+        auto midiFadeOutStartEnergy = 0.0;
+        auto midiFadeOutEndEnergy = 0.0;
+        for (int channel = EcosystemEngine::ambientLeftBus;
+             channel <= EcosystemEngine::ambientRightBus; ++channel)
+            for (int sample = 0; sample < transportFadeProbeSamples; ++sample)
+            {
+                const auto first = static_cast<double>(
+                    transportOutput.storage[static_cast<std::size_t>(channel)][
+                        static_cast<std::size_t>(sample)]);
+                const auto last = static_cast<double>(
+                    transportOutput.storage[static_cast<std::size_t>(channel)][
+                        static_cast<std::size_t>(
+                            transportBlockSize
+                            - transportFadeProbeSamples + sample)]);
+                midiFadeOutStartEnergy += first * first;
+                midiFadeOutEndEnergy += last * last;
+            }
+        transportEngine.toggleRecording(1);
+        const auto midiRecordForcedPlay = transportEngine.isLoopPlaying(1);
+        transportEngine.enqueueMidiMessage(
+            juce::MidiMessage::noteOn(2, 67, 0.75f));
+        for (int block = 0; block < 8; ++block)
+        {
+            if (block == 5)
+                transportEngine.enqueueMidiMessage(
+                    juce::MidiMessage::noteOff(2, 67));
+            renderTransport();
+        }
+        transportEngine.toggleRecording(1);
+        renderTransport();
+        const auto midiRecordedFromPause = transportEngine.hasMaterial(1)
+            && transportEngine.getEventCount(1) == 2
+            && transportEngine.isLoopPlaying(1);
+        transportEngine.setLoopPlaying(1, false);
+        transportEngine.clearMemory(1);
+        renderTransport();
+        // Factory reverbs deliberately outlive the MIDI note.  Twelve
+        // simulated seconds distinguish a decaying tail from a genuinely
+        // stuck voice without requiring the clear command to hard-reset DSP.
+        for (int block = 0; block < 240; ++block)
+            renderTransport();
+        const auto midiClearRestoredPlay = transportEngine.isLoopPlaying(1)
+            && ! transportEngine.hasMaterial(1);
+        const auto midiClearDrained
+            = transportOutput.peak(EcosystemEngine::ambientLeftBus,
+                                   transportBlockSize) < 0.0001f
+            && transportOutput.peak(EcosystemEngine::ambientRightBus,
+                                    transportBlockSize) < 0.0001f;
+        passed &= expect(midiFadeOutStartEnergy
+                                    > midiFadeOutEndEnergy * 1.5,
+                         "PAUSA MIDI deve usare un fade-out progressivo");
+        passed &= expect(midiRecordForcedPlay && midiRecordedFromPause,
+                         "SEMINA MIDI deve uscire da PAUSA e riscrivere il loop");
+        passed &= expect(midiClearRestoredPlay,
+                         "DIMENTICA MIDI deve uscire da PAUSA e cancellare il materiale");
+        passed &= expect(midiClearDrained,
+                         "DIMENTICA MIDI non deve lasciare note bloccate");
+
+        // A device re-prepare/reconnect never persists performance pauses.
+        // Same-rate prepare preserves the already recorded material, whereas
+        // both lifecycle boundaries restore every transport to PLAY.
+        transportEngine.setLoopPlaying(2, false);
+        transportEngine.setLoopPlaying(3, false);
+        transportEngine.prepare(transportSampleRate, transportBlockSize);
+        const auto prepareRestoredPlay = transportEngine.isLoopPlaying(2)
+            && transportEngine.isLoopPlaying(3)
+            && transportEngine.hasMaterial(2)
+            && transportEngine.hasMaterial(3);
+        transportEngine.setLoopPlaying(2, false);
+        transportEngine.setLoopPlaying(3, false);
+        transportEngine.audioDeviceStopped();
+        const auto stopRestoredPlay = transportEngine.isLoopPlaying(2)
+            && transportEngine.isLoopPlaying(3)
+            && transportEngine.hasMaterial(2)
+            && transportEngine.hasMaterial(3);
+        passed &= expect(prepareRestoredPlay && stopRestoredPlay,
+                         "prepare e stop audio devono ripartire in PLAY conservando i loop chiusi");
+    }
+
+    // DIRADA cannot own a paused memory. With only one eligible MIDI loop,
+    // pausing it while RESPIRA is active must release ownership immediately;
+    // the scheduler must then leave it excluded for subsequent cycles.
+    {
+        constexpr auto pauseThinningSampleRate = 8000.0;
+        constexpr auto pauseThinningBlockSize = 400;
+        constexpr auto pauseThinningMemory = 1;
+        auto pauseThinningEngineStorage
+            = std::make_unique<EcosystemEngine>();
+        auto& pauseThinningEngine = *pauseThinningEngineStorage;
+        pauseThinningEngine.setScenarioIndex(1);
+        pauseThinningEngine.setDelayLevel(pauseThinningMemory, 0.0f);
+        pauseThinningEngine.prepare(pauseThinningSampleRate,
+                                    pauseThinningBlockSize);
+        OutputBlock<EcosystemEngine::logicalOutputBusCount>
+            pauseThinningOutput(pauseThinningBlockSize);
+        const auto renderPauseThinning = [&]
+        {
+            pauseThinningOutput.clear();
+            process(pauseThinningEngine, nullptr, 0,
+                    pauseThinningOutput.pointers.data(),
+                    EcosystemEngine::logicalOutputBusCount,
+                    pauseThinningBlockSize);
+        };
+        pauseThinningEngine.toggleRecording(pauseThinningMemory);
+        pauseThinningEngine.enqueueMidiMessage(
+            juce::MidiMessage::noteOn(2, 52, 0.78f));
+        for (int block = 0; block < 11; ++block)
+        {
+            if (block == 8)
+                pauseThinningEngine.enqueueMidiMessage(
+                    juce::MidiMessage::noteOff(2, 52));
+            renderPauseThinning();
+        }
+        pauseThinningEngine.toggleRecording(pauseThinningMemory);
+        renderPauseThinning();
+        pauseThinningEngine.setThinningEnabled(true);
+        auto thinningOwnedBeforePause = false;
+        for (int block = 0; block < 220; ++block)
+        {
+            renderPauseThinning();
+            if (pauseThinningEngine.getThinnedMemoryIndex()
+                == pauseThinningMemory)
+            {
+                thinningOwnedBeforePause = true;
+                break;
+            }
+        }
+        pauseThinningEngine.setLoopPlaying(pauseThinningMemory, false);
+        renderPauseThinning();
+        auto pausedMemoryStayedExcluded
+            = pauseThinningEngine.getThinnedMemoryIndex() == -1;
+        for (int block = 0; block < 320; ++block)
+        {
+            renderPauseThinning();
+            pausedMemoryStayedExcluded
+                &= pauseThinningEngine.getThinnedMemoryIndex() == -1;
+        }
+        passed &= expect(thinningOwnedBeforePause
+                             && pauseThinningEngine.isThinningEnabled()
+                             && ! pauseThinningEngine.isLoopPlaying(
+                                 pauseThinningMemory)
+                             && pausedMemoryStayedExcluded
+                             && pauseThinningEngine.hasMaterial(
+                                 pauseThinningMemory),
+                         "PAUSA deve annullare DIRADA e tenere la memoria fuori dallo scheduler");
+    }
+
+    // RESPIRO transport gates only stored playback. Its physical sax monitor
+    // remains continuous, and the loop/four COSMOS heads resume from the exact
+    // frozen phase through a short anti-click ramp.
+    {
+        constexpr auto saxTransportSampleRate = 8000.0;
+        constexpr auto saxTransportBlockSize = 400;
+        constexpr auto saxCaptureBlocks = 12;
+        constexpr auto saxMemory = EcosystemEngine::midiMemoryCount;
+        auto saxTransportEngineStorage = std::make_unique<EcosystemEngine>();
+        auto& saxTransportEngine = *saxTransportEngineStorage;
+        saxTransportEngine.setScenarioIndex(CommentoScenarios::count - 1);
+        saxTransportEngine.setSaxPathMode(
+            EcosystemEngine::SaxPathMode::cleanLooper);
+        saxTransportEngine.setSaxStereoInput(true);
+        saxTransportEngine.prepare(saxTransportSampleRate,
+                                   saxTransportBlockSize);
+        std::array<std::vector<float>, 2> saxTransportInputStorage;
+        std::array<const float*, 2> saxTransportInputs {};
+        for (std::size_t channel = 0;
+             channel < saxTransportInputStorage.size(); ++channel)
+        {
+            saxTransportInputStorage[channel].resize(saxTransportBlockSize);
+            for (int sample = 0; sample < saxTransportBlockSize; ++sample)
+                saxTransportInputStorage[channel][static_cast<std::size_t>(sample)]
+                    = 0.055f * static_cast<float>(std::sin(
+                        juce::MathConstants<double>::twoPi
+                        * (170.0 + 23.0 * static_cast<double>(channel))
+                        * static_cast<double>(sample) / saxTransportSampleRate));
+            saxTransportInputs[channel]
+                = saxTransportInputStorage[channel].data();
+        }
+        OutputBlock<EcosystemEngine::logicalOutputBusCount> saxTransportOutput(
+            saxTransportBlockSize);
+        const auto renderSaxTransport = [&](const float* const* inputs)
+        {
+            saxTransportOutput.clear();
+            process(saxTransportEngine, inputs, inputs != nullptr ? 2 : 0,
+                    saxTransportOutput.pointers.data(),
+                    EcosystemEngine::logicalOutputBusCount,
+                    saxTransportBlockSize);
+        };
+
+        saxTransportEngine.toggleRecording(saxMemory);
+        for (int block = 0; block < saxCaptureBlocks; ++block)
+            renderSaxTransport(saxTransportInputs.data());
+        saxTransportEngine.toggleRecording(saxMemory);
+        for (int block = 0; block < 6; ++block)
+            renderSaxTransport(nullptr);
+        const auto saxEventsBeforePause = saxTransportEngine.getEventCount(
+            saxMemory);
+        const auto saxLengthBeforePause = saxTransportEngine.getLengthSeconds(
+            saxMemory);
+        const auto saxPhaseBeforePause = saxTransportEngine.getPhase(saxMemory);
+        std::array<float, 2> previousSaxSamples {
+            saxTransportOutput.storage[EcosystemEngine::saxLeftBus].back(),
+            saxTransportOutput.storage[EcosystemEngine::saxRightBus].back()
+        };
+        saxTransportEngine.setLoopPlaying(saxMemory, false);
+
+        // Probe the stored component without live input first: its first
+        // window must retain energy and its final window must be lower. This
+        // distinguishes a musical fade from a block-boundary hard mute.
+        renderSaxTransport(nullptr);
+        constexpr auto saxFadeProbeSamples = 64;
+        auto saxFadeOutStartEnergy = 0.0;
+        auto saxFadeOutEndEnergy = 0.0;
+        auto saxTransportMaximumStep = 0.0f;
+        for (int channel = EcosystemEngine::saxLeftBus;
+             channel <= EcosystemEngine::saxRightBus; ++channel)
+        {
+            const auto previousIndex = static_cast<std::size_t>(
+                channel - EcosystemEngine::saxLeftBus);
+            auto previous = previousSaxSamples[previousIndex];
+            for (const auto sample : saxTransportOutput.storage[
+                     static_cast<std::size_t>(channel)])
+            {
+                saxTransportMaximumStep = std::max(
+                    saxTransportMaximumStep, std::abs(sample - previous));
+                previous = sample;
+            }
+            previousSaxSamples[previousIndex] = previous;
+            for (int sample = 0; sample < saxFadeProbeSamples; ++sample)
+            {
+                const auto first = static_cast<double>(
+                    saxTransportOutput.storage[
+                        static_cast<std::size_t>(channel)][
+                        static_cast<std::size_t>(sample)]);
+                const auto last = static_cast<double>(
+                    saxTransportOutput.storage[
+                        static_cast<std::size_t>(channel)][
+                        static_cast<std::size_t>(
+                            saxTransportBlockSize
+                            - saxFadeProbeSamples + sample)]);
+                saxFadeOutStartEnergy += first * first;
+                saxFadeOutEndEnergy += last * last;
+            }
+        }
+
+        std::array<std::vector<float>, 2> liveSaxInputStorage;
+        std::array<const float*, 2> liveSaxInputs {};
+        constexpr std::array<float, 2> liveSaxValues { 0.031f, -0.027f };
+        for (std::size_t channel = 0; channel < liveSaxInputStorage.size();
+             ++channel)
+        {
+            liveSaxInputStorage[channel].assign(saxTransportBlockSize,
+                                                liveSaxValues[channel]);
+            liveSaxInputs[channel] = liveSaxInputStorage[channel].data();
+        }
+        auto saxTransportFinite = true;
+        auto saxTransportPeak = 0.0f;
+        for (int block = 0; block < 12; ++block)
+        {
+            renderSaxTransport(liveSaxInputs.data());
+            saxTransportFinite &= saxTransportOutput.finite(
+                saxTransportBlockSize);
+            for (int channel = EcosystemEngine::saxLeftBus;
+                 channel <= EcosystemEngine::saxRightBus; ++channel)
+            {
+                const auto previousIndex = static_cast<std::size_t>(
+                    channel - EcosystemEngine::saxLeftBus);
+                auto previous = previousSaxSamples[previousIndex];
+                for (const auto sample : saxTransportOutput.storage[
+                         static_cast<std::size_t>(channel)])
+                {
+                    saxTransportPeak = std::max(saxTransportPeak,
+                                                std::abs(sample));
+                    saxTransportMaximumStep = std::max(
+                        saxTransportMaximumStep,
+                        std::abs(sample - previous));
+                    previous = sample;
+                }
+                previousSaxSamples[previousIndex] = previous;
+            }
+        }
+        const auto pausedSaxPhase = saxTransportEngine.getPhase(saxMemory);
+        const auto liveMonitorPreserved
+            = std::abs(saxTransportOutput.storage[
+                    EcosystemEngine::saxLeftBus].back()
+                - liveSaxValues[0] * 0.58f) < 0.00001f
+            && std::abs(saxTransportOutput.storage[
+                    EcosystemEngine::saxRightBus].back()
+                - liveSaxValues[1] * 0.58f) < 0.00001f;
+        renderSaxTransport(nullptr);
+        const auto cosmosHeadsAreSilentWhilePaused
+            = saxTransportOutput.silent(EcosystemEngine::saxLeftBus,
+                                        saxTransportBlockSize)
+            && saxTransportOutput.silent(EcosystemEngine::saxRightBus,
+                                         saxTransportBlockSize);
+        passed &= expect(! saxTransportEngine.isLoopPlaying(saxMemory)
+                             && std::abs(pausedSaxPhase - saxPhaseBeforePause)
+                                    < 0.000000001
+                             && saxTransportEngine.hasMaterial(saxMemory)
+                             && saxTransportEngine.getEventCount(saxMemory)
+                                    == saxEventsBeforePause
+                             && std::abs(saxTransportEngine.getLengthSeconds(
+                                    saxMemory) - saxLengthBeforePause)
+                                    < 0.000001
+                             && saxFadeOutStartEnergy
+                                    > saxFadeOutEndEnergy * 1.5
+                             && liveMonitorPreserved
+                             && cosmosHeadsAreSilentWhilePaused,
+                         "PAUSA RESPIRO deve sfumare e congelare loop/testine COSMOS lasciando vivo il sax");
+
+        saxTransportEngine.setLoopPlaying(saxMemory, true);
+        auto resumedSaxPeak = 0.0f;
+        auto saxFadeInStartEnergy = 0.0;
+        auto saxFadeInEndEnergy = 0.0;
+        for (int block = 0; block < 6; ++block)
+        {
+            renderSaxTransport(nullptr);
+            saxTransportFinite &= saxTransportOutput.finite(
+                saxTransportBlockSize);
+            resumedSaxPeak = std::max(resumedSaxPeak,
+                std::max(saxTransportOutput.peak(
+                             EcosystemEngine::saxLeftBus,
+                             saxTransportBlockSize),
+                         saxTransportOutput.peak(
+                             EcosystemEngine::saxRightBus,
+                             saxTransportBlockSize)));
+            for (int channel = EcosystemEngine::saxLeftBus;
+                 channel <= EcosystemEngine::saxRightBus; ++channel)
+            {
+                const auto previousIndex = static_cast<std::size_t>(
+                    channel - EcosystemEngine::saxLeftBus);
+                auto previous = previousSaxSamples[previousIndex];
+                for (const auto sample : saxTransportOutput.storage[
+                         static_cast<std::size_t>(channel)])
+                {
+                    saxTransportMaximumStep = std::max(
+                        saxTransportMaximumStep,
+                        std::abs(sample - previous));
+                    previous = sample;
+                }
+                previousSaxSamples[previousIndex] = previous;
+                if (block == 0)
+                    for (int sample = 0; sample < saxFadeProbeSamples;
+                         ++sample)
+                    {
+                        const auto first = static_cast<double>(
+                            saxTransportOutput.storage[
+                                static_cast<std::size_t>(channel)][
+                                static_cast<std::size_t>(sample)]);
+                        const auto last = static_cast<double>(
+                            saxTransportOutput.storage[
+                                static_cast<std::size_t>(channel)][
+                                static_cast<std::size_t>(
+                                    saxTransportBlockSize
+                                    - saxFadeProbeSamples + sample)]);
+                        saxFadeInStartEnergy += first * first;
+                        saxFadeInEndEnergy += last * last;
+                    }
+            }
+        }
+        const auto saxResumeAdvanced = std::abs(
+            saxTransportEngine.getPhase(saxMemory) - pausedSaxPhase)
+                > 0.000001;
+
+        // NUTRI/overdub is never allowed to run against a frozen playhead.
+        // DIMENTICA then dissolves the loop and restores PLAY for the empty
+        // card; the live monitor remains outside both transport gains.
+        saxTransportEngine.setLoopPlaying(saxMemory, false);
+        saxTransportEngine.toggleRecording(saxMemory);
+        const auto saxOverdubForcedPlay
+            = saxTransportEngine.isLoopPlaying(saxMemory);
+        renderSaxTransport(liveSaxInputs.data());
+        const auto saxOverdubStarted = saxTransportEngine.isRecording(
+            saxMemory);
+        saxTransportEngine.toggleRecording(saxMemory);
+        renderSaxTransport(nullptr);
+        saxTransportEngine.setLoopPlaying(saxMemory, false);
+        renderSaxTransport(nullptr);
+        renderSaxTransport(nullptr);
+        saxTransportEngine.clearMemory(saxMemory);
+        const auto saxStayedPausedForClear
+            = ! saxTransportEngine.isLoopPlaying(saxMemory);
+        renderSaxTransport(nullptr);
+        const auto pausedClearDidNotReappear
+            = saxTransportOutput.silent(EcosystemEngine::saxLeftBus,
+                                        saxTransportBlockSize)
+            && saxTransportOutput.silent(EcosystemEngine::saxRightBus,
+                                         saxTransportBlockSize);
+        for (int block = 0; block < 24; ++block)
+            renderSaxTransport(liveSaxInputs.data());
+        const auto saxClearKeptLiveInput
+            = ! saxTransportEngine.hasMaterial(saxMemory)
+            && saxTransportEngine.isLoopPlaying(saxMemory)
+            && std::abs(saxTransportOutput.storage[
+                    EcosystemEngine::saxLeftBus].back()
+                - liveSaxValues[0] * 0.58f) < 0.00001f;
+        passed &= expect(resumedSaxPeak > 0.0001f
+                             && resumedSaxPeak < 0.90f && saxResumeAdvanced
+                             && saxFadeInEndEnergy
+                                    > saxFadeInStartEnergy * 1.5
+                             && saxOverdubForcedPlay && saxOverdubStarted
+                             && saxStayedPausedForClear
+                             && pausedClearDidNotReappear
+                             && saxClearKeptLiveInput
+                             && saxTransportFinite && saxTransportPeak < 0.90f
+                             && saxTransportMaximumStep < 0.20f,
+                         "PLAY/NUTRI/DIMENTICA RESPIRO devono restare fluidi, finiti e senza mutare il live input");
+    }
+
     EcosystemEngine scenarioEngine;
     scenarioEngine.prepare(sampleRate, blockSize);
     OutputBlock<EcosystemEngine::logicalOutputBusCount> scenarioOutput(blockSize);
