@@ -165,6 +165,7 @@ enum class MidiMonitorKind : std::uint32_t
     {
         case EcosystemEngine::MidiInputRole::keyStep: return "KEYSTEP PRO";
         case EcosystemEngine::MidiInputRole::model12: return "MODEL 12";
+        case EcosystemEngine::MidiInputRole::nm2: return "NM2";
         case EcosystemEngine::MidiInputRole::generic: return "MIDI";
     }
     return "MIDI";
@@ -203,8 +204,27 @@ bool looksLikeModel12Midi(const juce::String& name)
         && ! isModel12SecondaryMidiEndpoint(name);
 }
 
+bool looksLikeNm2Midi(const juce::String& name)
+{
+    return name.containsIgnoreCase("nm2")
+        || name.containsIgnoreCase("this is noise")
+        || name.containsIgnoreCase("this.is.noise")
+        || name.containsIgnoreCase("thisisnoise");
+}
+
+bool looksLikeBluetoothMidiEndpoint(const juce::String& description)
+{
+    return description.containsIgnoreCase("bluetooth")
+        || description.containsIgnoreCase("ble midi")
+        || description.startsWithIgnoreCase("ble ")
+        || description.endsWithIgnoreCase(" ble")
+        || description.containsIgnoreCase("(ble)");
+}
+
 EcosystemEngine::MidiInputRole midiInputRoleForName(const juce::String& name)
 {
+    if (looksLikeNm2Midi(name))
+        return EcosystemEngine::MidiInputRole::nm2;
     if (looksLikeKeyStepMidi(name))
         return EcosystemEngine::MidiInputRole::keyStep;
     if (looksLikeModel12Midi(name))
@@ -232,6 +252,7 @@ juce::String saxFootswitchBindingText(
     {
         case EcosystemEngine::MidiInputRole::keyStep: source = "KEYSTEP PRO"; break;
         case EcosystemEngine::MidiInputRole::model12: source = "MODEL 12"; break;
+        case EcosystemEngine::MidiInputRole::nm2: source = "NM2"; break;
         case EcosystemEngine::MidiInputRole::generic: source = "MIDI"; break;
     }
 
@@ -667,6 +688,7 @@ MainComponent::MainComponent()
     gesturesHintLabel.setColour(juce::Label::textColourId,
                                 juce::Colour(quietText));
     gesturesHintLabel.setJustificationType(juce::Justification::centredLeft);
+    gesturesHintLabel.setMinimumHorizontalScale(0.55f);
     addChildComponent(gesturesHintLabel);
 
     gestureTargetLabel.setFont(juce::FontOptions(21.0f, juce::Font::bold));
@@ -1149,10 +1171,11 @@ MainComponent::MainComponent()
 MainComponent::~MainComponent()
 {
     juce::Timer::stopTimer();
+    deviceManager.removeMidiInputDeviceCallback({}, this);
+    engine.releaseNm2Gestures();
     savePerformanceLevels(false);
     saveSaxFootswitchBinding(false);
     properties.saveIfNeeded();
-    deviceManager.removeMidiInputDeviceCallback({}, this);
     deviceManager.removeAudioCallback(&audioRouter);
     setLookAndFeel(nullptr);
 }
@@ -1450,6 +1473,7 @@ void MainComponent::configureKeyStepMidi()
     // Re-reading or losing a controller is also the explicit panic path for a
     // missing release. The saved footswitch assignment is deliberately kept.
     engine.releaseMomentaryGestures();
+    engine.releaseNm2Gestures();
     engine.releaseSaxFootswitch();
     engine.cancelSaxFootswitchLearn();
     lastMidiMessagePacked.store(0u, std::memory_order_relaxed);
@@ -1460,8 +1484,12 @@ void MainComponent::configureKeyStepMidi()
     const auto devices = juce::MidiInput::getAvailableDevices();
     keyStepInputName.clear();
     model12MidiInputName.clear();
+    nm2MidiInputName.clear();
+    nm2MidiInputIdentifier.clear();
+    nm2InputWasPresent = false;
     juce::String keyStepIdentifier;
     juce::String model12Identifier;
+    auto nm2IsBluetooth = false;
 
     for (const auto& device : devices)
     {
@@ -1476,25 +1504,46 @@ void MainComponent::configureKeyStepMidi()
             model12Identifier = device.identifier;
             model12MidiInputName = device.name;
         }
+
+        if (looksLikeNm2Midi(device.name))
+        {
+            const auto candidateIsBluetooth = looksLikeBluetoothMidiEndpoint(
+                device.name + " " + device.identifier);
+            if (nm2MidiInputIdentifier.isEmpty()
+                || (nm2IsBluetooth && ! candidateIsBluetooth))
+            {
+                nm2MidiInputIdentifier = device.identifier;
+                nm2MidiInputName = device.name;
+                nm2IsBluetooth = candidateIsBluetooth;
+            }
+        }
     }
+
+    nm2InputWasPresent = nm2MidiInputIdentifier.isNotEmpty();
 
     for (const auto& device : devices)
     {
         const auto shouldEnable = device.identifier == keyStepIdentifier
-            || device.identifier == model12Identifier;
+            || device.identifier == model12Identifier
+            || device.identifier == nm2MidiInputIdentifier;
         deviceManager.setMidiInputDeviceEnabled(
             device.identifier, shouldEnable);
     }
 
-    juce::String connectionText;
-    if (keyStepInputName.isNotEmpty() && model12MidiInputName.isNotEmpty())
-        connectionText = "2 PORTE MIDI ATTIVE\nKEYSTEP PRO + MODEL 12";
-    else if (keyStepInputName.isNotEmpty())
-        connectionText = "MIDI ATTIVO\n" + keyStepInputName;
-    else if (model12MidiInputName.isNotEmpty())
-        connectionText = "MIDI ATTIVO\n" + model12MidiInputName;
-    else
-        connectionText = "MIDI NON TROVATO\nCollega KeyStep Pro o Model 12";
+    juce::StringArray activeSources;
+    if (keyStepInputName.isNotEmpty())
+        activeSources.add("KEYSTEP PRO");
+    if (model12MidiInputName.isNotEmpty())
+        activeSources.add("MODEL 12");
+    if (nm2MidiInputName.isNotEmpty())
+        activeSources.add(nm2IsBluetooth ? "NM2 BLE" : "NM2");
+
+    const auto connectionText = activeSources.isEmpty()
+        ? juce::String("MIDI NON TROVATO\nCollega KeyStep Pro, Model 12 o NM2")
+        : juce::String(activeSources.size())
+            + (activeSources.size() == 1
+                ? " PORTA MIDI ATTIVA\n" : " PORTE MIDI ATTIVE\n")
+            + activeSources.joinIntoString(" + ");
     midiConnectionLabel.setText(connectionText, juce::dontSendNotification);
     updateSaxFootswitchControls();
 }
@@ -2444,17 +2493,31 @@ void MainComponent::updateHardwareIndicators()
 
     auto keyStepPresent = false;
     auto model12MidiPresent = false;
+    auto nm2EndpointPresent = false;
     for (const auto& device : juce::MidiInput::getAvailableDevices())
     {
         if (device.name == keyStepInputName)
             keyStepPresent = true;
         if (device.name == model12MidiInputName)
             model12MidiPresent = true;
+        if (device.identifier == nm2MidiInputIdentifier)
+            nm2EndpointPresent = true;
+    }
+
+    if (nm2InputWasPresent && ! nm2EndpointPresent)
+    {
+        // A missing note-off over BLE/USB must not leave a held gesture behind.
+        engine.releaseNm2Gestures();
+        nm2InputWasPresent = false;
+        midiConnectionLabel.setText(
+            "NM2 DISCONNESSO\nRicollega e premi RILEGGI MIDI",
+            juce::dontSendNotification);
     }
 
     const auto droppedMidi = engine.getDroppedMidiMessageCount();
     const auto midiInputCount = static_cast<int>(keyStepPresent)
-        + static_cast<int>(model12MidiPresent);
+        + static_cast<int>(model12MidiPresent)
+        + static_cast<int>(nm2InputWasPresent && nm2EndpointPresent);
     midiStatusLabel.setText(
         droppedMidi > 0 ? "!  MIDI " + juce::String(droppedMidi)
                         : (midiInputCount > 0
@@ -2672,6 +2735,32 @@ void MainComponent::updateControls()
         ? "PAUSA LOOP" : "PLAY LOOP");
     loopTransportButton.setToggleState(! loopPlaying,
                                        juce::dontSendNotification);
+
+    const auto nm2HeldMask = engine.getNm2HeldMask();
+    if (nm2HeldMask != 0u)
+    {
+        juce::StringArray heldGestures;
+        for (int index = 0; index < EcosystemEngine::nm2GestureCount; ++index)
+            if ((nm2HeldMask & (1u << static_cast<unsigned int>(index))) != 0u)
+                heldGestures.add(EcosystemEngine::getNm2GestureName(
+                    static_cast<EcosystemEngine::Nm2Gesture>(index)));
+        gesturesHintLabel.setText(
+            "NM2 PREMUTO  /  " + heldGestures.joinIntoString(" + ")
+                + "  /  RILASCIA PER USCIRE",
+            juce::dontSendNotification);
+        gesturesHintLabel.setColour(juce::Label::textColourId,
+                                    juce::Colour(0xffffd08a));
+    }
+    else
+    {
+        gesturesHintLabel.setText(
+            nm2InputWasPresent
+                ? "NM2 PRONTO  /  TIENI I PAD MOMENTANEI  /  UN SOLO BERSAGLIO"
+                : "TRASFORMAZIONI E TRASPORTO  /  TIENI I PAD MOMENTANEI  /  UN SOLO BERSAGLIO",
+            juce::dontSendNotification);
+        gesturesHintLabel.setColour(juce::Label::textColourId,
+                                    juce::Colour(quietText));
+    }
 
     gestureTargetLabel.setText(
         "BERSAGLIO  /  " + memoryNames[static_cast<std::size_t>(selectedMemory)]

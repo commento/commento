@@ -41,7 +41,33 @@ public:
     {
         generic = 0,
         keyStep,
-        model12
+        model12,
+        nm2
+    };
+
+    // Physical order on the NM2: three rows of six pads. The factory mapping
+    // already sends these as notes 60..77 on MIDI channel 1.
+    enum class Nm2Gesture : int
+    {
+        codaLibera = 0,
+        gelo,
+        ombra,
+        grana,
+        pulso,
+        pausa,
+        ascolto,
+        ecoThrow,
+        radio,
+        fuzz,
+        stretto,
+        vuoto,
+        nebbia,
+        sciame,
+        lama,
+        ferro,
+        orbita,
+        abisso,
+        count
     };
 
     enum class SaxFootswitchMessageType : int
@@ -78,6 +104,10 @@ public:
     static constexpr int saxLeftBus = 3;
     static constexpr int saxRightBus = 4;
     static constexpr int logicalOutputBusCount = 5;
+    static constexpr int nm2MidiChannel = 1;
+    static constexpr int nm2BaseNote = 60;
+    static constexpr int nm2GestureCount
+        = static_cast<int>(Nm2Gesture::count);
     static constexpr double scenarioMorphSeconds = 8.0;
     static_assert(PerformanceLevels::count == memoryCount);
 
@@ -96,6 +126,10 @@ public:
     [[nodiscard]] SaxFootswitchBinding getSaxFootswitchBinding() const noexcept;
     void setSaxFootswitchBinding(SaxFootswitchBinding binding) noexcept;
     void releaseSaxFootswitch() noexcept;
+    void releaseNm2Gestures() noexcept;
+    [[nodiscard]] std::uint32_t getNm2HeldMask() const noexcept;
+    [[nodiscard]] static const char* getNm2GestureName(
+        Nm2Gesture gesture) noexcept;
 
     [[nodiscard]] bool isRecording(int memoryIndex) const;
     [[nodiscard]] bool isWaitingForFirstNote(int memoryIndex) const;
@@ -292,6 +326,7 @@ private:
     void advanceScenarioMorph(int numSamples) noexcept;
     void updatePerformanceEffectTargets() noexcept;
     void updateMomentaryGestureTargets(int numSamples) noexcept;
+    void updateNm2EffectTargets() noexcept;
     void applyLoopTransportCommands(juce::MidiBuffer& output) noexcept;
     static void addPrivateLoopPanic(juce::MidiBuffer& output,
                                     int playbackChannel, int ghostChannel,
@@ -314,6 +349,8 @@ private:
     void prepareSaxListenBlock(int numSamples) noexcept;
     void processPerformanceEffects(float* const* outputs, int outputChannels,
                                    int numSamples) noexcept;
+    void processNm2Effects(float* const* outputs, int outputChannels,
+                           int numSamples) noexcept;
     void recordIncomingMidi(int numSamples, juce::MidiBuffer& liveMidi);
     void renderMidiMemories(int numSamples, juce::MidiBuffer& output);
     void renderMidiSegment(MidiMemory& memory, int memoryIndex,
@@ -343,6 +380,13 @@ private:
     void setMidiEchoThrowEnabled(bool shouldThrow) noexcept;
     void setMidiFreeTailEnabled(bool shouldReleaseTail) noexcept;
     void clearMomentaryGestures() noexcept;
+    [[nodiscard]] bool consumeNm2Message(
+        const juce::MidiMessage& message, MidiInputRole role) noexcept;
+    void releaseNm2GesturesUnlocked() noexcept;
+    void setNm2TargetGesture(
+        std::array<std::atomic<std::uint8_t>, memoryCount>& masks,
+        std::atomic<int>& capturedTarget, std::uint8_t ownerBit,
+        bool shouldEnable) noexcept;
     [[nodiscard]] bool consumeSaxFootswitchMessage(
         const juce::MidiMessage& message, MidiInputRole role) noexcept;
 
@@ -362,7 +406,8 @@ private:
     juce::AudioBuffer<float> saxRenderBuffer;
     PerformanceLevels performanceLevels;
     std::array<std::atomic<float>, memoryCount> delayLevels;
-    // Bit 0 is owned by the touchscreen, bit 1 by a dedicated MIDI CC. This
+    // Bit 0 is owned by the touchscreen, bit 1 by a dedicated MIDI CC and bit
+    // 2 by the NM2. This
     // prevents one control source from releasing a gesture still held by the
     // other without locks or message-thread callbacks.
     std::array<std::atomic<std::uint8_t>, memoryCount> freezeGestureMasks;
@@ -372,6 +417,15 @@ private:
     std::atomic<int> midiFreezeTarget { -1 };
     std::atomic<int> midiEchoThrowTarget { -1 };
     std::atomic<int> midiFreeTailTarget { -1 };
+    std::atomic<std::uint32_t> nm2HeldMask { 0u };
+    // Only MIDI/device-management threads enter this very short critical
+    // section. The audio callback merely reads the atomics above/below.
+    juce::SpinLock nm2ControlLock;
+    std::atomic<int> nm2FreezeTarget { -1 };
+    std::atomic<int> nm2EchoThrowTarget { -1 };
+    std::atomic<int> nm2FreeTailTarget { -1 };
+    std::atomic<int> nm2PauseTarget { -1 };
+    std::atomic<int> nm2AbyssTarget { -1 };
     // Binding, learn and edge state share one lock-free word, so MIDI input and
     // UI threads cannot observe a partially published learned assignment.
     std::atomic<std::uint32_t> saxFootswitchState { 0u };
@@ -461,6 +515,38 @@ private:
         fuzzEffectMix;
     std::array<float, logicalOutputBusCount> grainHeldSamples {};
     std::array<float, logicalOutputBusCount> grainFilteredSamples {};
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear>
+        nm2GrainMix;
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear>
+        nm2FuzzMix;
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear>
+        nm2DarkMix;
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear>
+        nm2RadioMix;
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear>
+        nm2NarrowMix;
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear>
+        nm2EmptyMix;
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear>
+        nm2BladeMix;
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear>
+        nm2PulseMix;
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear>
+        nm2MetalMix;
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear>
+        nm2OrbitMix;
+    std::array<float, logicalOutputBusCount> nm2DarkLowPassState {};
+    std::array<float, logicalOutputBusCount> nm2RadioLowPassState {};
+    std::array<float, logicalOutputBusCount> nm2RadioHighPassState {};
+    std::array<float, logicalOutputBusCount> nm2BladeHighPassState {};
+    float nm2DarkPole = 0.0f;
+    float nm2RadioLowPole = 0.0f;
+    float nm2RadioHighPole = 0.0f;
+    float nm2BladePole = 0.0f;
+    double nm2PulsePhase = 0.0;
+    double nm2MetalPhase = 0.0;
+    double nm2OrbitPhase = 0.0;
+    bool nm2FiltersNeedPrime = true;
     float grainLowPassCoefficient = 1.0f;
     float activeGrainEffectTarget = -1.0f;
     float activeFuzzEffectTarget = -1.0f;

@@ -28,8 +28,9 @@ Il nome **Commento** e' provvisorio.
 - router configurabile a cinque bus logici: ambiente stereo, basso mono e sax
   stereo, con ingresso e uscite fisiche scegliibili in base all'interfaccia
   collegata;
-- rilevamento automatico simultaneo del Keystep Pro e della porta MIDI standard
-  della Model 12, senza MIDI thru esterno;
+- rilevamento automatico simultaneo del Keystep Pro, della porta MIDI standard
+  della Model 12 e di un this.is.NOISE NM2 dedicato ai 18 gesti momentanei,
+  senza MIDI thru esterno;
 - MIDI Learn persistente per associare un footswitch al comando di registrazione
   di RESPIRO, indipendentemente dalla card selezionata;
 - interfaccia touch a quattro organismi MIDI e una fascia RESPIRO, con stati
@@ -64,9 +65,11 @@ Sax -> ingressi AUDIO 7/8 -> RESPIRO + effetti -> ritorno AUDIO 7/8 Model 12
 ```
 
 All'avvio Commento legge i sistemi e i dispositivi audio disponibili, ripristina
-l'ultima configurazione riuscita e cerca sia il Keystep Pro sia la porta MIDI
-standard della Model 12. Le due sorgenti possono restare abilitate insieme; gli
-endpoint che nel nome contengono `DAW` o `CONTROL` vengono esclusi. Alla prima
+l'ultima configurazione riuscita e cerca il Keystep Pro, la porta MIDI standard
+della Model 12 e un NM2. Le tre sorgenti possono restare abilitate insieme; gli
+endpoint della Model 12 che nel nome contengono `DAW` o `CONTROL` vengono
+esclusi. Per NM2 Commento abilita un solo endpoint e preferisce quello USB a
+quello Bluetooth/BLE, se entrambi sono esposti dal sistema. Alla prima
 esecuzione prova il profilo MODEL 12; se non trova un dispositivo adatto, ripiega
 sul profilo stereo generico. Il riepilogo mostra il dispositivo realmente
 aperto, frequenza, buffer, numero di ingressi/uscite attivi e xrun.
@@ -94,7 +97,7 @@ I profili sono punti di partenza, non vincoli:
 Le frecce modificano soltanto una bozza. Il dispositivo viene riaperto e il
 routing diventa effettivo solo premendo **APPLICA AUDIO**; se l'apertura fallisce,
 Commento conserva la configurazione precedente. **RILEGGI DISPOSITIVI** aggiorna
-l'elenco e **RILEGGI MIDI** ripete la ricerca di KeyStep Pro e Model 12.
+l'elenco e **RILEGGI MIDI** ripete la ricerca di KeyStep Pro, Model 12 e NM2.
 
 Nella stessa pagina, **IMPARA PEDALE SAX** mette Commento in ascolto del prossimo
 Control Change MIDI con valore almeno 64. Fermare temporaneamente sequenze e
@@ -134,6 +137,83 @@ Per collegare il pedale sono previste due possibilita':
 Il jack `FOOTSWITCH` passivo della Model 12 comanda funzioni interne del mixer e
 non espone il pedale come messaggio MIDI a Commento: non puo' quindi essere usato
 direttamente per questo MIDI Learn.
+
+### this.is.NOISE NM2: 18 gesti sul sax
+
+Commento riconosce come NM2 dedicato un endpoint MIDI il cui nome contiene
+`NM2`, `THIS IS NOISE`, `THIS.IS.NOISE` o `THISISNOISE`. Il controller deve
+usare la mappa di fabbrica: canale MIDI 1 e note cromatiche da 60 a 77. La
+[tabella MIDI ufficiale NM2](https://thisisnoiseinc.com/en-ca/blogs/nm2-manual/midi-values)
+numera i pulsanti da sinistra a destra, prima la riga superiore, poi quella
+centrale e infine quella inferiore. In Commento la griglia e':
+
+| Riga fisica | Pad 1 | Pad 2 | Pad 3 | Pad 4 | Pad 5 | Pad 6 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Superiore, pulsanti 1-6 | `60` CODA LIBERA | `61` GELO | `62` OMBRA | `63` GRANA | `64` PULSO | `65` PAUSA |
+| Centrale, pulsanti 7-12 | `66` ASCOLTO | `67` ECO THROW | `68` RADIO | `69` FUZZ | `70` STRETTO | `71` VUOTO |
+| Inferiore, pulsanti 13-18 | `72` NEBBIA | `73` SCIAME | `74` LAMA | `75` FERRO | `76` ORBITA | `77` ABISSO |
+
+Legenda sonora, durante la pressione:
+
+| Gesto | Trasformazione |
+| --- | --- |
+| CODA LIBERA | Sfuma il diretto e lascia parlare delay/riverbero gia' presenti sulla card selezionata. |
+| GELO | Congela il ricircolo del delay gia' attivo sulla card selezionata. |
+| OMBRA | Passa-basso morbido a circa 950 Hz sul campo ambiente/sax. |
+| GRANA | Porta momentaneamente al massimo il downsample/bit-crush gia' disponibile. |
+| PULSO | Tremolo morbido a 2,3 Hz sul campo ambiente/sax. |
+| PAUSA | Ferma il loop selezionato e lo riprende dalla stessa fase al rilascio. |
+| ASCOLTO | Porta al massimo il ducking del bus ambiente guidato dal sax live. |
+| ECO THROW | Alza wet e feedback del delay della card selezionata, poi lascia rientrare la coda. |
+| RADIO | Passa-banda approssimativo 430-2800 Hz sul campo ambiente/sax. |
+| FUZZ | Porta momentaneamente al massimo la saturazione dura gia' disponibile. |
+| STRETTO | Riduce fortemente la larghezza stereo delle coppie ambiente e sax. |
+| VUOTO | Abbassa fino quasi al silenzio il campo ambiente/sax, senza mutare il basso. |
+| NEBBIA | Macro leggera OMBRA + STRETTO + ORBITA. |
+| SCIAME | Macro GRANA + PULSO + ORBITA a intensita' contenute. |
+| LAMA | Passa-alto a circa 1450 Hz sul campo ambiente/sax. |
+| FERRO | Modulazione d'ampiezza metallica a 37 Hz. |
+| ORBITA | Movimento stereo lentissimo a 0,055 Hz su ambiente e sax. |
+| ABISSO | ECO THROW sulla card catturata + OMBRA e VUOTO attenuati sul campo non-basso. |
+
+Tutti i diciotto comandi sono momentanei: `Note On` preme il gesto e `Note Off`
+(oppure `Note On` con velocity zero) lo rilascia. La pagina **GESTI** mostra il
+nome dei pad NM2 tenuti premuti. CODA LIBERA, GELO, ECO THROW, PAUSA e ABISSO
+catturano la card selezionata al momento della pressione; cambiando card durante
+la pressione, il bersaglio non cambia. PAUSA ferma soltanto quel loop e al
+rilascio lo riprende dallo stesso punto. Gli altri gesti lavorano globalmente sui
+bus ambiente/sax e non elaborano il BASSO LIVE. Se BASSO LIVE e' selezionato, i
+gesti che richiedono un loop bersaglio non lo trasformano.
+
+La mappa riusa i delay, il riverbero, GRANA e FUZZ gia' allocati; gli altri
+colori sono filtri a un polo, guadagni, matrice mid/side e tre LFO semplici. Non
+aggiunge buffer audio, linee di delay, riverberi, voci o thread nel callback.
+
+Le note 60-77 sul canale 1 vengono consumate soltanto quando arrivano
+dall'endpoint riconosciuto come NM2: non vengono registrate nei loop MIDI, non
+suonano una voce e non possono essere apprese come pedale RESPIRO. Una tastiera
+diversa sul canale 1 non attiva accidentalmente i gesti. Una nuova scansione,
+la scomparsa dell'endpoint o la chiusura dell'app rilasciano tutti i pad come
+panic, anche se si e' perso un `Note Off`.
+
+Per il live e' consigliato il collegamento USB-C, piu' semplice da verificare e
+meno esposto a una perdita di pacchetti. NM2 puo' inviare MIDI via USB e
+Bluetooth contemporaneamente, ma Commento abilita deliberatamente un solo
+endpoint NM2 e, quando riesce a distinguerli dal nome, preferisce USB: cosi' una
+pressione non arriva due volte. Per usare BLE, eseguire prima pairing e
+connessione MIDI nel sistema operativo del Raspberry Pi, verificare che
+l'endpoint compaia in `aconnect -l`, quindi premere **RILEGGI MIDI**. La
+[guida ufficiale di collegamento](https://thisisnoiseinc.com/blogs/nm2-manual/how-to-connect)
+descrive entrambe le modalita'.
+
+Montato sul sax, il sensore tilt si muove continuamente e i due knob possono
+essere urtati. Nella
+[NM2 Web App](https://thisisnoiseinc.com/blogs/nm2-manual/customize-midi)
+disabilitare tilt e knob non usati, oppure assegnarli a messaggi che Commento
+non usa; lasciare invariati canale e note dei 18 pulsanti. Questo evita traffico
+MIDI continuo e preserva margine sul Raspberry Pi 5. Le caratteristiche dei
+controlli e l'uso simultaneo USB/Bluetooth sono riepilogati anche nella
+[pagina ufficiale NM2](https://thisisnoiseinc.com/blogs/nm2-manual/general-info).
 
 `NESSUNO - CAPTURE OFF` nel campo dispositivo di ingresso apre davvero solo
 l'uscita audio: nessun flusso di cattura viene richiesto al driver. E' diverso da
@@ -453,9 +533,10 @@ aconnect -l
 
 Impostare le quattro parti del Keystep Pro, nell'ordine, sui canali MIDI
 5, 2, 3 e 4. CONNESSIONI permette di scegliere l'hardware audio e verificare la
-configurazione effettiva; il MIDI viene cercato automaticamente. Se un dispositivo
-USB viene collegato dopo Commento, usare **RILEGGI DISPOSITIVI**; se ALSA non lo
-espone ancora al processo, riavviare l'applicazione.
+configurazione effettiva; KeyStep, Model 12 e NM2 vengono cercati
+automaticamente. Se si collega a caldo un controller MIDI, usare **RILEGGI
+MIDI**; per una scheda audio usare **RILEGGI DISPOSITIVI**. Se ALSA non espone
+ancora il nuovo endpoint al processo, riavviare l'applicazione.
 
 Su Raspberry Pi OS Desktop si puo' avviare manualmente con:
 
@@ -564,9 +645,11 @@ CODA LIBERA e DIRADA lavorano sui guadagni gia' preparati, mentre ASCOLTO opera
 una volta per blocco sul bus ambient gia' sommato. Nessuno dei cinque alloca
 buffer, crea riverberi o aggiunge voci nel callback realtime.
 
-Il callback MIDI del solo Keystep scrive in una FIFO preallocata. Le memorie
-vengono modificate dal thread audio; in caso di overflow viene inviato un panic
-automatico e il contatore compare nell'indicatore MIDI.
+Il callback classifica KeyStep, porta standard Model 12 e NM2 dal nome
+dell'endpoint. Le 18 note dedicate dell'NM2 vengono consumate come gesti; gli
+eventi destinati alle voci e alle memorie passano invece in una FIFO
+preallocata. Le memorie vengono modificate dal thread audio; in caso di overflow
+viene inviato un panic automatico e il contatore compare nell'indicatore MIDI.
 
 Le specifiche USB e il routing MULTI INPUT sono descritti nel
 [manuale ufficiale Tascam Model 12](https://www.tascam.eu/en/docs/Model12_OM_EFS_RevH3.pdf);

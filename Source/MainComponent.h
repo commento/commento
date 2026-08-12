@@ -170,6 +170,9 @@ private:
     bool audioReady = false;
     juce::String keyStepInputName;
     juce::String model12MidiInputName;
+    juce::String nm2MidiInputName;
+    juce::String nm2MidiInputIdentifier;
+    bool nm2InputWasPresent = false;
     EcosystemEngine::SaxFootswitchBinding persistedSaxFootswitchBinding;
     double clearHoldStartedAt = -1.0;
     bool clearHoldTriggered = false;

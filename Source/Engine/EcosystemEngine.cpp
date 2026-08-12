@@ -13,6 +13,8 @@ namespace
 {
 constexpr std::uint8_t touchscreenGestureBit = 1u;
 constexpr std::uint8_t midiGestureBit = 2u;
+constexpr std::uint8_t nm2GestureBit = 4u;
+constexpr std::uint8_t nm2AbyssGestureBit = 8u;
 constexpr int freezeController = 80;
 constexpr int echoThrowController = 81;
 constexpr int saxListenController = 82;
@@ -250,6 +252,38 @@ void EcosystemEngine::releaseSaxFootswitch() noexcept
                                  std::memory_order_release);
 }
 
+std::uint32_t EcosystemEngine::getNm2HeldMask() const noexcept
+{
+    return nm2HeldMask.load(std::memory_order_acquire);
+}
+
+const char* EcosystemEngine::getNm2GestureName(Nm2Gesture gesture) noexcept
+{
+    switch (gesture)
+    {
+        case Nm2Gesture::codaLibera: return "CODA LIBERA";
+        case Nm2Gesture::gelo: return "GELO";
+        case Nm2Gesture::ombra: return "OMBRA";
+        case Nm2Gesture::grana: return "GRANA";
+        case Nm2Gesture::pulso: return "PULSO";
+        case Nm2Gesture::pausa: return "PAUSA";
+        case Nm2Gesture::ascolto: return "ASCOLTO";
+        case Nm2Gesture::ecoThrow: return "ECO THROW";
+        case Nm2Gesture::radio: return "RADIO";
+        case Nm2Gesture::fuzz: return "FUZZ";
+        case Nm2Gesture::stretto: return "STRETTO";
+        case Nm2Gesture::vuoto: return "VUOTO";
+        case Nm2Gesture::nebbia: return "NEBBIA";
+        case Nm2Gesture::sciame: return "SCIAME";
+        case Nm2Gesture::lama: return "LAMA";
+        case Nm2Gesture::ferro: return "FERRO";
+        case Nm2Gesture::orbita: return "ORBITA";
+        case Nm2Gesture::abisso: return "ABISSO";
+        case Nm2Gesture::count: break;
+    }
+    return "";
+}
+
 bool EcosystemEngine::consumeSaxFootswitchMessage(
     const juce::MidiMessage& message, MidiInputRole role) noexcept
 {
@@ -331,10 +365,168 @@ bool EcosystemEngine::consumeSaxFootswitchMessage(
     return false;
 }
 
+void EcosystemEngine::setNm2TargetGesture(
+    std::array<std::atomic<std::uint8_t>, memoryCount>& masks,
+    std::atomic<int>& capturedTarget, std::uint8_t ownerBit,
+    bool shouldEnable) noexcept
+{
+    if (shouldEnable)
+    {
+        const auto target = gestureTarget.load(std::memory_order_relaxed);
+        const auto usableTarget = target > bassLayerIndex
+            && juce::isPositiveAndBelow(target, memoryCount) ? target : -1;
+        const auto captured = usableTarget >= 0 ? usableTarget : -2;
+        auto expected = -1;
+        if (! capturedTarget.compare_exchange_strong(
+                expected, captured, std::memory_order_acq_rel,
+                std::memory_order_relaxed))
+            return;
+
+        if (usableTarget > bassLayerIndex)
+        {
+            masks[static_cast<std::size_t>(usableTarget)].fetch_or(
+                ownerBit, std::memory_order_relaxed);
+            if (capturedTarget.load(std::memory_order_acquire) != captured)
+                masks[static_cast<std::size_t>(usableTarget)].fetch_and(
+                    static_cast<std::uint8_t>(~ownerBit),
+                    std::memory_order_relaxed);
+        }
+        return;
+    }
+
+    capturedTarget.store(-1, std::memory_order_release);
+    for (auto& mask : masks)
+        mask.fetch_and(static_cast<std::uint8_t>(~ownerBit),
+                       std::memory_order_relaxed);
+}
+
+bool EcosystemEngine::consumeNm2Message(
+    const juce::MidiMessage& message, MidiInputRole role) noexcept
+{
+    if (role != MidiInputRole::nm2)
+        return false;
+
+    const juce::SpinLock::ScopedLockType controlLock(nm2ControlLock);
+
+    // The NM2 is a dedicated control surface in Commento. Consume all of its
+    // traffic so knobs/tilt or a custom preset cannot accidentally enter a
+    // MIDI loop or address one of the synth layers. Only the factory note grid
+    // on channel 1 is interpreted below.
+    if (message.isController()
+        && (message.getControllerNumber() == 120
+            || message.getControllerNumber() == 123))
+    {
+        releaseNm2GesturesUnlocked();
+        return true;
+    }
+
+    if ((! message.isNoteOn() && ! message.isNoteOff())
+        || message.getChannel() != nm2MidiChannel)
+        return true;
+
+    const auto gestureIndex = message.getNoteNumber() - nm2BaseNote;
+    if (! juce::isPositiveAndBelow(gestureIndex, nm2GestureCount))
+        return true;
+
+    const auto gesture = static_cast<Nm2Gesture>(gestureIndex);
+    const auto gestureMask = std::uint32_t { 1u }
+        << static_cast<unsigned int>(gestureIndex);
+    const auto pressed = message.isNoteOn();
+    const auto previous = pressed
+        ? nm2HeldMask.fetch_or(gestureMask, std::memory_order_acq_rel)
+        : nm2HeldMask.fetch_and(~gestureMask, std::memory_order_acq_rel);
+    const auto stateChanged = pressed
+        ? (previous & gestureMask) == 0u
+        : (previous & gestureMask) != 0u;
+    if (pressed && ! stateChanged)
+        return true;
+
+    const auto applyGesture = [this, gesture](bool shouldEnable) noexcept
+    {
+      switch (gesture)
+      {
+        case Nm2Gesture::codaLibera:
+            setNm2TargetGesture(freeTailGestureMasks, nm2FreeTailTarget,
+                                nm2GestureBit, shouldEnable);
+            break;
+        case Nm2Gesture::gelo:
+            setNm2TargetGesture(freezeGestureMasks, nm2FreezeTarget,
+                                nm2GestureBit, shouldEnable);
+            break;
+        case Nm2Gesture::ecoThrow:
+            setNm2TargetGesture(echoThrowGestureMasks, nm2EchoThrowTarget,
+                                nm2GestureBit, shouldEnable);
+            break;
+        case Nm2Gesture::pausa:
+            if (shouldEnable)
+            {
+                const auto target = gestureTarget.load(
+                    std::memory_order_relaxed);
+                const auto usable = target > bassLayerIndex
+                    && juce::isPositiveAndBelow(target, memoryCount)
+                    && hasMaterial(target) && ! isRecording(target)
+                    && isLoopPlaying(target) ? target : -2;
+                auto expected = -1;
+                nm2PauseTarget.compare_exchange_strong(
+                    expected, usable, std::memory_order_acq_rel,
+                    std::memory_order_relaxed);
+            }
+            else
+                nm2PauseTarget.store(-1, std::memory_order_release);
+            break;
+        case Nm2Gesture::abisso:
+            setNm2TargetGesture(echoThrowGestureMasks, nm2AbyssTarget,
+                                nm2AbyssGestureBit, shouldEnable);
+            break;
+        case Nm2Gesture::ombra:
+        case Nm2Gesture::grana:
+        case Nm2Gesture::pulso:
+        case Nm2Gesture::ascolto:
+        case Nm2Gesture::radio:
+        case Nm2Gesture::fuzz:
+        case Nm2Gesture::stretto:
+        case Nm2Gesture::vuoto:
+        case Nm2Gesture::nebbia:
+        case Nm2Gesture::sciame:
+        case Nm2Gesture::lama:
+        case Nm2Gesture::ferro:
+        case Nm2Gesture::orbita:
+        case Nm2Gesture::count:
+            break;
+      }
+    };
+    applyGesture(pressed);
+
+    return true;
+}
+
+void EcosystemEngine::releaseNm2Gestures() noexcept
+{
+    const juce::SpinLock::ScopedLockType controlLock(nm2ControlLock);
+    releaseNm2GesturesUnlocked();
+}
+
+void EcosystemEngine::releaseNm2GesturesUnlocked() noexcept
+{
+    nm2HeldMask.store(0u, std::memory_order_release);
+    setNm2TargetGesture(freezeGestureMasks, nm2FreezeTarget,
+                        nm2GestureBit, false);
+    setNm2TargetGesture(echoThrowGestureMasks, nm2EchoThrowTarget,
+                        nm2GestureBit, false);
+    setNm2TargetGesture(freeTailGestureMasks, nm2FreeTailTarget,
+                        nm2GestureBit, false);
+    setNm2TargetGesture(echoThrowGestureMasks, nm2AbyssTarget,
+                        nm2AbyssGestureBit, false);
+    nm2PauseTarget.store(-1, std::memory_order_release);
+}
+
 void EcosystemEngine::enqueueMidiMessage(const juce::MidiMessage& message,
                                          MidiInputRole role)
 {
     if (message.isActiveSense() || message.isMidiClock())
+        return;
+
+    if (consumeNm2Message(message, role))
         return;
 
     if (consumeSaxFootswitchMessage(message, role))
@@ -809,7 +1001,8 @@ bool EcosystemEngine::isLoopPlaying(int memoryIndex) const noexcept
         return true;
 
     return loopPlayingRequested[static_cast<std::size_t>(memoryIndex)].load(
-        std::memory_order_acquire);
+               std::memory_order_acquire)
+        && nm2PauseTarget.load(std::memory_order_acquire) != memoryIndex;
 }
 
 void EcosystemEngine::setSaxListenAmount(float amount) noexcept
@@ -929,6 +1122,7 @@ void EcosystemEngine::clearMomentaryGestures() noexcept
     midiFreezeTarget.store(-1, std::memory_order_relaxed);
     midiEchoThrowTarget.store(-1, std::memory_order_relaxed);
     midiFreeTailTarget.store(-1, std::memory_order_relaxed);
+    releaseNm2Gestures();
 }
 
 int EcosystemEngine::memoryIndexForMidiChannel(int midiChannel)
@@ -1093,6 +1287,32 @@ void EcosystemEngine::prepare(double newSampleRate, int maximumBlockSize)
     fuzzEffectMix.reset(sampleRate, 0.001);
     fuzzEffectMix.setCurrentAndTargetValue(
         fuzzEnabled.load(std::memory_order_relaxed) ? 1.0f : 0.0f);
+    for (auto* mix : { &nm2GrainMix, &nm2FuzzMix, &nm2DarkMix,
+                      &nm2RadioMix, &nm2NarrowMix, &nm2EmptyMix,
+                      &nm2BladeMix, &nm2PulseMix, &nm2MetalMix,
+                      &nm2OrbitMix })
+    {
+        mix->reset(sampleRate, 0.001);
+        mix->setCurrentAndTargetValue(0.0f);
+    }
+    nm2DarkLowPassState.fill(0.0f);
+    nm2RadioLowPassState.fill(0.0f);
+    nm2RadioHighPassState.fill(0.0f);
+    nm2BladeHighPassState.fill(0.0f);
+    const auto onePoleAmount = [this](float cutoff) noexcept
+    {
+        return static_cast<float>(1.0 - std::exp(
+            -juce::MathConstants<double>::twoPi
+            * static_cast<double>(cutoff) / sampleRate));
+    };
+    nm2DarkPole = onePoleAmount(950.0f);
+    nm2RadioLowPole = onePoleAmount(2800.0f);
+    nm2RadioHighPole = onePoleAmount(430.0f);
+    nm2BladePole = onePoleAmount(1450.0f);
+    nm2PulsePhase = 0.0;
+    nm2MetalPhase = 0.0;
+    nm2OrbitPhase = 0.0;
+    nm2FiltersNeedPrime = true;
     activeGrainEffectTarget = grainEffectMix.getCurrentValue();
     activeFuzzEffectTarget = fuzzEffectMix.getCurrentValue();
     evolutionSampleClock = 0;
@@ -1329,6 +1549,7 @@ void EcosystemEngine::audioDeviceIOCallbackWithContext(
     advanceScenarioMorph(numSamples);
     updatePerformanceEffectTargets();
     updateMomentaryGestureTargets(numSamples);
+    updateNm2EffectTargets();
     prepareSaxListenBlock(numSamples);
     for (int index = 1; index < midiMemoryCount; ++index)
         applyMidiCommands(midiMemories[static_cast<size_t>(index)],
@@ -1342,6 +1563,7 @@ void EcosystemEngine::audioDeviceIOCallbackWithContext(
     renderAudioMemory(inputChannelData, numInputChannels,
                       outputChannelData, numOutputChannels, numSamples);
     processPerformanceEffects(outputChannelData, numOutputChannels, numSamples);
+    processNm2Effects(outputChannelData, numOutputChannels, numSamples);
     renderDiagnosticTone(outputChannelData, numOutputChannels, numSamples);
 
     float inputPeak = 0.0f;
@@ -1631,6 +1853,63 @@ void EcosystemEngine::updateMomentaryGestureTargets(int numSamples) noexcept
     echoThrowBlockAmounts[static_cast<std::size_t>(bassLayerIndex)] = 0.0f;
 }
 
+void EcosystemEngine::updateNm2EffectTargets() noexcept
+{
+    const auto held = nm2HeldMask.load(std::memory_order_acquire);
+    const auto active = [held](Nm2Gesture gesture) noexcept
+    {
+        const auto bit = std::uint32_t { 1u }
+            << static_cast<unsigned int>(gesture);
+        return (held & bit) != 0u;
+    };
+    const auto setTarget = [this](auto& mix, float target,
+                                  double attack, double release) noexcept
+    {
+        target = juce::jlimit(0.0f, 1.0f, target);
+        if (std::abs(target - mix.getTargetValue()) <= 0.0001f)
+            return;
+        const auto current = mix.getCurrentValue();
+        mix.reset(sampleRate, target > current ? attack : release);
+        mix.setCurrentAndTargetValue(current);
+        mix.setTargetValue(target);
+    };
+
+    const auto sciame = active(Nm2Gesture::sciame);
+    const auto nebbia = active(Nm2Gesture::nebbia);
+    const auto abisso = active(Nm2Gesture::abisso);
+    setTarget(nm2GrainMix,
+              active(Nm2Gesture::grana) ? 1.0f : (sciame ? 0.62f : 0.0f),
+              0.025, 0.35);
+    setTarget(nm2FuzzMix, active(Nm2Gesture::fuzz) ? 1.0f : 0.0f,
+              0.035, 0.35);
+    setTarget(nm2DarkMix,
+              active(Nm2Gesture::ombra) ? 1.0f
+                  : (abisso ? 0.78f : (nebbia ? 0.60f : 0.0f)),
+              0.080, 0.48);
+    setTarget(nm2RadioMix, active(Nm2Gesture::radio) ? 1.0f : 0.0f,
+              0.055, 0.40);
+    setTarget(nm2NarrowMix,
+              active(Nm2Gesture::stretto) ? 1.0f
+                  : (nebbia ? 0.35f : 0.0f),
+              0.070, 0.60);
+    setTarget(nm2EmptyMix,
+              active(Nm2Gesture::vuoto) ? 1.0f
+                  : (abisso ? 0.42f : 0.0f),
+              0.100, 0.70);
+    setTarget(nm2BladeMix, active(Nm2Gesture::lama) ? 1.0f : 0.0f,
+              0.055, 0.42);
+    setTarget(nm2PulseMix,
+              active(Nm2Gesture::pulso) ? 0.78f
+                  : (sciame ? 0.48f : 0.0f),
+              0.040, 0.32);
+    setTarget(nm2MetalMix, active(Nm2Gesture::ferro) ? 0.68f : 0.0f,
+              0.030, 0.36);
+    setTarget(nm2OrbitMix,
+              active(Nm2Gesture::orbita) ? 0.82f
+                  : (sciame ? 0.55f : (nebbia ? 0.22f : 0.0f)),
+              0.100, 0.80);
+}
+
 void EcosystemEngine::resetLoopTransportState(bool resetRequests) noexcept
 {
     for (int index = 0; index < memoryCount; ++index)
@@ -1733,6 +2012,8 @@ void EcosystemEngine::applyLoopTransportCommands(
     {
         auto desired = loopPlayingRequested[static_cast<std::size_t>(index)]
             .load(std::memory_order_acquire);
+        if (nm2PauseTarget.load(std::memory_order_acquire) == index)
+            desired = false;
         const auto recording = index < midiMemoryCount
             ? midiMemories[static_cast<std::size_t>(index)].recordingActive
             : audioMemory.recordingActive;
@@ -1978,8 +2259,14 @@ void EcosystemEngine::prepareSaxListenBlock(int numSamples) noexcept
     if (numSamples <= 0 || sampleRate <= 0.0)
         return;
 
+    const auto nm2ListenBit = std::uint32_t { 1u }
+        << static_cast<unsigned int>(Nm2Gesture::ascolto);
+    const auto nm2Listen = (nm2HeldMask.load(std::memory_order_acquire)
+                            & nm2ListenBit) != 0u;
     const auto targetMix = juce::jlimit(
-        0.0f, 1.0f, saxListenAmount.load(std::memory_order_relaxed));
+        0.0f, 1.0f, juce::jmax(
+            saxListenAmount.load(std::memory_order_relaxed),
+            nm2Listen ? 1.0f : 0.0f));
     if (std::abs(targetMix - saxListenMix.getTargetValue()) > 0.0001f)
         saxListenMix.setTargetValue(targetMix);
 
@@ -2026,9 +2313,13 @@ void EcosystemEngine::processPerformanceEffects(
         return;
 
     const auto grainSilent = ! grainEffectMix.isSmoothing()
-        && grainEffectMix.getCurrentValue() <= 0.0001f;
+        && grainEffectMix.getCurrentValue() <= 0.0001f
+        && ! nm2GrainMix.isSmoothing()
+        && nm2GrainMix.getCurrentValue() <= 0.0001f;
     const auto fuzzSilent = ! fuzzEffectMix.isSmoothing()
-        && fuzzEffectMix.getCurrentValue() <= 0.0001f;
+        && fuzzEffectMix.getCurrentValue() <= 0.0001f
+        && ! nm2FuzzMix.isSmoothing()
+        && nm2FuzzMix.getCurrentValue() <= 0.0001f;
     if (grainSilent && fuzzSilent)
         return;
 
@@ -2046,6 +2337,10 @@ void EcosystemEngine::processPerformanceEffects(
                                         grainEffectMix.getNextValue());
         const auto fuzz = juce::jlimit(0.0f, 1.0f,
                                        fuzzEffectMix.getNextValue());
+        const auto nm2Grain = juce::jlimit(0.0f, 1.0f,
+                                           nm2GrainMix.getNextValue());
+        const auto nm2Fuzz = juce::jlimit(0.0f, 1.0f,
+                                          nm2FuzzMix.getNextValue());
 
         if (grainHoldCounter <= 0)
         {
@@ -2081,12 +2376,159 @@ void EcosystemEngine::processPerformanceEffects(
                 * (grainHeldSamples[static_cast<std::size_t>(channel)]
                    - filtered);
             const auto dry = std::isfinite(data[sample]) ? data[sample] : 0.0f;
+            // The physical NM2 sits on the sax and colours the ambient/sax
+            // field. BASSO keeps its one-voice dry fast path; the persistent
+            // touchscreen GRANA/FUZZ controls retain their old global scope.
+            const auto effectiveGrain = channel == bassBus
+                ? grain : juce::jmax(grain, nm2Grain);
+            const auto effectiveFuzz = channel == bassBus
+                ? fuzz : juce::jmax(fuzz, nm2Fuzz);
             const auto crushed = dry
-                + (filtered - dry) * grain;
+                + (filtered - dry) * effectiveGrain;
             const auto hardFuzz = juce::jlimit(-1.0f, 1.0f,
                                                crushed * 4.0f) * 0.45f;
-            data[sample] = crushed + (hardFuzz - crushed) * fuzz;
+            data[sample] = crushed
+                + (hardFuzz - crushed) * effectiveFuzz;
         }
+    }
+}
+
+void EcosystemEngine::processNm2Effects(
+    float* const* outputs, int outputChannels, int numSamples) noexcept
+{
+    const auto channels = juce::jmin(outputChannels, logicalOutputBusCount);
+    if (outputs == nullptr || channels <= 0 || numSamples <= 0)
+        return;
+
+    const auto silent = [](const auto& mix) noexcept
+    {
+        return ! mix.isSmoothing() && mix.getCurrentValue() <= 0.0001f;
+    };
+    if (silent(nm2DarkMix) && silent(nm2RadioMix)
+        && silent(nm2NarrowMix) && silent(nm2EmptyMix)
+        && silent(nm2BladeMix) && silent(nm2PulseMix)
+        && silent(nm2MetalMix) && silent(nm2OrbitMix))
+    {
+        nm2FiltersNeedPrime = true;
+        return;
+    }
+
+    constexpr auto pulseRateHz = 2.3;
+    constexpr auto metalRateHz = 37.0;
+    constexpr auto orbitRateHz = 0.055;
+    const auto pulsePhaseStep = juce::MathConstants<double>::twoPi
+        * pulseRateHz / sampleRate;
+    const auto metalPhaseStep = juce::MathConstants<double>::twoPi
+        * metalRateHz / sampleRate;
+    const auto orbitPhaseStep = juce::MathConstants<double>::twoPi
+        * orbitRateHz / sampleRate;
+
+    for (int sample = 0; sample < numSamples; ++sample)
+    {
+        const auto dark = juce::jlimit(0.0f, 1.0f,
+                                       nm2DarkMix.getNextValue());
+        const auto radio = juce::jlimit(0.0f, 1.0f,
+                                        nm2RadioMix.getNextValue());
+        const auto narrow = juce::jlimit(0.0f, 1.0f,
+                                         nm2NarrowMix.getNextValue());
+        const auto empty = juce::jlimit(0.0f, 1.0f,
+                                        nm2EmptyMix.getNextValue());
+        const auto blade = juce::jlimit(0.0f, 1.0f,
+                                        nm2BladeMix.getNextValue());
+        const auto pulse = juce::jlimit(0.0f, 1.0f,
+                                        nm2PulseMix.getNextValue());
+        const auto metal = juce::jlimit(0.0f, 1.0f,
+                                        nm2MetalMix.getNextValue());
+        const auto orbit = juce::jlimit(0.0f, 1.0f,
+                                        nm2OrbitMix.getNextValue());
+        const auto pulseWave = CommentoDsp::fastSine(nm2PulsePhase);
+        const auto metalWave = CommentoDsp::fastSine(nm2MetalPhase);
+        const auto orbitWave = CommentoDsp::fastSine(nm2OrbitPhase);
+        std::array<float, logicalOutputBusCount> frame {};
+
+        for (int channel = 0; channel < channels; ++channel)
+        {
+            const auto* data = outputs[channel];
+            const auto input = data != nullptr && std::isfinite(data[sample])
+                ? data[sample] : 0.0f;
+            if (channel == bassBus)
+            {
+                frame[static_cast<std::size_t>(channel)] = input;
+                continue;
+            }
+
+            auto& darkState = nm2DarkLowPassState[
+                static_cast<std::size_t>(channel)];
+            auto& radioHighState = nm2RadioLowPassState[
+                static_cast<std::size_t>(channel)];
+            auto& radioLowState = nm2RadioHighPassState[
+                static_cast<std::size_t>(channel)];
+            auto& bladeLowState = nm2BladeHighPassState[
+                static_cast<std::size_t>(channel)];
+            if (nm2FiltersNeedPrime)
+            {
+                darkState = input;
+                radioHighState = input;
+                radioLowState = input;
+                bladeLowState = input;
+            }
+            darkState += nm2DarkPole * (input - darkState);
+            radioHighState += nm2RadioLowPole
+                * (input - radioHighState);
+            radioLowState += nm2RadioHighPole
+                * (input - radioLowState);
+            bladeLowState += nm2BladePole * (input - bladeLowState);
+
+            auto coloured = input + (darkState - input) * dark;
+            const auto radioSignal = (radioHighState - radioLowState) * 0.92f;
+            coloured += (radioSignal - coloured) * radio;
+            const auto bladeSignal = (input - bladeLowState) * 0.82f;
+            coloured += (bladeSignal - coloured) * blade;
+            const auto emptyGain = 1.0f - empty * 0.94f;
+            const auto pulseGain = 1.0f
+                - pulse * 0.55f * (0.5f + 0.5f * pulseWave);
+            const auto metalGain = 1.0f - metal * 0.45f
+                + metal * 0.45f * metalWave;
+            frame[static_cast<std::size_t>(channel)]
+                = coloured * emptyGain * pulseGain * metalGain;
+        }
+        nm2FiltersNeedPrime = false;
+
+        const auto processPair = [&](int leftChannel, int rightChannel) noexcept
+        {
+            if (! juce::isPositiveAndBelow(leftChannel, channels)
+                || ! juce::isPositiveAndBelow(rightChannel, channels))
+                return;
+            auto& left = frame[static_cast<std::size_t>(leftChannel)];
+            auto& right = frame[static_cast<std::size_t>(rightChannel)];
+            const auto mid = 0.5f * (left + right);
+            const auto side = 0.5f * (left - right)
+                * (1.0f - narrow * 0.92f);
+            left = mid + side;
+            right = mid - side;
+            left *= 1.0f - orbit * 0.32f
+                * (0.5f + 0.5f * orbitWave);
+            right *= 1.0f - orbit * 0.32f
+                * (0.5f - 0.5f * orbitWave);
+        };
+        processPair(ambientLeftBus, ambientRightBus);
+        processPair(saxLeftBus, saxRightBus);
+
+        for (int channel = 0; channel < channels; ++channel)
+            if (outputs[channel] != nullptr)
+                outputs[channel][sample] = channel == bassBus
+                    ? frame[static_cast<std::size_t>(channel)]
+                    : protectPeak(frame[static_cast<std::size_t>(channel)]);
+
+        nm2PulsePhase += pulsePhaseStep;
+        nm2MetalPhase += metalPhaseStep;
+        nm2OrbitPhase += orbitPhaseStep;
+        if (nm2PulsePhase >= juce::MathConstants<double>::twoPi)
+            nm2PulsePhase -= juce::MathConstants<double>::twoPi;
+        if (nm2MetalPhase >= juce::MathConstants<double>::twoPi)
+            nm2MetalPhase -= juce::MathConstants<double>::twoPi;
+        if (nm2OrbitPhase >= juce::MathConstants<double>::twoPi)
+            nm2OrbitPhase -= juce::MathConstants<double>::twoPi;
     }
 }
 
