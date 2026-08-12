@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <cmath>
 #include <iostream>
+#include <iterator>
 #include <memory>
 #include <set>
 #include <string>
@@ -5086,8 +5087,9 @@ int main()
         nm2Engine.toggleRecording(1);
         renderNm2();
 
-        // NM2 knobs and tilt are deliberately ignored. They cannot drive the
-        // global CC80..84 gestures or win sax-foot-switch Learn.
+        // The knobs stay ignored and the tilt now only feeds gesture depth.
+        // Neither may reach the global CC80..84 gestures, win sax-foot-switch
+        // Learn, or enter a recorder.
         nm2Engine.releaseMomentaryGestures();
         nm2Engine.setGestureTarget(2);
         nm2Engine.setSaxListenAmount(0.0f);
@@ -5165,6 +5167,98 @@ int main()
                              && nm2Names.size()
                                     == static_cast<std::size_t>(nm2Count),
                          "i 18 gesti NM2 devono avere nomi UI non vuoti e distinti");
+
+        // The player memorises where a gesture lives, not what it is called,
+        // so the three rows are part of the instrument and an accidental
+        // reorder of the enum has to fail here rather than on stage.
+        static constexpr const char* expectedGrid[] {
+            "CODA LIBERA", "ECO THROW", "GELO", "CADUTA", "SCATTO", "ABISSO",
+            "OMBRA", "RADIO", "LAMA", "GRANA", "FUZZ", "FERRO",
+            "PULSO", "ORBITA", "STRETTO", "VUOTO", "ASCOLTO", "PAUSA" };
+        static_assert(
+            static_cast<int>(std::size(expectedGrid))
+                == EcosystemEngine::nm2GestureCount,
+            "la griglia attesa deve coprire i 18 pad");
+        auto gridMatchesRows = true;
+        for (int index = 0; index < nm2Count; ++index)
+            gridMatchesRows &= std::string(
+                EcosystemEngine::getNm2GestureName(
+                    static_cast<Nm2Gesture>(index)))
+                == std::string(expectedGrid[index]);
+        passed &= expect(gridMatchesRows,
+                         "le note 60-77 devono seguire le righe tempo/timbro/movimento");
+
+        // Until the motion sensor is switched on nothing may change: a
+        // controller with tilt disabled has to behave exactly as it did
+        // before the sensor was supported at all. This needs an engine that
+        // has never seen a tilt CC, so it cannot share the one above.
+        const auto ombraNote
+            = nm2BaseNote + static_cast<int>(Nm2Gesture::ombra);
+        auto silentSensorStorage = std::make_unique<EcosystemEngine>();
+        auto& silentSensorEngine = *silentSensorStorage;
+        silentSensorEngine.prepare(nm2SampleRate, nm2BlockSize);
+        OutputBlock<EcosystemEngine::logicalOutputBusCount> silentSensorOutput(
+            nm2BlockSize);
+        silentSensorEngine.enqueueMidiMessage(
+            juce::MidiMessage::noteOn(nm2Channel, ombraNote, 1.0f),
+            MidiRole::nm2);
+        for (int block = 0; block < 20; ++block)
+        {
+            silentSensorOutput.clear();
+            process(silentSensorEngine, nullptr, 0,
+                    silentSensorOutput.pointers.data(),
+                    EcosystemEngine::logicalOutputBusCount, nm2BlockSize);
+        }
+        const auto depthIsFullWithoutSensor
+            = ! silentSensorEngine.hasNm2TiltSensor()
+            && std::abs(silentSensorEngine.getNm2TiltDepth() - 1.0f) < 0.001f;
+
+        // With the sensor alive the depth is measured from the pose held when
+        // the phrase started, so a pad pressed without moving the instrument
+        // sits at the base depth and travels up from there.
+        const auto sendTilt = [&](int value)
+        {
+            nm2Engine.enqueueMidiMessage(
+                juce::MidiMessage::controllerEvent(
+                    3, EcosystemEngine::nm2TiltXController, value),
+                MidiRole::nm2);
+        };
+        sendTilt(64);
+        renderNm2();
+        nm2Engine.enqueueMidiMessage(
+            juce::MidiMessage::noteOn(nm2Channel, ombraNote, 1.0f),
+            MidiRole::nm2);
+        for (int block = 0; block < 20; ++block)
+            renderNm2();
+        const auto restingDepth = nm2Engine.getNm2TiltDepth();
+        sendTilt(110);
+        for (int block = 0; block < 20; ++block)
+            renderNm2();
+        const auto movedDepth = nm2Engine.getNm2TiltDepth();
+        nm2Engine.enqueueMidiMessage(
+            juce::MidiMessage::noteOff(nm2Channel, ombraNote), MidiRole::nm2);
+        renderNm2();
+        passed &= expect(depthIsFullWithoutSensor
+                             && nm2Engine.hasNm2TiltSensor()
+                             && restingDepth < 0.99f
+                             && movedDepth > restingDepth + 0.05f
+                             && movedDepth <= 1.0f,
+                         "il tilt deve partire dalla posa della pressione e approfondire il gesto");
+
+        // A reference pose captured for one phrase must not leak into the
+        // next: after the pads are released a new press starts from wherever
+        // the instrument is now, which is what makes drift irrelevant.
+        nm2Engine.enqueueMidiMessage(
+            juce::MidiMessage::noteOn(nm2Channel, ombraNote, 1.0f),
+            MidiRole::nm2);
+        for (int block = 0; block < 20; ++block)
+            renderNm2();
+        const auto secondPhraseDepth = nm2Engine.getNm2TiltDepth();
+        nm2Engine.enqueueMidiMessage(
+            juce::MidiMessage::noteOff(nm2Channel, ombraNote), MidiRole::nm2);
+        renderNm2();
+        passed &= expect(std::abs(secondPhraseDepth - restingDepth) < 0.02f,
+                         "una nuova frase deve ricatturare la posa di riferimento");
     }
 
     // Lightweight audio smoke probe: every gesture is exercised over live
@@ -5222,6 +5316,30 @@ int main()
         auto bassStayedBitIdentical = true;
         auto ombraKeptAmbientBitIdentical = false;
         auto ombraChangedSax = false;
+        const auto saxDifferenceFromReference = [&]()
+        {
+            auto difference = 0.0f;
+            for (const auto channel : { EcosystemEngine::saxLeftBus,
+                                        EcosystemEngine::saxRightBus })
+            {
+                const auto index = static_cast<std::size_t>(channel);
+                for (int sample = 0; sample < probeBlockSize; ++sample)
+                    difference += std::abs(
+                        activeOutput.storage[index][
+                            static_cast<std::size_t>(sample)]
+                        - referenceOutput.storage[index][
+                            static_cast<std::size_t>(sample)]);
+            }
+            return difference;
+        };
+
+        // With no colour held the resonant section must be exactly bypassed.
+        // A filter that leaks at rest would colour every phrase the player
+        // never asked to colour.
+        renderPair();
+        const auto colourFilterIsTransparentAtRest
+            = saxDifferenceFromReference() <= 0.0f;
+
         const auto inspectPair = [&]()
         {
             nm2AudioFinite &= activeOutput.finite(probeBlockSize)
@@ -5285,6 +5403,107 @@ int main()
                          "i gesti NM2 devono lasciare BASSO bit-identico al riferimento");
         passed &= expect(ombraKeptAmbientBitIdentical && ombraChangedSax,
                          "i colori NM2 devono elaborare SAX/RESPIRO senza tingere i loop ambiente");
+        passed &= expect(colourFilterIsTransparentAtRest,
+                         "senza colori premuti il filtro risonante deve essere trasparente");
+    }
+
+    // CADUTA and SCATTO live entirely inside the sax delay, which only runs
+    // under the scenario effects path, so they need their own probe: under
+    // CLEAN LOOPER the processor is bypassed and neither could speak.
+    {
+        using MidiRole = EcosystemEngine::MidiInputRole;
+        constexpr auto tailSampleRate = 8000.0;
+        constexpr auto tailBlockSize = 128;
+        auto activeStorage = std::make_unique<EcosystemEngine>();
+        auto referenceStorage = std::make_unique<EcosystemEngine>();
+        auto& active = *activeStorage;
+        auto& reference = *referenceStorage;
+        active.setSaxPathMode(EcosystemEngine::SaxPathMode::sceneEffects);
+        reference.setSaxPathMode(EcosystemEngine::SaxPathMode::sceneEffects);
+        active.prepare(tailSampleRate, tailBlockSize);
+        reference.prepare(tailSampleRate, tailBlockSize);
+        OutputBlock<EcosystemEngine::logicalOutputBusCount> activeOutput(
+            tailBlockSize);
+        OutputBlock<EcosystemEngine::logicalOutputBusCount> referenceOutput(
+            tailBlockSize);
+        std::vector<float> saxInput(static_cast<std::size_t>(tailBlockSize));
+        for (int sample = 0; sample < tailBlockSize; ++sample)
+            saxInput[static_cast<std::size_t>(sample)]
+                = 0.18f * static_cast<float>(std::sin(
+                    juce::MathConstants<double>::twoPi * 197.0
+                    * static_cast<double>(sample) / tailSampleRate));
+        const float* saxInputPointer = saxInput.data();
+        const auto renderTailPair = [&]()
+        {
+            activeOutput.clear();
+            referenceOutput.clear();
+            process(active, &saxInputPointer, 1, activeOutput.pointers.data(),
+                    EcosystemEngine::logicalOutputBusCount, tailBlockSize);
+            process(reference, &saxInputPointer, 1,
+                    referenceOutput.pointers.data(),
+                    EcosystemEngine::logicalOutputBusCount, tailBlockSize);
+        };
+        const auto tailDifference = [&]()
+        {
+            auto difference = 0.0f;
+            for (const auto channel : { EcosystemEngine::saxLeftBus,
+                                        EcosystemEngine::saxRightBus })
+            {
+                const auto index = static_cast<std::size_t>(channel);
+                for (int sample = 0; sample < tailBlockSize; ++sample)
+                    difference += std::abs(
+                        activeOutput.storage[index][
+                            static_cast<std::size_t>(sample)]
+                        - referenceOutput.storage[index][
+                            static_cast<std::size_t>(sample)]);
+            }
+            return difference;
+        };
+
+        auto tailAudioFinite = true;
+        auto tailAudioPeak = 0.0f;
+        const auto probeTailGesture = [&](EcosystemEngine::Nm2Gesture gesture)
+        {
+            const auto note = EcosystemEngine::nm2BaseNote
+                + static_cast<int>(gesture);
+            // Fill the delay first: a gesture that only reshapes the tail has
+            // nothing to reshape on a line that is still empty.
+            for (int block = 0; block < 40; ++block)
+                renderTailPair();
+            active.enqueueMidiMessage(
+                juce::MidiMessage::noteOn(
+                    EcosystemEngine::nm2MidiChannel, note, 1.0f),
+                MidiRole::nm2);
+            auto difference = 0.0f;
+            for (int block = 0; block < 24; ++block)
+            {
+                renderTailPair();
+                difference += tailDifference();
+                tailAudioFinite &= activeOutput.finite(tailBlockSize);
+                for (int channel = 0;
+                     channel < EcosystemEngine::logicalOutputBusCount;
+                     ++channel)
+                    tailAudioPeak = std::max(
+                        tailAudioPeak,
+                        activeOutput.peak(static_cast<std::size_t>(channel),
+                                          tailBlockSize));
+            }
+            active.enqueueMidiMessage(
+                juce::MidiMessage::noteOff(
+                    EcosystemEngine::nm2MidiChannel, note),
+                MidiRole::nm2);
+            for (int block = 0; block < 40; ++block)
+                renderTailPair();
+            return difference > 0.0001f;
+        };
+        const auto cadutaChangedSax = probeTailGesture(
+            EcosystemEngine::Nm2Gesture::caduta);
+        const auto scattoChangedSax = probeTailGesture(
+            EcosystemEngine::Nm2Gesture::scatto);
+        passed &= expect(cadutaChangedSax && scattoChangedSax,
+                         "CADUTA e SCATTO devono trasformare il bus sax");
+        passed &= expect(tailAudioFinite && tailAudioPeak < 0.99f,
+                         "CADUTA e SCATTO devono restare finiti e sotto il fondo scala");
     }
 
     EcosystemEngine scenarioEngine;

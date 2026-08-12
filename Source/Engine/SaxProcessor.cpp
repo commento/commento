@@ -9,6 +9,21 @@ namespace
 constexpr double freezeAttackSeconds = 0.080;
 constexpr double freezeReleaseSeconds = 0.350;
 
+// CADUTA. Reading a tap that grows by this fraction of a sample per sample
+// transposes the tail by 1 - rate, so 0.33 is a fall of roughly seven
+// semitones regardless of the scenario's own delay time. Coming back is
+// slower than going down: the release still bends upwards, but by a musical
+// third rather than by the same seven semitones.
+constexpr double diveFallSeconds = 0.90;
+constexpr double diveReturnSeconds = 1.60;
+constexpr float diveFallRate = 0.33f;
+
+// SCATTO. Short enough to read as a stutter rather than as a delay, long
+// enough to hold a recognisable fragment of a phrase.
+constexpr float stutterMilliseconds = 125.0f;
+constexpr double stutterAttackSeconds = 0.012;
+constexpr double stutterReleaseSeconds = 0.090;
+
 // Exactly transparent below the knee.  The rational curve has unit slope at
 // the knee and approaches the ceiling asymptotically, so it only intervenes
 // when a feedback or reverb peak is genuinely close to full scale.
@@ -57,6 +72,10 @@ void SaxProcessor::prepare(double newSampleRate, int maximumBlockSize)
     freezeMix.setCurrentAndTargetValue(requestedFreeze ? 1.0f : 0.0f);
     excitationGain.reset(sampleRate, 0.001);
     excitationGain.setCurrentAndTargetValue(requestedFreeTail ? 0.0f : 1.0f);
+    diveSamples.reset(sampleRate, diveFallSeconds);
+    diveSamples.setCurrentAndTargetValue(0.0f);
+    stutterMix.reset(sampleRate, stutterAttackSeconds);
+    stutterMix.setCurrentAndTargetValue(requestedStutter ? 1.0f : 0.0f);
     reverb.setSampleRate(sampleRate);
     prepared = true;
     resetTails();
@@ -139,6 +158,38 @@ void SaxProcessor::setFreeTailEnabled(bool shouldReleaseTail) noexcept
     excitationGain.reset(sampleRate, requestedFreeTail ? 0.12 : 0.24);
     excitationGain.setCurrentAndTargetValue(current);
     excitationGain.setTargetValue(requestedFreeTail ? 0.0f : 1.0f);
+}
+
+void SaxProcessor::setDiveEnabled(bool shouldDive) noexcept
+{
+    if (requestedDive == shouldDive)
+        return;
+
+    requestedDive = shouldDive;
+    const auto seconds = requestedDive ? diveFallSeconds : diveReturnSeconds;
+    // The transposition is the slope of this ramp, so the target has to be
+    // derived from the ramp time rather than fixed: a shorter ramp to the same
+    // target would simply fall further.
+    const auto target = requestedDive
+        ? diveFallRate * static_cast<float>(seconds * sampleRate)
+        : 0.0f;
+    const auto current = diveSamples.getCurrentValue();
+    diveSamples.reset(sampleRate, seconds);
+    diveSamples.setCurrentAndTargetValue(current);
+    diveSamples.setTargetValue(target);
+}
+
+void SaxProcessor::setStutterEnabled(bool shouldStutter) noexcept
+{
+    if (requestedStutter == shouldStutter)
+        return;
+
+    requestedStutter = shouldStutter;
+    const auto current = stutterMix.getCurrentValue();
+    stutterMix.reset(sampleRate, requestedStutter ? stutterAttackSeconds
+                                                  : stutterReleaseSeconds);
+    stutterMix.setCurrentAndTargetValue(current);
+    stutterMix.setTargetValue(requestedStutter ? 1.0f : 0.0f);
 }
 
 void SaxProcessor::updateTargets(bool immediately, double transitionSeconds)
@@ -244,6 +295,8 @@ void SaxProcessor::process(juce::AudioBuffer<float>& buffer, int numSamples)
         if (incrementalClearPosition >= delayBuffer.getNumSamples())
             incrementalClearPosition = -1;
         excitationGain.skip(numSamples);
+        diveSamples.skip(numSamples);
+        stutterMix.skip(numSamples);
         buffer.clear(0, numSamples);
         return;
     }
@@ -263,7 +316,20 @@ void SaxProcessor::process(juce::AudioBuffer<float>& buffer, int numSamples)
                                        * 72.0f / static_cast<float>(sampleRate));
     const auto freezeStart = freezeMix.getCurrentValue();
     const auto freezeEnd = freezeMix.skip(numSamples);
-    const auto freezeActive = juce::jmax(freezeStart, freezeEnd) > 0.00001f;
+    const auto stutterStart = stutterMix.getCurrentValue();
+    const auto stutterEnd = stutterMix.skip(numSamples);
+    const auto stutterActive = juce::jmax(stutterStart, stutterEnd) > 0.00001f;
+    // SCATTO has to hold the line still for the short window to recirculate,
+    // so it engages the same freeze GELO uses instead of owning a second one.
+    const auto freezeActive = juce::jmax(freezeStart, freezeEnd) > 0.00001f
+                           || stutterActive;
+    const auto stutterTap = juce::jlimit(
+        1.0f, maximumDelay,
+        stutterMilliseconds * 0.001f * static_cast<float>(sampleRate));
+    // Full CADUTA travel, used only to decide how quickly the fall takes over
+    // the dry signal. The transposition itself comes from the ramp's slope.
+    const auto diveFullSamples = juce::jmax(
+        1.0f, diveFallRate * static_cast<float>(diveFallSeconds * sampleRate));
 
     for (int sample = 0; sample < numSamples; ++sample)
     {
@@ -287,6 +353,10 @@ void SaxProcessor::process(juce::AudioBuffer<float>& buffer, int numSamples)
 
         const auto modulation = CommentoDsp::fastSine(modulationPhase)
                               * modulationDepthSamples.getNextValue();
+        // Read once per sample whichever branch is taken below, so the ramp
+        // advances at exactly one step per sample and its slope stays the
+        // interval the fall was designed around.
+        const auto dive = diveSamples.getNextValue();
         auto echoLeft = 0.0f;
         auto echoRight = 0.0f;
         if (delayMorphActive)
@@ -298,13 +368,13 @@ void SaxProcessor::process(juce::AudioBuffer<float>& buffer, int numSamples)
             const auto oldGain = 1.0f - progress;
             const auto newGain = progress;
             const auto oldLeft = juce::jlimit(
-                1.0f, maximumDelay, delayMorphFromLeft + modulation);
+                1.0f, maximumDelay, delayMorphFromLeft + modulation + dive);
             const auto oldRight = juce::jlimit(
-                1.0f, maximumDelay, delayMorphFromRight - modulation);
+                1.0f, maximumDelay, delayMorphFromRight - modulation + dive);
             const auto newLeft = juce::jlimit(
-                1.0f, maximumDelay, delayMorphToLeft + modulation);
+                1.0f, maximumDelay, delayMorphToLeft + modulation + dive);
             const auto newRight = juce::jlimit(
-                1.0f, maximumDelay, delayMorphToRight - modulation);
+                1.0f, maximumDelay, delayMorphToRight - modulation + dive);
             echoLeft = readDelay(0, oldLeft) * oldGain
                      + readDelay(0, newLeft) * newGain;
             echoRight = readDelay(1, oldRight) * oldGain
@@ -315,12 +385,29 @@ void SaxProcessor::process(juce::AudioBuffer<float>& buffer, int numSamples)
         else
         {
             const auto leftDelay = juce::jlimit(1.0f, maximumDelay,
-                delaySamplesLeft.getNextValue() + modulation);
+                delaySamplesLeft.getNextValue() + modulation + dive);
             const auto rightDelay = juce::jlimit(1.0f, maximumDelay,
-                delaySamplesRight.getNextValue() - modulation);
+                delaySamplesRight.getNextValue() - modulation + dive);
             echoLeft = readDelay(0, leftDelay);
             echoRight = readDelay(1, rightDelay);
         }
+
+        const auto blockFraction = numSamples > 1
+            ? static_cast<float>(sample) / static_cast<float>(numSamples - 1)
+            : 1.0f;
+        const auto stutter = stutterActive
+            ? juce::jmap(blockFraction, stutterStart, stutterEnd) : 0.0f;
+        if (stutterActive)
+        {
+            // Crossfading the tap here, before the feedback is formed, is what
+            // makes the recirculation loop the short window rather than the
+            // scenario's own tap, and it avoids the upward glissando a swept
+            // tap would produce on the way in.
+            echoLeft += (readDelay(0, stutterTap) - echoLeft) * stutter;
+            echoRight += (readDelay(1, stutterTap) - echoRight) * stutter;
+        }
+        const auto diveDepth = juce::jlimit(0.0f, 1.0f,
+                                            dive * 3.0f / diveFullSamples);
         const auto amount = delayLevel.getNextValue();
         const auto feedbackAmount = feedback.getNextValue() * amount;
         const auto crossAmount = crossFeedback.getNextValue();
@@ -331,10 +418,8 @@ void SaxProcessor::process(juce::AudioBuffer<float>& buffer, int numSamples)
         auto wet = delayMix.getNextValue() * amount;
         if (freezeActive)
         {
-            const auto fraction = numSamples > 1
-                ? static_cast<float>(sample) / static_cast<float>(numSamples - 1)
-                : 1.0f;
-            const auto freeze = juce::jmap(fraction, freezeStart, freezeEnd);
+            const auto freeze = juce::jmax(
+                juce::jmap(blockFraction, freezeStart, freezeEnd), stutter);
             constexpr auto frozenFeedback = 0.995f;
             const auto frozenLeft = frozenFeedback
                 * (echoLeft * (1.0f - crossAmount) + echoRight * crossAmount);
@@ -344,6 +429,11 @@ void SaxProcessor::process(juce::AudioBuffer<float>& buffer, int numSamples)
             delayInputRight += (frozenRight - delayInputRight) * freeze;
             wet = juce::jmax(wet, freeze * 0.68f);
         }
+        // Both new gestures live entirely in the tail, so they only read as
+        // gestures if the live sax steps aside while they speak. Without this
+        // the dry signal simply masks the falling and the stuttering tail.
+        const auto tailFocus = juce::jmax(diveDepth, stutter);
+        wet = juce::jmax(wet, tailFocus * 0.92f);
         delayBuffer.setSample(0, writePosition,
             applyConditionalCeiling(delayInputLeft, 0.92f, 0.995f));
         delayBuffer.setSample(1, writePosition,
@@ -356,9 +446,10 @@ void SaxProcessor::process(juce::AudioBuffer<float>& buffer, int numSamples)
         const auto rightMovement = 1.0f - tremolo
             + tremolo * (0.5f - 0.5f * tremoloWave);
         const auto gain = outputGain.getNextValue();
-        left[sample] = (filtered[0] * (1.0f - wet * 0.28f) + echoLeft * wet)
+        const auto dryGain = (1.0f - wet * 0.28f) * (1.0f - tailFocus * 0.85f);
+        left[sample] = (filtered[0] * dryGain + echoLeft * wet)
                      * leftMovement * gain;
-        right[sample] = (filtered[1] * (1.0f - wet * 0.28f) + echoRight * wet)
+        right[sample] = (filtered[1] * dryGain + echoRight * wet)
                       * rightMovement * gain;
 
         writePosition = (writePosition + 1) % delayBuffer.getNumSamples();
@@ -404,6 +495,8 @@ void SaxProcessor::advanceMorph(int numSamples) noexcept
     advance(delayLevel);
     advance(freezeMix);
     advance(excitationGain);
+    advance(diveSamples);
+    advance(stutterMix);
     advance(modulationDepthSamples);
     advance(modulationRateHz);
     advance(tremoloDepth);

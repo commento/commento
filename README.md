@@ -145,36 +145,56 @@ Commento riconosce come NM2 dedicato un endpoint MIDI il cui nome contiene
 usare la mappa di fabbrica: canale MIDI 1 e note cromatiche da 60 a 77. La
 [tabella MIDI ufficiale NM2](https://thisisnoiseinc.com/en-ca/blogs/nm2-manual/midi-values)
 numera i pulsanti da sinistra a destra, prima la riga superiore, poi quella
-centrale e infine quella inferiore. In Commento la griglia e':
+centrale e infine quella inferiore.
+
+Ogni riga e' una famiglia, perche' chi suona con il controller addosso ricorda
+*dove* sta un gesto, non come si chiama: la riga alta lancia qualcosa che
+continua a suonare, quella centrale ricolora il timbro, quella bassa lo muove o
+ne cambia il livello. Dentro ogni riga i gesti vanno dal piu' discreto al piu'
+estremo.
 
 | Riga fisica | Pad 1 | Pad 2 | Pad 3 | Pad 4 | Pad 5 | Pad 6 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| Superiore, pulsanti 1-6 | `60` CODA LIBERA | `61` GELO | `62` OMBRA | `63` GRANA | `64` PULSO | `65` PAUSA |
-| Centrale, pulsanti 7-12 | `66` ASCOLTO | `67` ECO THROW | `68` RADIO | `69` FUZZ | `70` STRETTO | `71` VUOTO |
-| Inferiore, pulsanti 13-18 | `72` NEBBIA | `73` SCIAME | `74` LAMA | `75` FERRO | `76` ORBITA | `77` ABISSO |
+| Alta, tempo e spazio | `60` CODA LIBERA | `61` ECO THROW | `62` GELO | `63` CADUTA | `64` SCATTO | `65` ABISSO |
+| Centrale, timbro | `66` OMBRA | `67` RADIO | `68` LAMA | `69` GRANA | `70` FUZZ | `71` FERRO |
+| Bassa, movimento e livelli | `72` PULSO | `73` ORBITA | `74` STRETTO | `75` VUOTO | `76` ASCOLTO | `77` PAUSA |
 
 Legenda sonora, durante la pressione:
 
 | Gesto | Trasformazione |
 | --- | --- |
 | CODA LIBERA | Sul sax sfuma il diretto e lascia parlare delay/riverbero di RESPIRO. |
-| GELO | Congela gradualmente il ricircolo del delay del sax/RESPIRO. |
-| OMBRA | Passa-basso scuro a circa 720 Hz sul solo bus sax. |
-| GRANA | Downsample/bit-crush filtrato sul solo bus sax. |
-| PULSO | Tremolo profondo a 3,1 Hz sul solo bus sax. |
-| PAUSA | Ferma soltanto il loop RESPIRO; il sax live continua a passare. |
-| ASCOLTO | Porta al massimo il ducking del bus ambiente guidato dal sax live. |
 | ECO THROW | Spinge wet e feedback del delay sax, poi lascia rientrare lentamente la coda. |
-| RADIO | Passa-banda approssimativo 520-2400 Hz sul solo bus sax. |
-| FUZZ | Saturazione dura momentanea sul solo bus sax. |
+| GELO | Congela gradualmente il ricircolo del delay del sax/RESPIRO. |
+| CADUTA | Allunga il tap del delay a rampa costante: la coda scende di circa sette semitoni in 0,9 s mentre il diretto si fa da parte. Al rilascio risale piu' lentamente, con una curva verso l'alto di circa una terza. |
+| SCATTO | Congela la linea e la rilegge a 125 ms: l'ultimo frammento di frase ricircola come loop breve. Nessun glissato all'entrata e nessuna giunta, perche' il tap corto entra in crossfade invece che in sweep. |
+| ABISSO | ECO THROW su RESPIRO + OMBRA e VUOTO attenuati sul sax. |
+| OMBRA | Passa-basso risonante che sprofonda da 1500 a 480 Hz in 0,7 s e resta giu' finche' il pad e' premuto. |
+| RADIO | Passa-banda risonante a Q 3,2 che si sintonizza da 700 a 1150 Hz in 0,2 s. |
+| LAMA | Passa-alto risonante udibile subito, con l'angolo che sale da 500 a 2100 Hz in 0,28 s. |
+| GRANA | Downsample/bit-crush filtrato sul solo bus sax. |
+| FUZZ | Saturazione dura momentanea sul solo bus sax, compensata in livello. |
+| FERRO | Ring modulation bipolare a 37 Hz: piu' metallica e distinta da PULSO. |
+| PULSO | Tremolo profondo a 3,1 Hz con curva sagomata, non sinusoidale. |
+| ORBITA | Movimento stereo lento ma percepibile a 0,24 Hz sul solo bus sax. |
 | STRETTO | Porta verso il centro la coppia stereo del sax; su una sorgente mono il cambiamento e' minimo. |
 | VUOTO | Porta quasi al silenzio il solo bus sax, senza spegnere ambiente e basso. |
-| NEBBIA | Macro leggera OMBRA + STRETTO + ORBITA. |
-| SCIAME | Macro GRANA + PULSO + ORBITA a intensita' contenute. |
-| LAMA | Passa-alto a circa 1750 Hz sul solo bus sax. |
-| FERRO | Ring modulation bipolare a 37 Hz: piu' metallica e distinta da PULSO. |
-| ORBITA | Movimento stereo lento ma percepibile a 0,24 Hz sul solo bus sax. |
-| ABISSO | ECO THROW su RESPIRO + OMBRA e VUOTO attenuati sul sax. |
+| ASCOLTO | Porta al massimo il ducking del bus ambiente guidato dal sax live. |
+| PAUSA | Ferma soltanto il loop RESPIRO; il sax live continua a passare. |
+
+OMBRA, RADIO e LAMA sono tre prese dello stesso filtro state-variable, non tre
+filtri diversi: tenerne due insieme non li mette in cascata ma porta il filtro a
+un angolo intermedio, calcolato in scala logaritmica. Ogni colore ha il proprio
+makeup gain, cosi' premere un pad cambia il timbro e non il volume.
+
+CADUTA e SCATTO vivono dentro il delay del sax e quindi parlano solo con il
+percorso **EFFETTI SCENA**: sotto CLEAN LOOPER il SaxProcessor e' bypassato e i
+due pad non hanno nulla da trasformare.
+
+Gli LFO di PULSO, FERRO e ORBITA ripartono da una fase definita a ogni
+pressione, invece di girare liberi. E' cio' che rende il gesto ripetibile e
+quindi suonabile a tempo: senza reset lo stesso pad apriva su un picco o su un
+ventre a seconda di quando lo si premeva.
 
 Tutti i diciotto comandi sono momentanei: `Note On` preme il gesto e `Note Off`
 (oppure `Note On` con velocity zero) lo rilascia. La pagina **GESTI** mostra il
@@ -192,8 +212,43 @@ dal loop richiederebbe un secondo percorso effetti; questa versione evita quel
 costo aggiuntivo sul Raspberry Pi e mantiene intatti i tre loop MIDI e il basso.
 
 La mappa riusa i delay, il riverbero, GRANA e FUZZ gia' allocati; gli altri
-colori sono filtri a un polo, guadagni, matrice mid/side e tre LFO semplici. Non
-aggiunge buffer audio, linee di delay, riverberi, voci o thread nel callback.
+colori sono un filtro state-variable per canale sax, guadagni, matrice mid/side
+e tre LFO semplici. Non aggiunge buffer audio, linee di delay, riverberi, voci o
+thread nel callback. Il filtro risonante costa leggermente meno per campione dei
+quattro filtri a un polo che ha sostituito e gira soltanto quando OMBRA, RADIO o
+LAMA sono effettivamente in gioco. CADUTA e SCATTO sono automazioni del delay
+gia' esistente: nessuna memoria nuova.
+
+### Tilt: profondita continua sui colori
+
+I pad NM2 trasmettono velocity fissa, quindi da soli sono comandi acceso/spento.
+Il sensore di movimento e' l'unica dimensione continua disponibile, ed e' proprio
+il gesto naturale di chi ha il controller montato sul sax. Commento legge i due
+assi di fabbrica, `CC 74` e `CC 75`, e li usa come **profondita'** dei colori.
+
+La profondita' e' misurata rispetto alla posa in cui si trovava lo strumento
+quando e' iniziata la frase, non rispetto a una posizione di riposo assoluta:
+
+- alla pressione del primo pad Commento cattura la posa corrente come
+  riferimento;
+- finche' il pad resta premuto, la deviazione assoluta sull'asse che si e'
+  mosso di piu' porta il colore dal 70% al 100%;
+- al rilascio di tutti i pad il riferimento decade, e la frase successiva
+  ricattura la posa di allora.
+
+Non c'e' quindi nulla da calibrare, nessun asse da scegliere, e l'orientamento
+del supporto non conta: basta muovere lo strumento in una direzione qualsiasi
+perche' il colore si approfondisca. La deriva del sensore tra una frase e
+l'altra e' irrilevante per costruzione.
+
+Il tilt agisce sui **colori** - OMBRA, RADIO, LAMA, GRANA, FUZZ, STRETTO, VUOTO,
+PULSO, FERRO, ORBITA - e non sui gesti strutturali: GELO, PAUSA, CODA LIBERA,
+ECO THROW, ABISSO, CADUTA e SCATTO restano a piena forza, perche' un comando di
+trasporto premuto a meta' non vorrebbe dire nulla.
+
+**Se il sensore resta disabilitato non arriva mai un CC e ogni gesto conserva la
+piena intensita'**: il comportamento e' identico a quello di prima. Abilitare il
+tilt nella NM2 Web App e' quindi l'unico interruttore della funzione.
 
 Le note 60-77 sul canale 1 vengono consumate soltanto quando arrivano
 dall'endpoint riconosciuto come NM2: non vengono registrate nei loop MIDI, non
@@ -214,13 +269,19 @@ riserva manuale. La
 [guida ufficiale di collegamento](https://thisisnoiseinc.com/blogs/nm2-manual/how-to-connect)
 descrive entrambe le modalita'.
 
-Montato sul sax, il sensore tilt si muove continuamente e i due knob possono
-essere urtati. Nella
+Nella
 [NM2 Web App](https://thisisnoiseinc.com/blogs/nm2-manual/customize-midi)
-disabilitare tilt e knob non usati, oppure assegnarli a messaggi che Commento
-non usa; lasciare invariati canale e note dei 18 pulsanti. Questo evita traffico
-MIDI continuo e preserva margine sul Raspberry Pi 5. Le caratteristiche dei
-controlli e l'uso simultaneo USB/Bluetooth sono riepilogati anche nella
+lasciare invariati canale e note dei 18 pulsanti, e lasciare il tilt sulla mappa
+di fabbrica (`CC 74` e `CC 75`) se si vuole la profondita' continua descritta
+sopra. I due knob restano ignorati: se sono soggetti a urti conviene
+disabilitarli o assegnarli a messaggi che Commento non usa, cosi' non occupano
+banda inutilmente.
+
+Il tilt genera traffico MIDI continuo. Su USB-C non e' un problema; su BLE, dove
+la banda e' piu' stretta e una raffica di CC compete con i `Note On` dei pad,
+conviene verificare in prova che le pressioni restino puntuali, e in caso
+contrario disabilitare il sensore. Le caratteristiche dei controlli e l'uso
+simultaneo USB/Bluetooth sono riepilogati anche nella
 [pagina ufficiale NM2](https://thisisnoiseinc.com/blogs/nm2-manual/general-info).
 
 `NESSUNO - CAPTURE OFF` nel campo dispositivo di ingresso apre davvero solo
@@ -654,8 +715,10 @@ una volta per blocco sul bus ambient gia' sommato. Nessuno dei cinque alloca
 buffer, crea riverberi o aggiunge voci nel callback realtime.
 
 Il callback classifica KeyStep, porta standard Model 12 e NM2 dal nome
-dell'endpoint. Le 18 note dedicate dell'NM2 vengono consumate come gesti; gli
-eventi destinati alle voci e alle memorie passano invece in una FIFO
+dell'endpoint. Le 18 note dedicate dell'NM2 vengono consumate come gesti e i due
+CC di tilt come profondita' continua; gli altri messaggi dello stesso endpoint
+sono scartati, cosi' knob e preset personalizzati non possono entrare nei loop.
+Gli eventi destinati alle voci e alle memorie passano invece in una FIFO
 preallocata. Le memorie vengono modificate dal thread audio; in caso di overflow
 viene inviato un panic automatico e il contatore compare nell'indicatore MIDI.
 

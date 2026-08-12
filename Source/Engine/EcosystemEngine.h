@@ -47,26 +47,35 @@ public:
 
     // Physical order on the NM2: three rows of six pads. The factory mapping
     // already sends these as notes 60..77 on MIDI channel 1.
+    //
+    // A player wearing the controller memorises geography, not names, so each
+    // row is one family: the top row throws something that keeps sounding, the
+    // middle row recolours the tone, the bottom row moves it or changes its
+    // level. Within a row the gestures run from the gentlest to the most
+    // extreme.
     enum class Nm2Gesture : int
     {
+        // Top row: time and space.
         codaLibera = 0,
-        gelo,
-        ombra,
-        grana,
-        pulso,
-        pausa,
-        ascolto,
         ecoThrow,
+        gelo,
+        caduta,
+        scatto,
+        abisso,
+        // Middle row: timbre.
+        ombra,
         radio,
+        lama,
+        grana,
         fuzz,
+        ferro,
+        // Bottom row: movement and levels.
+        pulso,
+        orbita,
         stretto,
         vuoto,
-        nebbia,
-        sciame,
-        lama,
-        ferro,
-        orbita,
-        abisso,
+        ascolto,
+        pausa,
         count
     };
 
@@ -106,6 +115,12 @@ public:
     static constexpr int logicalOutputBusCount = 5;
     static constexpr int nm2MidiChannel = 1;
     static constexpr int nm2BaseNote = 60;
+    // Factory mapping of the motion sensor. The two axes arrive on their own
+    // channels, but Commento owns every message from this endpoint, so the
+    // controller number alone is enough to recognise them even under a
+    // customised preset.
+    static constexpr int nm2TiltXController = 74;
+    static constexpr int nm2TiltYController = 75;
     static constexpr int nm2GestureCount
         = static_cast<int>(Nm2Gesture::count);
     static constexpr double scenarioMorphSeconds = 8.0;
@@ -128,6 +143,9 @@ public:
     void releaseSaxFootswitch() noexcept;
     void releaseNm2Gestures() noexcept;
     [[nodiscard]] std::uint32_t getNm2HeldMask() const noexcept;
+    [[nodiscard]] bool isNm2GestureHeld(Nm2Gesture gesture) const noexcept;
+    [[nodiscard]] float getNm2TiltDepth() const noexcept;
+    [[nodiscard]] bool hasNm2TiltSensor() const noexcept;
     [[nodiscard]] static const char* getNm2GestureName(
         Nm2Gesture gesture) noexcept;
 
@@ -326,7 +344,9 @@ private:
     void advanceScenarioMorph(int numSamples) noexcept;
     void updatePerformanceEffectTargets() noexcept;
     void updateMomentaryGestureTargets(int numSamples) noexcept;
-    void updateNm2EffectTargets() noexcept;
+    void updateNm2EffectTargets(int numSamples) noexcept;
+    void updateNm2TiltDepth(int numSamples) noexcept;
+    void updateNm2ColourFilter() noexcept;
     void applyLoopTransportCommands(juce::MidiBuffer& output) noexcept;
     static void addPrivateLoopPanic(juce::MidiBuffer& output,
                                     int playbackChannel, int ghostChannel,
@@ -535,18 +555,52 @@ private:
         nm2MetalMix;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear>
         nm2OrbitMix;
-    std::array<float, logicalOutputBusCount> nm2DarkLowPassState {};
-    std::array<float, logicalOutputBusCount> nm2RadioLowPassState {};
-    std::array<float, logicalOutputBusCount> nm2RadioHighPassState {};
-    std::array<float, logicalOutputBusCount> nm2BladeHighPassState {};
-    float nm2DarkPole = 0.0f;
-    float nm2RadioLowPole = 0.0f;
-    float nm2RadioHighPole = 0.0f;
-    float nm2BladePole = 0.0f;
+    // One topology-preserving state-variable filter per sax channel replaces
+    // the four one-pole sections OMBRA, RADIO and LAMA used to own. It costs
+    // slightly less per sample than those four, produces low, band and high
+    // outputs at once, and adds the resonance that made the old tone tilts
+    // sound like a tone knob rather than a gesture.
+    std::array<float, logicalOutputBusCount> nm2ColourFilterState1 {};
+    std::array<float, logicalOutputBusCount> nm2ColourFilterState2 {};
+    // Cutoff envelopes are deliberately separate from the wet mixes: LAMA has
+    // to appear almost immediately while its corner is still climbing, and
+    // OMBRA has to keep sinking after it is already fully wet.
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear>
+        nm2DarkEnvelope;
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear>
+        nm2RadioEnvelope;
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear>
+        nm2BladeEnvelope;
+    // Recomputed once per block. A cutoff ramp spread over hundreds of
+    // milliseconds moves by a fraction of a percent across one block, so the
+    // coefficient steps are inaudible and the per-sample tan() disappears.
+    float nm2ColourG = 0.0f;
+    float nm2ColourK = 1.0f;
+    float nm2ColourA1 = 0.0f;
+    float nm2ColourA2 = 0.0f;
+    float nm2ColourA3 = 0.0f;
+    float nm2ColourLowWeight = 0.0f;
+    float nm2ColourBandWeight = 0.0f;
+    float nm2ColourHighWeight = 0.0f;
+    float nm2ColourMakeup = 1.0f;
     double nm2PulsePhase = 0.0;
     double nm2MetalPhase = 0.0;
     double nm2OrbitPhase = 0.0;
+    std::uint32_t nm2PreviousHeldMask = 0u;
     bool nm2FiltersNeedPrime = true;
+    // Tilt depth. Until the sensor is enabled on the controller no CC ever
+    // arrives, nm2TiltSeen stays false and every gesture keeps its full
+    // strength, so a controller with tilt switched off behaves exactly as it
+    // did before this existed.
+    std::atomic<float> nm2TiltX { 0.5f };
+    std::atomic<float> nm2TiltY { 0.5f };
+    std::atomic<bool> nm2TiltSeen { false };
+    float nm2TiltReferenceX = 0.5f;
+    float nm2TiltReferenceY = 0.5f;
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> nm2TiltDepth;
+    // Written once per block by the audio thread and readable from the UI, so
+    // it follows the same convention as the other display-facing values.
+    std::atomic<float> nm2TiltBlockDepth { 1.0f };
     float grainLowPassCoefficient = 1.0f;
     float activeGrainEffectTarget = -1.0f;
     float activeFuzzEffectTarget = -1.0f;
