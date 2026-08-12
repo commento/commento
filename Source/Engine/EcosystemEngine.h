@@ -156,6 +156,7 @@ public:
     };
 
     [[nodiscard]] Nm2Diagnostics getNm2Diagnostics() const noexcept;
+    void resetNm2Diagnostics() noexcept;
     [[nodiscard]] std::uint32_t getNm2HeldMask() const noexcept;
     [[nodiscard]] bool isNm2GestureHeld(Nm2Gesture gesture) const noexcept;
     [[nodiscard]] float getNm2TiltDepth() const noexcept;

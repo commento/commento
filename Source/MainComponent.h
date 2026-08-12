@@ -47,6 +47,8 @@ private:
     };
 
     void initialiseAudio();
+    [[nodiscard]] EcosystemEngine::MidiInputRole midiInputRoleForSource(
+        juce::MidiInput* source) const noexcept;
     void handleIncomingMidiMessage(juce::MidiInput*,
                                    const juce::MidiMessage& message) override;
     void timerCallback() override;
@@ -180,6 +182,15 @@ private:
     int touchscreenFreezeTarget = -1;
     int touchscreenEchoThrowTarget = -1;
     int touchscreenFreeTailTarget = -1;
+    // Endpoints are matched by identifier, not by name. The scan sees the name
+    // reported by getAvailableDevices() while the callback sees the one on the
+    // opened MidiInput, and on ALSA those two strings are not always the same:
+    // when they differ the controller is enabled but every message it sends is
+    // filed as generic. Hashes keep the comparison lock-free across threads.
+    std::atomic<juce::int64> nm2IdentifierHash { 0 };
+    std::atomic<juce::int64> keyStepIdentifierHash { 0 };
+    std::atomic<juce::int64> model12IdentifierHash { 0 };
+    std::atomic<int> totalMidiMessageCount { 0 };
     std::atomic<std::uint32_t> lastMidiMessagePacked { 0u };
     std::atomic<std::uint32_t> lastMidiMessageTick { 0u };
     std::atomic<int> lastSustainValue { -1 };

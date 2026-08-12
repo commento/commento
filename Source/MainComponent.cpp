@@ -1481,6 +1481,8 @@ void MainComponent::configureKeyStepMidi()
     engine.cancelSaxFootswitchLearn();
     lastMidiMessagePacked.store(0u, std::memory_order_relaxed);
     lastMidiMessageTick.store(0u, std::memory_order_relaxed);
+    totalMidiMessageCount.store(0, std::memory_order_relaxed);
+    engine.resetNm2Diagnostics();
     lastSustainValue.store(-1, std::memory_order_relaxed);
     lastSustainTick.store(0u, std::memory_order_relaxed);
     sustainEdgeMask.store(0u, std::memory_order_relaxed);
@@ -1523,6 +1525,12 @@ void MainComponent::configureKeyStepMidi()
     }
 
     nm2InputWasPresent = nm2MidiInputIdentifier.isNotEmpty();
+    nm2IdentifierHash.store(nm2MidiInputIdentifier.hashCode64(),
+                            std::memory_order_relaxed);
+    keyStepIdentifierHash.store(keyStepIdentifier.hashCode64(),
+                                std::memory_order_relaxed);
+    model12IdentifierHash.store(model12Identifier.hashCode64(),
+                                std::memory_order_relaxed);
 
     for (const auto& device : devices)
     {
@@ -2412,14 +2420,36 @@ void MainComponent::applyAudioConfiguration()
     }
 }
 
+EcosystemEngine::MidiInputRole MainComponent::midiInputRoleForSource(
+    juce::MidiInput* source) const noexcept
+{
+    if (source == nullptr)
+        return EcosystemEngine::MidiInputRole::generic;
+
+    // The identifier is what the scan actually matched on, so trust it first
+    // and keep the name only as a fallback for a device that arrived between
+    // two scans.
+    const auto hash = source->getIdentifier().hashCode64();
+    if (hash != 0)
+    {
+        if (hash == nm2IdentifierHash.load(std::memory_order_relaxed))
+            return EcosystemEngine::MidiInputRole::nm2;
+        if (hash == keyStepIdentifierHash.load(std::memory_order_relaxed))
+            return EcosystemEngine::MidiInputRole::keyStep;
+        if (hash == model12IdentifierHash.load(std::memory_order_relaxed))
+            return EcosystemEngine::MidiInputRole::model12;
+    }
+
+    return midiInputRoleForName(source->getName());
+}
+
 void MainComponent::handleIncomingMidiMessage(juce::MidiInput* source,
                                                const juce::MidiMessage& message)
 {
-    const auto role = source != nullptr
-        ? midiInputRoleForName(source->getName())
-        : EcosystemEngine::MidiInputRole::generic;
+    const auto role = midiInputRoleForSource(source);
     if (! message.isActiveSense() && ! message.isMidiClock())
     {
+        totalMidiMessageCount.fetch_add(1, std::memory_order_relaxed);
         lastMidiMessagePacked.store(
             packMidiMonitorMessage(message, role), std::memory_order_relaxed);
         lastMidiMessageTick.store(
@@ -2822,8 +2852,24 @@ void MainComponent::updateControls()
                     + juce::String(diagnostics.channel) + "  /  "
                     + juce::String(diagnostics.messageCount) + " MSG";
         }
-        else if (nm2InputWasPresent)
-            traffic = "  /  NESSUN MESSAGGIO RICEVUTO";
+        else
+        {
+            // Counting only NM2-role messages cannot tell "the controller is
+            // silent" apart from "the controller is talking but was filed
+            // under the wrong role". The total settles that in one glance.
+            const auto total = totalMidiMessageCount.load(
+                std::memory_order_relaxed);
+            const auto packed = lastMidiMessagePacked.load(
+                std::memory_order_relaxed);
+            const auto lastRole = static_cast<EcosystemEngine::MidiInputRole>(
+                (packed >> 3u) & 0x3u);
+            if (total > 0)
+                traffic = "  /  MIDI SI' MA NON NM2  /  "
+                        + juce::String(total) + " MSG  /  ULTIMO RUOLO: "
+                        + midiRoleText(lastRole);
+            else
+                traffic = "  /  NESSUN MIDI RICEVUTO DA NESSUNA PORTA";
+        }
 
         gesturesHintLabel.setText(
             (nm2InputWasPresent

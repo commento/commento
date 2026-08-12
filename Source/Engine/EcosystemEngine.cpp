@@ -278,6 +278,17 @@ EcosystemEngine::getNm2Diagnostics() const noexcept
     return diagnostics;
 }
 
+void EcosystemEngine::resetNm2Diagnostics() noexcept
+{
+    // Cleared by RILEGGI MIDI so the readout describes the scan just made,
+    // instead of leaving a stale count that hides a fresh failure.
+    nm2LastEventKind.store(0, std::memory_order_relaxed);
+    nm2LastEventNumber.store(-1, std::memory_order_relaxed);
+    nm2LastEventChannel.store(0, std::memory_order_relaxed);
+    nm2LastEventValue.store(0, std::memory_order_relaxed);
+    nm2EventCount.store(0, std::memory_order_relaxed);
+}
+
 std::uint32_t EcosystemEngine::getNm2HeldMask() const noexcept
 {
     return nm2HeldMask.load(std::memory_order_acquire);
