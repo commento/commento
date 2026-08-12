@@ -581,6 +581,9 @@ MainComponent::MainComponent()
     scenarioLabel.setFont(juce::FontOptions(19.0f, juce::Font::bold));
     scenarioLabel.setColour(juce::Label::textColourId, juce::Colour(paleText));
     scenarioLabel.setColour(juce::Label::backgroundColourId, juce::Colour(panel));
+    // The scenario name is purely visual.  Let taps pass through even if a
+    // font/layout change makes its painted bounds overlap one of the arrows.
+    scenarioLabel.setInterceptsMouseClicks(false, false);
     addAndMakeVisible(scenarioLabel);
     addAndMakeVisible(previousScenarioButton);
     addAndMakeVisible(nextScenarioButton);
@@ -682,7 +685,7 @@ MainComponent::MainComponent()
     addChildComponent(gesturesTitleLabel);
 
     gesturesHintLabel.setText(
-        "TRASFORMAZIONI E TRASPORTO  /  TIENI I PAD MOMENTANEI  /  UN SOLO BERSAGLIO",
+        "NM2: SAX + RESPIRO  /  TOUCH: SCEGLI UNA MEMORIA  /  TIENI PER TRASFORMARE",
         juce::dontSendNotification);
     gesturesHintLabel.setFont(juce::FontOptions(17.0f, juce::Font::bold));
     gesturesHintLabel.setColour(juce::Label::textColourId,
@@ -1539,11 +1542,14 @@ void MainComponent::configureKeyStepMidi()
         activeSources.add(nm2IsBluetooth ? "NM2 BLE" : "NM2");
 
     const auto connectionText = activeSources.isEmpty()
-        ? juce::String("MIDI NON TROVATO\nCollega KeyStep Pro, Model 12 o NM2")
+        ? juce::String("MIDI NON TROVATO\nNM2: ATTESA USB / BLE")
         : juce::String(activeSources.size())
             + (activeSources.size() == 1
-                ? " PORTA MIDI ATTIVA\n" : " PORTE MIDI ATTIVE\n")
-            + activeSources.joinIntoString(" + ");
+                ? " PORTA MIDI ATTIVA  /  " : " PORTE MIDI ATTIVE  /  ")
+            + activeSources.joinIntoString(" + ")
+            + (nm2MidiInputName.isEmpty()
+                ? "\nNM2: ATTESA USB / BLE"
+                : "\nNM2: PRONTO  /  " + nm2MidiInputName);
     midiConnectionLabel.setText(connectionText, juce::dontSendNotification);
     updateSaxFootswitchControls();
 }
@@ -2494,6 +2500,7 @@ void MainComponent::updateHardwareIndicators()
     auto keyStepPresent = false;
     auto model12MidiPresent = false;
     auto nm2EndpointPresent = false;
+    auto newlyAvailableNm2 = false;
     for (const auto& device : juce::MidiInput::getAvailableDevices())
     {
         if (device.name == keyStepInputName)
@@ -2502,6 +2509,17 @@ void MainComponent::updateHardwareIndicators()
             model12MidiPresent = true;
         if (device.identifier == nm2MidiInputIdentifier)
             nm2EndpointPresent = true;
+        if (! nm2InputWasPresent && looksLikeNm2Midi(device.name))
+            newlyAvailableNm2 = true;
+    }
+
+    if (newlyAvailableNm2)
+    {
+        // USB and ALSA/BLE MIDI ports may appear after the app's initial scan.
+        // Adopt a newly exposed NM2 automatically; pairing and creation of the
+        // ALSA sequencer endpoint still belong to BlueZ/the operating system.
+        configureKeyStepMidi();
+        return;
     }
 
     if (nm2InputWasPresent && ! nm2EndpointPresent)
@@ -2746,7 +2764,7 @@ void MainComponent::updateControls()
                     static_cast<EcosystemEngine::Nm2Gesture>(index)));
         gesturesHintLabel.setText(
             "NM2 PREMUTO  /  " + heldGestures.joinIntoString(" + ")
-                + "  /  RILASCIA PER USCIRE",
+                + "  /  SAX + RESPIRO  /  RILASCIA PER USCIRE",
             juce::dontSendNotification);
         gesturesHintLabel.setColour(juce::Label::textColourId,
                                     juce::Colour(0xffffd08a));
@@ -2755,18 +2773,19 @@ void MainComponent::updateControls()
     {
         gesturesHintLabel.setText(
             nm2InputWasPresent
-                ? "NM2 PRONTO  /  TIENI I PAD MOMENTANEI  /  UN SOLO BERSAGLIO"
-                : "TRASFORMAZIONI E TRASPORTO  /  TIENI I PAD MOMENTANEI  /  UN SOLO BERSAGLIO",
+                ? "NM2 PRONTO  /  COLORI SU SAX + RESPIRO  /  ASCOLTO APRE IL TAPPETO"
+                : "NM2 IN ATTESA  /  COLLEGA USB O ESPONI BLE MIDI  /  I GESTI TOUCH RESTANO ATTIVI",
             juce::dontSendNotification);
         gesturesHintLabel.setColour(juce::Label::textColourId,
                                     juce::Colour(quietText));
     }
 
     gestureTargetLabel.setText(
-        "BERSAGLIO  /  " + memoryNames[static_cast<std::size_t>(selectedMemory)]
+        "BERSAGLIO TOUCH  /  "
+            + memoryNames[static_cast<std::size_t>(selectedMemory)]
             + (isBass
-                ? "  /  I PAD MOMENTANEI NON ELABORANO IL BASSO"
-                : "  /  IL PAD CATTURA QUESTA MEMORIA"),
+                ? "  /  TOUCH NON ELABORA IL BASSO  /  NM2: RESPIRO"
+                : "  /  NM2 RESTA SU SAX + RESPIRO"),
         juce::dontSendNotification);
     gestureTargetLabel.setColour(
         juce::Label::outlineColourId, selectedColour.withAlpha(0.72f));
@@ -2971,6 +2990,8 @@ void MainComponent::resized()
     nextScenarioButton.setBounds(
         scenarioArea.removeFromRight(78).reduced(4, 5));
     scenarioLabel.setBounds(scenarioArea.reduced(7, 4));
+    previousScenarioButton.toFront(false);
+    nextScenarioButton.toFront(false);
     const auto statusLeft = completeHeader.getX() + 240;
     const auto statusRight = scenarioLabel.getX() - 10;
     statusLabel.setBounds(statusLeft, completeHeader.getY(),

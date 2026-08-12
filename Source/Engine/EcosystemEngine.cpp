@@ -372,10 +372,12 @@ void EcosystemEngine::setNm2TargetGesture(
 {
     if (shouldEnable)
     {
-        const auto target = gestureTarget.load(std::memory_order_relaxed);
-        const auto usableTarget = target > bassLayerIndex
-            && juce::isPositiveAndBelow(target, memoryCount) ? target : -1;
-        const auto captured = usableTarget >= 0 ? usableTarget : -2;
+        // The NM2 is mounted on the sax, so its spatial gestures always own
+        // RESPIRO.  Touchscreen gestures still follow the selected card; the
+        // hardware controller must remain predictable even when the UI is on
+        // BASSO or one of the three ambient loops.
+        constexpr auto usableTarget = midiMemoryCount;
+        constexpr auto captured = usableTarget;
         auto expected = -1;
         if (! capturedTarget.compare_exchange_strong(
                 expected, captured, std::memory_order_acq_rel,
@@ -460,12 +462,10 @@ bool EcosystemEngine::consumeNm2Message(
         case Nm2Gesture::pausa:
             if (shouldEnable)
             {
-                const auto target = gestureTarget.load(
-                    std::memory_order_relaxed);
-                const auto usable = target > bassLayerIndex
-                    && juce::isPositiveAndBelow(target, memoryCount)
-                    && hasMaterial(target) && ! isRecording(target)
-                    && isLoopPlaying(target) ? target : -2;
+                constexpr auto target = midiMemoryCount;
+                const auto usable = hasMaterial(target)
+                    && ! isRecording(target) && isLoopPlaying(target)
+                    ? target : -2;
                 auto expected = -1;
                 nm2PauseTarget.compare_exchange_strong(
                     expected, usable, std::memory_order_acq_rel,
@@ -1305,10 +1305,10 @@ void EcosystemEngine::prepare(double newSampleRate, int maximumBlockSize)
             -juce::MathConstants<double>::twoPi
             * static_cast<double>(cutoff) / sampleRate));
     };
-    nm2DarkPole = onePoleAmount(950.0f);
-    nm2RadioLowPole = onePoleAmount(2800.0f);
-    nm2RadioHighPole = onePoleAmount(430.0f);
-    nm2BladePole = onePoleAmount(1450.0f);
+    nm2DarkPole = onePoleAmount(720.0f);
+    nm2RadioLowPole = onePoleAmount(2400.0f);
+    nm2RadioHighPole = onePoleAmount(520.0f);
+    nm2BladePole = onePoleAmount(1750.0f);
     nm2PulsePhase = 0.0;
     nm2MetalPhase = 0.0;
     nm2OrbitPhase = 0.0;
@@ -2376,13 +2376,15 @@ void EcosystemEngine::processPerformanceEffects(
                 * (grainHeldSamples[static_cast<std::size_t>(channel)]
                    - filtered);
             const auto dry = std::isfinite(data[sample]) ? data[sample] : 0.0f;
-            // The physical NM2 sits on the sax and colours the ambient/sax
-            // field. BASSO keeps its one-voice dry fast path; the persistent
-            // touchscreen GRANA/FUZZ controls retain their old global scope.
-            const auto effectiveGrain = channel == bassBus
-                ? grain : juce::jmax(grain, nm2Grain);
-            const auto effectiveFuzz = channel == bassBus
-                ? fuzz : juce::jmax(fuzz, nm2Fuzz);
+            // The persistent touchscreen controls keep their global scope.
+            // The wearable NM2 colours only the SAX/RESPIRO bus, leaving the
+            // three ambient loops stable underneath the performed gesture.
+            const auto isSaxChannel = channel == saxLeftBus
+                                   || channel == saxRightBus;
+            const auto effectiveGrain = isSaxChannel
+                ? juce::jmax(grain, nm2Grain) : grain;
+            const auto effectiveFuzz = isSaxChannel
+                ? juce::jmax(fuzz, nm2Fuzz) : fuzz;
             const auto crushed = dry
                 + (filtered - dry) * effectiveGrain;
             const auto hardFuzz = juce::jlimit(-1.0f, 1.0f,
@@ -2413,9 +2415,9 @@ void EcosystemEngine::processNm2Effects(
         return;
     }
 
-    constexpr auto pulseRateHz = 2.3;
+    constexpr auto pulseRateHz = 3.1;
     constexpr auto metalRateHz = 37.0;
-    constexpr auto orbitRateHz = 0.055;
+    constexpr auto orbitRateHz = 0.24;
     const auto pulsePhaseStep = juce::MathConstants<double>::twoPi
         * pulseRateHz / sampleRate;
     const auto metalPhaseStep = juce::MathConstants<double>::twoPi
@@ -2451,7 +2453,9 @@ void EcosystemEngine::processNm2Effects(
             const auto* data = outputs[channel];
             const auto input = data != nullptr && std::isfinite(data[sample])
                 ? data[sample] : 0.0f;
-            if (channel == bassBus)
+            const auto isSaxChannel = channel == saxLeftBus
+                                   || channel == saxRightBus;
+            if (! isSaxChannel)
             {
                 frame[static_cast<std::size_t>(channel)] = input;
                 continue;
@@ -2486,9 +2490,11 @@ void EcosystemEngine::processNm2Effects(
             coloured += (bladeSignal - coloured) * blade;
             const auto emptyGain = 1.0f - empty * 0.94f;
             const auto pulseGain = 1.0f
-                - pulse * 0.55f * (0.5f + 0.5f * pulseWave);
-            const auto metalGain = 1.0f - metal * 0.45f
-                + metal * 0.45f * metalWave;
+                - pulse * 0.72f * (0.5f + 0.5f * pulseWave);
+            // Crossfade into a true bipolar ring modulation. Unlike PULSO it
+            // changes the spectrum, not merely the loudness envelope.
+            const auto metalGain = (1.0f - metal)
+                + metal * 0.82f * metalWave;
             frame[static_cast<std::size_t>(channel)]
                 = coloured * emptyGain * pulseGain * metalGain;
         }
@@ -2506,19 +2512,22 @@ void EcosystemEngine::processNm2Effects(
                 * (1.0f - narrow * 0.92f);
             left = mid + side;
             right = mid - side;
-            left *= 1.0f - orbit * 0.32f
+            left *= 1.0f - orbit * 0.72f
                 * (0.5f + 0.5f * orbitWave);
-            right *= 1.0f - orbit * 0.32f
+            right *= 1.0f - orbit * 0.72f
                 * (0.5f - 0.5f * orbitWave);
         };
-        processPair(ambientLeftBus, ambientRightBus);
         processPair(saxLeftBus, saxRightBus);
 
         for (int channel = 0; channel < channels; ++channel)
             if (outputs[channel] != nullptr)
-                outputs[channel][sample] = channel == bassBus
-                    ? frame[static_cast<std::size_t>(channel)]
-                    : protectPeak(frame[static_cast<std::size_t>(channel)]);
+            {
+                const auto isSaxChannel = channel == saxLeftBus
+                                       || channel == saxRightBus;
+                outputs[channel][sample] = isSaxChannel
+                    ? protectPeak(frame[static_cast<std::size_t>(channel)])
+                    : frame[static_cast<std::size_t>(channel)];
+            }
 
         nm2PulsePhase += pulsePhaseStep;
         nm2MetalPhase += metalPhaseStep;

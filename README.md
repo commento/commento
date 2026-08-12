@@ -157,33 +157,39 @@ Legenda sonora, durante la pressione:
 
 | Gesto | Trasformazione |
 | --- | --- |
-| CODA LIBERA | Sfuma il diretto e lascia parlare delay/riverbero gia' presenti sulla card selezionata. |
-| GELO | Congela il ricircolo del delay gia' attivo sulla card selezionata. |
-| OMBRA | Passa-basso morbido a circa 950 Hz sul campo ambiente/sax. |
-| GRANA | Porta momentaneamente al massimo il downsample/bit-crush gia' disponibile. |
-| PULSO | Tremolo morbido a 2,3 Hz sul campo ambiente/sax. |
-| PAUSA | Ferma il loop selezionato e lo riprende dalla stessa fase al rilascio. |
+| CODA LIBERA | Sul sax sfuma il diretto e lascia parlare delay/riverbero di RESPIRO. |
+| GELO | Congela gradualmente il ricircolo del delay del sax/RESPIRO. |
+| OMBRA | Passa-basso scuro a circa 720 Hz sul solo bus sax. |
+| GRANA | Downsample/bit-crush filtrato sul solo bus sax. |
+| PULSO | Tremolo profondo a 3,1 Hz sul solo bus sax. |
+| PAUSA | Ferma soltanto il loop RESPIRO; il sax live continua a passare. |
 | ASCOLTO | Porta al massimo il ducking del bus ambiente guidato dal sax live. |
-| ECO THROW | Alza wet e feedback del delay della card selezionata, poi lascia rientrare la coda. |
-| RADIO | Passa-banda approssimativo 430-2800 Hz sul campo ambiente/sax. |
-| FUZZ | Porta momentaneamente al massimo la saturazione dura gia' disponibile. |
-| STRETTO | Riduce fortemente la larghezza stereo delle coppie ambiente e sax. |
-| VUOTO | Abbassa fino quasi al silenzio il campo ambiente/sax, senza mutare il basso. |
+| ECO THROW | Spinge wet e feedback del delay sax, poi lascia rientrare lentamente la coda. |
+| RADIO | Passa-banda approssimativo 520-2400 Hz sul solo bus sax. |
+| FUZZ | Saturazione dura momentanea sul solo bus sax. |
+| STRETTO | Porta verso il centro la coppia stereo del sax; su una sorgente mono il cambiamento e' minimo. |
+| VUOTO | Porta quasi al silenzio il solo bus sax, senza spegnere ambiente e basso. |
 | NEBBIA | Macro leggera OMBRA + STRETTO + ORBITA. |
 | SCIAME | Macro GRANA + PULSO + ORBITA a intensita' contenute. |
-| LAMA | Passa-alto a circa 1450 Hz sul campo ambiente/sax. |
-| FERRO | Modulazione d'ampiezza metallica a 37 Hz. |
-| ORBITA | Movimento stereo lentissimo a 0,055 Hz su ambiente e sax. |
-| ABISSO | ECO THROW sulla card catturata + OMBRA e VUOTO attenuati sul campo non-basso. |
+| LAMA | Passa-alto a circa 1750 Hz sul solo bus sax. |
+| FERRO | Ring modulation bipolare a 37 Hz: piu' metallica e distinta da PULSO. |
+| ORBITA | Movimento stereo lento ma percepibile a 0,24 Hz sul solo bus sax. |
+| ABISSO | ECO THROW su RESPIRO + OMBRA e VUOTO attenuati sul sax. |
 
 Tutti i diciotto comandi sono momentanei: `Note On` preme il gesto e `Note Off`
 (oppure `Note On` con velocity zero) lo rilascia. La pagina **GESTI** mostra il
-nome dei pad NM2 tenuti premuti. CODA LIBERA, GELO, ECO THROW, PAUSA e ABISSO
-catturano la card selezionata al momento della pressione; cambiando card durante
-la pressione, il bersaglio non cambia. PAUSA ferma soltanto quel loop e al
-rilascio lo riprende dallo stesso punto. Gli altri gesti lavorano globalmente sui
-bus ambiente/sax e non elaborano il BASSO LIVE. Se BASSO LIVE e' selezionato, i
-gesti che richiedono un loop bersaglio non lo trasformano.
+nome dei pad NM2 tenuti premuti. Poiche' il controller e' pensato per essere
+montato sul sax, i suoi colori elaborano sempre il bus **SAX + RESPIRO**:
+selezionare BASSO, MAREA, RADICE o SCINTILLA sul touch non sposta il bersaglio.
+PAUSA ferma soltanto il loop RESPIRO e al rilascio lo riprende dallo stesso
+punto, lasciando passare il sax live. ASCOLTO e' l'eccezione intenzionale: non
+colora il sax, ma abbassa il tappeto ambiente mentre il musicista soffia. I
+controlli momentanei touch continuano invece a seguire la memoria selezionata.
+
+Il bus sax contiene sia l'ingresso live sia l'eventuale memoria RESPIRO, quindi
+i colori NM2 trasformano entrambi. Separare completamente il soffio presente
+dal loop richiederebbe un secondo percorso effetti; questa versione evita quel
+costo aggiuntivo sul Raspberry Pi e mantiene intatti i tre loop MIDI e il basso.
 
 La mappa riusa i delay, il riverbero, GRANA e FUZZ gia' allocati; gli altri
 colori sono filtri a un polo, guadagni, matrice mid/side e tre LFO semplici. Non
@@ -202,7 +208,9 @@ Bluetooth contemporaneamente, ma Commento abilita deliberatamente un solo
 endpoint NM2 e, quando riesce a distinguerli dal nome, preferisce USB: cosi' una
 pressione non arriva due volte. Per usare BLE, eseguire prima pairing e
 connessione MIDI nel sistema operativo del Raspberry Pi, verificare che
-l'endpoint compaia in `aconnect -l`, quindi premere **RILEGGI MIDI**. La
+l'endpoint compaia in `aconnect -l`. Commento adotta automaticamente una porta
+NM2 che compare dopo l'avvio; **RILEGGI MIDI** resta disponibile come panic e
+riserva manuale. La
 [guida ufficiale di collegamento](https://thisisnoiseinc.com/blogs/nm2-manual/how-to-connect)
 descrive entrambe le modalita'.
 

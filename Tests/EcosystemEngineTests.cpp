@@ -4973,13 +4973,13 @@ int main()
                              && everyReleaseWorks,
                          "i 18 tasti NM2 devono avere bit esatti, press idempotente e release NoteOff/vel0");
 
-        // Targeted gestures capture the selected card at press time. Moving
-        // selection while the button is held must not move its owner, and the
-        // release must clear the captured card rather than the new selection.
-        const auto checkCapturedTarget = [&](int note, auto isEnabled)
+        // The wearable controller is sax-first: spatial pads always own
+        // RESPIRO, regardless of the card currently selected on screen.
+        constexpr auto nm2SaxMemory = EcosystemEngine::midiMemoryCount;
+        const auto checkSaxTarget = [&](int note, auto isEnabled)
         {
             nm2Engine.releaseNm2Gestures();
-            nm2Engine.setGestureTarget(1);
+            nm2Engine.setGestureTarget(EcosystemEngine::bassLayerIndex);
             nm2Engine.enqueueMidiMessage(
                 juce::MidiMessage::noteOn(nm2Channel, note, 1.0f),
                 MidiRole::nm2);
@@ -4987,70 +4987,78 @@ int main()
             nm2Engine.enqueueMidiMessage(
                 juce::MidiMessage::noteOn(nm2Channel, note, 1.0f),
                 MidiRole::nm2);
-            const auto stayedOnCapturedCard
-                = isEnabled(1) && ! isEnabled(2) && ! isEnabled(3);
+            auto onlySaxWasTargeted = isEnabled(nm2SaxMemory);
+            for (int memory = 0; memory < nm2SaxMemory; ++memory)
+                onlySaxWasTargeted &= ! isEnabled(memory);
             nm2Engine.enqueueMidiMessage(
                 juce::MidiMessage::noteOff(nm2Channel, note), MidiRole::nm2);
-            return stayedOnCapturedCard && ! isEnabled(1)
-                && ! isEnabled(2) && ! isEnabled(3);
+            for (int memory = 0; memory < EcosystemEngine::memoryCount;
+                 ++memory)
+                onlySaxWasTargeted &= ! isEnabled(memory);
+            return onlySaxWasTargeted;
         };
-        const auto codaCaptured = checkCapturedTarget(
+        const auto codaTargetsSax = checkSaxTarget(
             nm2BaseNote + static_cast<int>(Nm2Gesture::codaLibera),
             [&](int memory) { return nm2Engine.isFreeTailEnabled(memory); });
-        const auto geloCaptured = checkCapturedTarget(
+        const auto geloTargetsSax = checkSaxTarget(
             nm2BaseNote + static_cast<int>(Nm2Gesture::gelo),
             [&](int memory) { return nm2Engine.isFreezeEnabled(memory); });
-        const auto echoCaptured = checkCapturedTarget(
+        const auto echoTargetsSax = checkSaxTarget(
             nm2BaseNote + static_cast<int>(Nm2Gesture::ecoThrow),
             [&](int memory) { return nm2Engine.isEchoThrowEnabled(memory); });
-        passed &= expect(codaCaptured && geloCaptured && echoCaptured,
-                         "CODA, GELO ed ECO NM2 devono rilasciare la card catturata al press");
+        passed &= expect(codaTargetsSax && geloTargetsSax && echoTargetsSax,
+                         "CODA, GELO ed ECO NM2 devono restare sul bus RESPIRO/SAX");
 
-        // PAUSA is likewise captured, but operates only on the selected loop.
-        // Seed a real take first: an empty card intentionally ignores PAUSA.
-        nm2Engine.toggleRecording(1);
+        // PAUSA likewise owns only the RESPIRO loop and never gates the live
+        // sax. Seed a short audio take; a missing take intentionally ignores
+        // the pad.
+        std::vector<float> nm2SaxTake(
+            static_cast<std::size_t>(nm2BlockSize), 0.04f);
+        const float* nm2SaxInput = nm2SaxTake.data();
+        nm2Engine.toggleRecording(nm2SaxMemory);
+        for (int block = 0; block < 4; ++block)
+        {
+            nm2Output.clear();
+            process(nm2Engine, &nm2SaxInput, 1, nm2Output.pointers.data(),
+                    EcosystemEngine::logicalOutputBusCount, nm2BlockSize);
+        }
+        nm2Engine.toggleRecording(nm2SaxMemory);
         renderNm2();
-        nm2Engine.enqueueMidiMessage(juce::MidiMessage::noteOn(2, 52, 0.7f));
-        renderNm2();
-        nm2Engine.enqueueMidiMessage(juce::MidiMessage::noteOff(2, 52));
-        renderNm2();
-        nm2Engine.toggleRecording(1);
-        renderNm2();
-        const auto pauseLoopWasSeeded = nm2Engine.hasMaterial(1)
-            && nm2Engine.getEventCount(1) == 2;
+        const auto pauseLoopWasSeeded = nm2Engine.hasMaterial(nm2SaxMemory)
+            && nm2Engine.getLengthSeconds(nm2SaxMemory) > 0.0;
         nm2Engine.releaseNm2Gestures();
-        nm2Engine.setGestureTarget(1);
+        nm2Engine.setGestureTarget(EcosystemEngine::bassLayerIndex);
         const auto pauseNote
             = nm2BaseNote + static_cast<int>(Nm2Gesture::pausa);
         nm2Engine.enqueueMidiMessage(
             juce::MidiMessage::noteOn(nm2Channel, pauseNote, 1.0f),
             MidiRole::nm2);
         nm2Engine.setGestureTarget(2);
-        const auto onlyCapturedLoopPaused
-            = ! nm2Engine.isLoopPlaying(1)
+        const auto onlySaxLoopPaused
+            = nm2Engine.isLoopPlaying(1)
             && nm2Engine.isLoopPlaying(2)
             && nm2Engine.isLoopPlaying(3)
-            && nm2Engine.isLoopPlaying(EcosystemEngine::midiMemoryCount);
+            && ! nm2Engine.isLoopPlaying(nm2SaxMemory);
         nm2Engine.enqueueMidiMessage(
             juce::MidiMessage::noteOff(nm2Channel, pauseNote), MidiRole::nm2);
         const auto pauseReleasedToPreviousPlay
-            = nm2Engine.isLoopPlaying(1);
+            = nm2Engine.isLoopPlaying(nm2SaxMemory);
         nm2Engine.setGestureTarget(1);
         nm2Engine.enqueueMidiMessage(
             juce::MidiMessage::noteOn(nm2Channel, pauseNote, 1.0f),
             MidiRole::nm2);
-        nm2Engine.setLoopPlaying(1, false);
+        nm2Engine.setLoopPlaying(nm2SaxMemory, false);
         nm2Engine.enqueueMidiMessage(
             juce::MidiMessage::noteOff(nm2Channel, pauseNote), MidiRole::nm2);
         const auto pauseDidNotOverrideNewUiIntent
-            = ! nm2Engine.isLoopPlaying(1);
-        nm2Engine.setLoopPlaying(1, true);
-        passed &= expect(pauseLoopWasSeeded && onlyCapturedLoopPaused
+            = ! nm2Engine.isLoopPlaying(nm2SaxMemory);
+        nm2Engine.setLoopPlaying(nm2SaxMemory, true);
+        passed &= expect(pauseLoopWasSeeded && onlySaxLoopPaused
                              && pauseReleasedToPreviousPlay
                              && pauseDidNotOverrideNewUiIntent
                              && nm2Engine.isLoopPlaying(1)
-                             && nm2Engine.isLoopPlaying(2),
-                         "PAUSA NM2 deve essere un overlay del solo loop catturato senza sovrascrivere la UI");
+                             && nm2Engine.isLoopPlaying(nm2SaxMemory),
+                         "PAUSA NM2 deve essere un overlay del solo loop RESPIRO senza sovrascrivere la UI");
 
         // The complete factory grid remains outside the recorder FIFO. An
         // armed memory must still wait at sample zero after every press and
@@ -5121,10 +5129,10 @@ int main()
         const auto panicReleasedEverything = [&]()
         {
             return nm2Engine.getNm2HeldMask() == 0u
-                && ! nm2Engine.isFreeTailEnabled(1)
-                && ! nm2Engine.isFreezeEnabled(1)
-                && ! nm2Engine.isEchoThrowEnabled(1)
-                && nm2Engine.isLoopPlaying(1);
+                && ! nm2Engine.isFreeTailEnabled(nm2SaxMemory)
+                && ! nm2Engine.isFreezeEnabled(nm2SaxMemory)
+                && ! nm2Engine.isEchoThrowEnabled(nm2SaxMemory)
+                && nm2Engine.isLoopPlaying(nm2SaxMemory);
         };
         pressPanicSet();
         nm2Engine.enqueueMidiMessage(
@@ -5212,6 +5220,8 @@ int main()
         auto nm2AudioFinite = true;
         auto nm2AudioPeak = 0.0f;
         auto bassStayedBitIdentical = true;
+        auto ombraKeptAmbientBitIdentical = false;
+        auto ombraChangedSax = false;
         const auto inspectPair = [&]()
         {
             nm2AudioFinite &= activeOutput.finite(probeBlockSize)
@@ -5239,6 +5249,29 @@ int main()
                 MidiRole::nm2);
             renderPair();
             inspectPair();
+            if (index == static_cast<int>(
+                    EcosystemEngine::Nm2Gesture::ombra))
+            {
+                ombraKeptAmbientBitIdentical = std::equal(
+                    activeOutput.storage[EcosystemEngine::ambientLeftBus].begin(),
+                    activeOutput.storage[EcosystemEngine::ambientLeftBus].end(),
+                    referenceOutput.storage[EcosystemEngine::ambientLeftBus].begin())
+                    && std::equal(
+                        activeOutput.storage[EcosystemEngine::ambientRightBus].begin(),
+                        activeOutput.storage[EcosystemEngine::ambientRightBus].end(),
+                        referenceOutput.storage[EcosystemEngine::ambientRightBus].begin());
+                auto saxDifference = 0.0f;
+                for (const auto channel : { EcosystemEngine::saxLeftBus,
+                                            EcosystemEngine::saxRightBus })
+                {
+                    const auto channelIndex = static_cast<std::size_t>(channel);
+                    for (int sample = 0; sample < probeBlockSize; ++sample)
+                        saxDifference += std::abs(
+                            activeOutput.storage[channelIndex][static_cast<std::size_t>(sample)]
+                            - referenceOutput.storage[channelIndex][static_cast<std::size_t>(sample)]);
+                }
+                ombraChangedSax = saxDifference > 0.0001f;
+            }
             active.enqueueMidiMessage(
                 juce::MidiMessage::noteOff(
                     EcosystemEngine::nm2MidiChannel, note),
@@ -5250,6 +5283,8 @@ int main()
                          "i 18 gesti NM2 devono produrre audio finito con headroom");
         passed &= expect(bassStayedBitIdentical,
                          "i gesti NM2 devono lasciare BASSO bit-identico al riferimento");
+        passed &= expect(ombraKeptAmbientBitIdentical && ombraChangedSax,
+                         "i colori NM2 devono elaborare SAX/RESPIRO senza tingere i loop ambiente");
     }
 
     EcosystemEngine scenarioEngine;
