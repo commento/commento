@@ -207,9 +207,24 @@ bool looksLikeModel12Midi(const juce::String& name)
 bool looksLikeNm2Midi(const juce::String& name)
 {
     return name.containsIgnoreCase("nm2")
+        || name.containsIgnoreCase("noise machine 2")
+        || name.containsIgnoreCase("noise machine")
         || name.containsIgnoreCase("this is noise")
         || name.containsIgnoreCase("this.is.noise")
-        || name.containsIgnoreCase("thisisnoise");
+        || name.containsIgnoreCase("thisisnoise")
+        || (name.containsIgnoreCase("noise")
+            && name.containsIgnoreCase("midi"));
+}
+
+bool canBeNm2FallbackEndpoint(const juce::String& name)
+{
+    return name.isNotEmpty()
+        && ! isMidiControlEndpoint(name)
+        && ! looksLikeKeyStepMidi(name)
+        && ! looksLikeModel12(name)
+        && ! name.containsIgnoreCase("midi through")
+        && ! name.containsIgnoreCase("midi thru")
+        && ! name.containsIgnoreCase("Microsoft GS");
 }
 
 bool looksLikeBluetoothMidiEndpoint(const juce::String& description)
@@ -1495,6 +1510,7 @@ void MainComponent::configureKeyStepMidi()
     juce::String keyStepIdentifier;
     juce::String model12Identifier;
     auto nm2IsBluetooth = false;
+    auto nm2UsesFallback = false;
 
     for (const auto& device : devices)
     {
@@ -1524,6 +1540,32 @@ void MainComponent::configureKeyStepMidi()
         }
     }
 
+    // Firmware/Web-App and ALSA/BLE bridges do not always expose the same
+    // product name. The old, known-good build happened to see "NM2"; after a
+    // remap the same hardware can appear as "Noise Machine 2" or as a bridge
+    // port. If there is exactly one otherwise-unclaimed musical input, adopt
+    // it instead of disabling every unknown endpoint and receiving no MIDI at
+    // all. Multiple unknown inputs remain untouched to avoid guessing onstage.
+    if (nm2MidiInputIdentifier.isEmpty())
+    {
+        juce::Array<juce::MidiDeviceInfo> fallbackCandidates;
+        for (const auto& device : devices)
+            if (device.identifier != keyStepIdentifier
+                && device.identifier != model12Identifier
+                && canBeNm2FallbackEndpoint(device.name))
+                fallbackCandidates.add(device);
+
+        if (fallbackCandidates.size() == 1)
+        {
+            const auto& fallback = fallbackCandidates.getReference(0);
+            nm2MidiInputIdentifier = fallback.identifier;
+            nm2MidiInputName = fallback.name;
+            nm2IsBluetooth = looksLikeBluetoothMidiEndpoint(
+                fallback.name + " " + fallback.identifier);
+            nm2UsesFallback = true;
+        }
+    }
+
     nm2InputWasPresent = nm2MidiInputIdentifier.isNotEmpty();
     nm2IdentifierHash.store(nm2MidiInputIdentifier.hashCode64(),
                             std::memory_order_relaxed);
@@ -1547,7 +1589,8 @@ void MainComponent::configureKeyStepMidi()
     if (model12MidiInputName.isNotEmpty())
         activeSources.add("MODEL 12");
     if (nm2MidiInputName.isNotEmpty())
-        activeSources.add(nm2IsBluetooth ? "NM2 BLE" : "NM2");
+        activeSources.add(nm2UsesFallback ? "NM2? FALLBACK"
+                          : (nm2IsBluetooth ? "NM2 BLE" : "NM2"));
 
     // The NM2 is recognised only by the name its endpoint exposes. When that
     // name does not match, the port is never enabled and the controller looks
@@ -1565,7 +1608,8 @@ void MainComponent::configureKeyStepMidi()
 
     auto nm2Text = nm2MidiInputName.isEmpty()
         ? juce::String("\nNM2: ATTESA USB / BLE")
-        : "\nNM2: PRONTO  /  " + nm2MidiInputName;
+        : "\nNM2: PRONTO  /  " + nm2MidiInputName
+            + (nm2UsesFallback ? "  /  PORTA UNICA RICONOSCIUTA" : "");
     if (nm2MidiInputName.isEmpty() && ! unmatchedEndpoints.isEmpty())
     {
         constexpr auto maximumListed = 4;

@@ -24,12 +24,11 @@ constexpr std::uint32_t saxFootswitchNumberMask = 0xffu;
 
 // Depth a colour reaches from the pad alone, before the player moves the
 // instrument. At 1.0 the pad already gives everything and the tilt is inert,
-// which is the default: a pad has to hit at full force, and on BLE the CC
-// stream the sensor produces competes with the Note Offs of the pads
-// themselves. Lower this to hand the remaining travel to the movement of the
-// instrument - 0.70 is a strong, clearly audible range - once the link has
-// been shown to keep up, ideally over USB-C.
-constexpr float nm2TiltBaseDepth = 1.00f;
+// so the remaining travel can be handed to movement of the instrument.
+// Without any tilt CC the engine deliberately stays at 1.0, preserving the
+// original pad-only behaviour. Once the sensor is seen, 0.70 gives a strong,
+// clearly audible range; USB-C remains preferable to BLE for dense CC streams.
+constexpr float nm2TiltBaseDepth = 0.70f;
 // Fraction of the sensor's range, away from the pose held when the phrase
 // started, that reaches full depth. About a fifth of the travel keeps the
 // gesture inside a movement a player can make while still playing.

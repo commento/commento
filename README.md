@@ -226,13 +226,12 @@ Il sensore di movimento e' l'unica dimensione continua disponibile, ed e' propri
 il gesto naturale di chi ha il controller montato sul sax. Commento legge i due
 assi di fabbrica, `CC 74` e `CC 75`, e li usa come **profondita'** dei colori.
 
-**Di fabbrica il tilt e' neutro**: `nm2TiltBaseDepth` vale `1.0`, quindi il pad
-da solo da' gia' tutto e muovere lo strumento non cambia nulla. E' voluto. Un
-pad deve colpire a piena forza, e su BLE il flusso continuo di CC del sensore
-compete con i `Note Off` dei pad: un `Note Off` perso su PAUSA lasciava RESPIRO
-in pausa permanente. Per attivare la modulazione basta abbassare quella
-costante in [`EcosystemEngine.cpp`](Source/Engine/EcosystemEngine.cpp) - `0.70`
-da' un intervallo ampio e chiaramente udibile - preferibilmente su USB-C.
+Quando Commento non ha ancora ricevuto dati dal sensore, i pad mantengono il
+comportamento originale al **100%**. Appena arriva `CC 74` o `CC 75`, il tilt
+diventa attivo: `nm2TiltBaseDepth` vale `0.70`, quindi il pad parte dal 70% e il
+movimento porta gradualmente il colore fino al 100%. L'intervallo e' ampio e
+chiaramente udibile; per il flusso continuo dei CC e i `Note Off` dei pad e'
+preferibile USB-C a BLE.
 
 Quando e' attiva, la profondita' e' misurata rispetto alla posa in cui si
 trovava lo strumento quando e' iniziata la frase, non rispetto a una posizione
@@ -255,9 +254,9 @@ PULSO, FERRO, ORBITA - e non sui gesti strutturali: GELO, PAUSA, CODA LIBERA,
 ECO THROW, ABISSO, CADUTA e SCATTO restano a piena forza, perche' un comando di
 trasporto premuto a meta' non vorrebbe dire nulla.
 
-**Il tilt non puo' mai indebolire un gesto rispetto alla sola pressione**, ed e'
-questo che i test verificano. Se il sensore resta disabilitato non arriva mai un
-CC e non cambia comunque nulla.
+Se il sensore resta disabilitato non arriva alcun CC e non cambia nulla. Quando
+e' attivo, la posa catturata vale il 70% e il movimento approfondisce soltanto
+il colore, fino al 100%; non lo fa mai scendere sotto il valore di partenza.
 
 PLAY dallo schermo ha sempre la precedenza su un pad NM2 tenuto premuto: se
 PAUSA resta incastrata per un `Note Off` perso, premere PLAY LOOP libera il

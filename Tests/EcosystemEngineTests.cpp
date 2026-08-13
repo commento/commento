@@ -5232,10 +5232,10 @@ int main()
             = ! silentSensorEngine.hasNm2TiltSensor()
             && std::abs(silentSensorEngine.getNm2TiltDepth() - 1.0f) < 0.001f;
 
-        // With the sensor alive the depth is still measured from the pose held
-        // when the phrase started, but the base depth ships at full: a pad has
-        // to hit at full force by default, so moving the instrument must never
-        // make a gesture quieter than pressing the pad alone.
+        // With the sensor alive the depth is measured from the pose held when
+        // the phrase started. The pad supplies 70% at rest and movement hands
+        // it the remaining travel; without sensor CC the legacy 100% behaviour
+        // above remains unchanged.
         const auto sendTilt = [&](int value)
         {
             nm2Engine.enqueueMidiMessage(
@@ -5260,11 +5260,11 @@ int main()
         renderNm2();
         passed &= expect(depthIsFullWithoutSensor
                              && nm2Engine.hasNm2TiltSensor()
-                             && restingDepth >= movedDepth - 0.0001f
-                             && movedDepth <= 1.0f
-                             && restingDepth <= 1.0f
-                             && std::abs(restingDepth - 1.0f) < 0.001f,
-                         "il tilt non deve mai indebolire un gesto rispetto alla sola pressione");
+                             && restingDepth > 0.68f
+                             && restingDepth < 0.72f
+                             && movedDepth > 0.98f
+                             && movedDepth <= 1.0f,
+                         "il tilt deve approfondire il gesto dal 70% al 100%");
 
         // A reference pose captured for one phrase must not leak into the
         // next: after the pads are released a new press starts from wherever
