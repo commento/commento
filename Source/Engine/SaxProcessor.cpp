@@ -17,16 +17,18 @@ constexpr double stutterReleaseSeconds = 0.090;
 
 // SCINTILLE. A short slice of the recent sax is replayed at 2x: an octave-
 // tape gesture rather than a continuous pitch shifter. The source is low-pass
-// filtered before decimation, voices have long edges, and at most two can
+// filtered before decimation, voices have soft edges, and at most two can
 // overlap, keeping both aliasing and Pi 5 cost bounded.
-constexpr double sparkleBufferSeconds = 0.30;
-constexpr double sparkleDurationSeconds = 0.14;
-constexpr double sparkleAttackSeconds = 0.035;
-constexpr double sparkleReleaseSeconds = 0.075;
-constexpr double sparkleCooldownSeconds = 0.33;
-constexpr double sparkleLookbackSeconds = 0.18;
+constexpr double sparkleBufferSeconds = 0.42;
+constexpr double sparkleDurationSeconds = 0.24;
+constexpr double sparkleAttackSeconds = 0.018;
+constexpr double sparkleReleaseSeconds = 0.105;
+constexpr double sparkleCooldownSeconds = 0.44;
+constexpr double sparkleLookbackSeconds = 0.30;
 constexpr float sparkleOnsetThreshold = 0.020f;
-constexpr float sparkleMaximumGain = 0.24f;
+constexpr float sparkleMaximumGain = 0.64f;
+constexpr float sparkleDryDuck = 0.24f;
+constexpr double sparkleMinimumRetriggerSeconds = 0.085;
 
 // Exactly transparent below the knee.  The rational curve has unit slope at
 // the knee and approaches the ceiling asymptotically, so it only intervenes
@@ -66,13 +68,17 @@ constexpr float sparkleMaximumGain = 0.24f;
 
 void SaxProcessor::prepare(double newSampleRate, int maximumBlockSize)
 {
-    juce::ignoreUnused(maximumBlockSize);
     sampleRate = newSampleRate > 0.0 ? newSampleRate : 48000.0;
     delayBuffer.setSize(2, static_cast<int>(std::ceil(sampleRate * 8.0)) + 2,
                         false, true, false);
+    // Channel 2 stores only the onset envelope. It lets a pad pressed before
+    // the player blows wait for genuinely audible history instead of
+    // spending its one-shot trigger on a silent slice.
     sparkleBuffer.setSize(
-        2, static_cast<int>(std::ceil(sampleRate * sparkleBufferSeconds)) + 8,
+        3, static_cast<int>(std::ceil(sampleRate * sparkleBufferSeconds)) + 8,
         false, true, false);
+    transportDryBuffer.setSize(2, juce::jmax(1, maximumBlockSize),
+                               false, true, false);
     delayLevel.reset(sampleRate, 0.045);
     delayLevel.setCurrentAndTargetValue(requestedDelayLevel);
     freezeMix.reset(sampleRate, freezeAttackSeconds);
@@ -81,8 +87,11 @@ void SaxProcessor::prepare(double newSampleRate, int maximumBlockSize)
     excitationGain.setCurrentAndTargetValue(requestedFreeTail ? 0.0f : 1.0f);
     stutterMix.reset(sampleRate, stutterAttackSeconds);
     stutterMix.setCurrentAndTargetValue(requestedStutter ? 1.0f : 0.0f);
-    sparkleMix.reset(sampleRate, 0.080);
+    sparkleMix.reset(sampleRate, 0.018);
     sparkleMix.setCurrentAndTargetValue(requestedSparkleAmount);
+    loopTransportFxMix.reset(sampleRate, 0.001);
+    loopTransportFxMix.setCurrentAndTargetValue(
+        loopTransportPlaying ? 1.0f : 0.0f);
     reverb.setSampleRate(sampleRate);
     prepared = true;
     resetTails();
@@ -195,9 +204,27 @@ void SaxProcessor::setSparkleAmount(float amount) noexcept
 
     const auto current = sparkleMix.getCurrentValue();
     sparkleMix.reset(sampleRate,
-                     requestedSparkleAmount > current ? 0.080 : 0.65);
+                     requestedSparkleAmount > current ? 0.018 : 0.55);
     sparkleMix.setCurrentAndTargetValue(current);
     sparkleMix.setTargetValue(requestedSparkleAmount);
+}
+
+void SaxProcessor::setLoopTransportPlaying(bool shouldPlay) noexcept
+{
+    if (loopTransportPlaying == shouldPlay
+        && std::abs(loopTransportFxMix.getTargetValue()
+                    - (shouldPlay ? 1.0f : 0.0f)) <= 0.0001f)
+        return;
+
+    loopTransportPlaying = shouldPlay;
+    const auto current = loopTransportFxMix.getCurrentValue();
+    // PAUSA must be obvious, but never a hard cut. PLAY reintroduces the
+    // scene a little more slowly so a preserved tail cannot jump forward.
+    loopTransportFxMix.reset(sampleRate, shouldPlay ? 0.180 : 0.100);
+    loopTransportFxMix.setCurrentAndTargetValue(current);
+    loopTransportFxMix.setTargetValue(shouldPlay ? 1.0f : 0.0f);
+    if (shouldPlay && requestedSparkleAmount > 0.0001f)
+        sparkleTriggerPending = true;
 }
 
 void SaxProcessor::updateTargets(bool immediately, double transitionSeconds)
@@ -302,7 +329,8 @@ float SaxProcessor::readSparkleSource(int channel,
 void SaxProcessor::process(juce::AudioBuffer<float>& buffer, int numSamples)
 {
     if (! prepared || buffer.getNumChannels() < 2
-        || delayBuffer.getNumSamples() < 4 || numSamples <= 0)
+        || delayBuffer.getNumSamples() < 4 || numSamples <= 0
+        || transportDryBuffer.getNumSamples() < numSamples)
         return;
 
     if (incrementalClearPosition >= 0)
@@ -325,6 +353,7 @@ void SaxProcessor::process(juce::AudioBuffer<float>& buffer, int numSamples)
         excitationGain.skip(numSamples);
         stutterMix.skip(numSamples);
         sparkleMix.skip(numSamples);
+        loopTransportFxMix.skip(numSamples);
         buffer.clear(0, numSamples);
         return;
     }
@@ -346,11 +375,13 @@ void SaxProcessor::process(juce::AudioBuffer<float>& buffer, int numSamples)
     const auto freezeEnd = freezeMix.skip(numSamples);
     const auto stutterStart = stutterMix.getCurrentValue();
     const auto stutterEnd = stutterMix.skip(numSamples);
-    const auto stutterActive = juce::jmax(stutterStart, stutterEnd) > 0.00001f;
+    const auto stutterActive = loopTransportPlaying
+        && juce::jmax(stutterStart, stutterEnd) > 0.00001f;
     // SCATTO has to hold the line still for the short window to recirculate,
     // so it engages the same freeze GELO uses instead of owning a second one.
-    const auto freezeActive = juce::jmax(freezeStart, freezeEnd) > 0.00001f
-                           || stutterActive;
+    const auto freezeActive = loopTransportPlaying
+        && (juce::jmax(freezeStart, freezeEnd) > 0.00001f
+            || stutterActive);
     const auto stutterTap = juce::jlimit(
         1.0f, maximumDelay,
         stutterMilliseconds * 0.001f * static_cast<float>(sampleRate));
@@ -367,10 +398,14 @@ void SaxProcessor::process(juce::AudioBuffer<float>& buffer, int numSamples)
             sampleRate * sparkleLookbackSeconds))));
     const auto sparkleCooldown = juce::jmax(
         1, static_cast<int>(std::round(sampleRate * sparkleCooldownSeconds)));
-    // Four cascaded one-poles at 7.5 kHz suppress material that would fold
+    const auto sparkleMinimumRetrigger = juce::jmax(
+        1, static_cast<int>(std::round(
+            sampleRate * sparkleMinimumRetriggerSeconds)));
+    // Four cascaded one-poles suppress material that would fold
     // below Nyquist when the sparkle head advances at 2x. The state follows
-    // only the dry/pre-effect sax, never the generated octave.
-    const auto sparkleCutoff = juce::jmin(7500.0,
+    // only the dry/pre-effect sax, never the generated octave. The slightly
+    // higher cutoff keeps the octave bright without weakening alias rejection.
+    const auto sparkleCutoff = juce::jmin(9000.0,
                                           sampleRate * 0.20);
     const auto sparkleLowPassCoefficient = static_cast<float>(1.0 - std::exp(
         -juce::MathConstants<double>::twoPi * sparkleCutoff / sampleRate));
@@ -390,8 +425,29 @@ void SaxProcessor::process(juce::AudioBuffer<float>& buffer, int numSamples)
             voice.readPosition += static_cast<double>(sparkleBufferSize);
         voice.gain = sparkleMaximumGain;
         const auto goesLeft = (sparkleVoiceCursor & 1) == 0;
-        voice.panLeft = goesLeft ? 1.0f : 0.35f;
-        voice.panRight = goesLeft ? 0.35f : 1.0f;
+        voice.panLeft = goesLeft ? 1.0f : 0.45f;
+        voice.panRight = goesLeft ? 0.45f : 1.0f;
+        // Model 12 input 7/8 is often a microphone connected to only one of
+        // the two sockets. A fixed (L + R) * 0.5 downmix made that common
+        // case another 6 dB quieter. Select the occupied side when one side
+        // clearly dominates; use a centre-safe sum for genuine stereo.
+        const auto leftEnergy = sparkleInputEnergy[0];
+        const auto rightEnergy = sparkleInputEnergy[1];
+        if (leftEnergy > rightEnergy * 4.0f)
+        {
+            voice.sourceLeftGain = 1.0f;
+            voice.sourceRightGain = 0.0f;
+        }
+        else if (rightEnergy > leftEnergy * 4.0f)
+        {
+            voice.sourceLeftGain = 0.0f;
+            voice.sourceRightGain = 1.0f;
+        }
+        else
+        {
+            voice.sourceLeftGain = 0.5f;
+            voice.sourceRightGain = 0.5f;
+        }
         sparkleTriggerCooldownSamples = sparkleCooldown;
     };
 
@@ -414,6 +470,11 @@ void SaxProcessor::process(juce::AudioBuffer<float>& buffer, int numSamples)
                 }
                 sparkleBuffer.setSample(channel, sparkleWritePosition,
                                         filteredSource);
+                constexpr auto energyFollow = 0.0005f;
+                sparkleInputEnergy[static_cast<std::size_t>(channel)]
+                    += energyFollow
+                    * (source[channel] * source[channel]
+                       - sparkleInputEnergy[static_cast<std::size_t>(channel)]);
                 inputMagnitude = juce::jmax(inputMagnitude,
                                              std::abs(source[channel]));
             }
@@ -423,20 +484,42 @@ void SaxProcessor::process(juce::AudioBuffer<float>& buffer, int numSamples)
 
         const auto sparkleAmount = juce::jlimit(
             0.0f, 1.0f, sparkleMix.getNextValue());
-        const auto armed = requestedSparkleAmount > 0.0001f;
+        const auto armed = loopTransportPlaying
+            && requestedSparkleAmount > 0.0001f;
         constexpr auto onsetAttack = 0.15f;
         const auto onsetRelease = static_cast<float>(1.0 - std::exp(
             -1.0 / (0.060 * sampleRate)));
         sparkleOnsetEnvelope += (inputMagnitude - sparkleOnsetEnvelope)
             * (inputMagnitude > sparkleOnsetEnvelope
                 ? onsetAttack : onsetRelease);
+        if (sparkleBufferSize > 0)
+            sparkleBuffer.setSample(2, sparkleWritePosition,
+                                    sparkleOnsetEnvelope);
         const auto onset = sparkleOnsetEnvelope >= sparkleOnsetThreshold
             && sparklePreviousEnvelope < sparkleOnsetThreshold;
+        // Preserve attacks that arrive while the previous particle is still
+        // in its cooldown. The queued onset fires as soon as the voice budget
+        // is available; it is not lost at a block or cooldown boundary.
+        if (armed && onset)
+            sparkleTriggerPending = true;
         if (sparkleTriggerCooldownSamples > 0)
             --sparkleTriggerCooldownSamples;
+        const auto recentAttack = inputMagnitude
+            > juce::jmax(sparkleOnsetThreshold * 1.35f,
+                         sparkleOnsetEnvelope * 1.75f);
+        auto historyReadPosition = static_cast<double>(
+            sparkleWritePosition - sparkleLookback);
+        if (historyReadPosition < 0.0)
+            historyReadPosition += static_cast<double>(sparkleBufferSize);
+        const auto hasAudibleMaterial = readSparkleSource(
+            2, historyReadPosition) >= sparkleOnsetThreshold * 0.45f;
         if (armed && sparkleValidSamples >= sparkleLookback + 4
-            && sparkleTriggerCooldownSamples <= 0
-            && (sparkleTriggerPending || onset))
+            && hasAudibleMaterial
+            && ((sparkleTriggerCooldownSamples <= 0
+                 && (sparkleTriggerPending || onset))
+                || (recentAttack
+                    && sparkleTriggerCooldownSamples
+                        <= sparkleCooldown - sparkleMinimumRetrigger)))
         {
             startSparkleVoice();
             sparkleTriggerPending = false;
@@ -445,6 +528,7 @@ void SaxProcessor::process(juce::AudioBuffer<float>& buffer, int numSamples)
 
         float sparkleLeft = 0.0f;
         float sparkleRight = 0.0f;
+        float sparklePresence = 0.0f;
         for (auto& voice : sparkleVoices)
         {
             if (! voice.active)
@@ -461,12 +545,16 @@ void SaxProcessor::process(juce::AudioBuffer<float>& buffer, int numSamples)
                     static_cast<float>(sparkleRelease));
             envelope = juce::jlimit(0.0f, 1.0f, envelope);
             envelope = envelope * envelope * (3.0f - 2.0f * envelope);
-            const auto mono = 0.5f
-                * (readSparkleSource(0, voice.readPosition)
-                   + readSparkleSource(1, voice.readPosition));
+            const auto mono
+                = readSparkleSource(0, voice.readPosition)
+                    * voice.sourceLeftGain
+                + readSparkleSource(1, voice.readPosition)
+                    * voice.sourceRightGain;
             const auto gain = voice.gain * sparkleAmount * envelope;
             sparkleLeft += mono * gain * voice.panLeft;
             sparkleRight += mono * gain * voice.panRight;
+            sparklePresence = juce::jmax(sparklePresence,
+                                         sparkleAmount * envelope);
             voice.readPosition += 2.0;
             while (voice.readPosition >= static_cast<double>(sparkleBufferSize))
                 voice.readPosition -= static_cast<double>(sparkleBufferSize);
@@ -588,7 +676,13 @@ void SaxProcessor::process(juce::AudioBuffer<float>& buffer, int numSamples)
         const auto rightMovement = 1.0f - tremolo
             + tremolo * (0.5f - 0.5f * tremoloWave);
         const auto gain = outputGain.getNextValue();
-        const auto dryGain = (1.0f - wet * 0.28f) * (1.0f - tailFocus * 0.94f);
+        transportDryBuffer.setSample(0, sample,
+                                     filtered[0] * leftMovement * gain);
+        transportDryBuffer.setSample(1, sample,
+                                     filtered[1] * rightMovement * gain);
+        const auto dryGain = (1.0f - wet * 0.28f)
+            * (1.0f - tailFocus * 0.94f)
+            * (1.0f - sparklePresence * sparkleDryDuck);
         left[sample] = (filtered[0] * dryGain + echoLeft * wet)
                      * leftMovement * gain + sparkleLeft;
         right[sample] = (filtered[1] * dryGain + echoRight * wet)
@@ -606,6 +700,20 @@ void SaxProcessor::process(juce::AudioBuffer<float>& buffer, int numSamples)
     }
 
     reverb.processStereo(left, right, numSamples);
+
+    // Once the stored loop has faded to zero, PAUSA also withdraws the
+    // shared delay/reverb/SCINTILLE tail that otherwise made it sound as if
+    // RESPIRO were still playing. The current live sax remains available via
+    // the already-filtered dry reference. DSP state keeps advancing, so PLAY
+    // can return without resetting an eight-second delay in the audio thread.
+    for (int sample = 0; sample < numSamples; ++sample)
+    {
+        const auto effectMix = loopTransportFxMix.getNextValue();
+        const auto dryLeft = transportDryBuffer.getSample(0, sample);
+        const auto dryRight = transportDryBuffer.getSample(1, sample);
+        left[sample] = dryLeft + effectMix * (left[sample] - dryLeft);
+        right[sample] = dryRight + effectMix * (right[sample] - dryRight);
+    }
 
     // Samples below the knee are copied bit-for-bit.  Only exceptional reverb
     // peaks are caught, replacing the old always-on tanh coloration.
@@ -639,6 +747,7 @@ void SaxProcessor::advanceMorph(int numSamples) noexcept
     advance(excitationGain);
     advance(stutterMix);
     advance(sparkleMix);
+    advance(loopTransportFxMix);
     advance(modulationDepthSamples);
     advance(modulationRateHz);
     advance(tremoloDepth);
@@ -668,6 +777,7 @@ void SaxProcessor::resetTails()
     writePosition = 0;
     sparkleWritePosition = 0;
     sparkleCaptureLowPass = {};
+    sparkleInputEnergy = {};
     sparkleVoices = {};
     sparkleOnsetEnvelope = 0.0f;
     sparklePreviousEnvelope = 0.0f;
@@ -692,6 +802,7 @@ void SaxProcessor::beginIncrementalTailReset() noexcept
     writePosition = 0;
     sparkleWritePosition = 0;
     sparkleCaptureLowPass = {};
+    sparkleInputEnergy = {};
     sparkleVoices = {};
     sparkleOnsetEnvelope = 0.0f;
     sparklePreviousEnvelope = 0.0f;

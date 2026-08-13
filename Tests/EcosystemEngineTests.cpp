@@ -4899,6 +4899,78 @@ int main()
                          "PLAY/NUTRI/DIMENTICA RESPIRO devono restare fluidi, finiti e senza mutare il live input");
     }
 
+    // In FX SCENA the stored RESPIRO may have excited a long delay/reverb
+    // before its playhead is paused. The transport therefore crossfades the
+    // shared tail back to the filtered live path: the pause becomes audible
+    // without hard-cutting a sax note that is still being played.
+    {
+        constexpr auto pauseFxSampleRate = 8000.0;
+        constexpr auto pauseFxBlockSize = 128;
+        SaxProcessor pauseFx;
+        pauseFx.setPatch(CommentoScenarios::get(0).sax);
+        pauseFx.prepare(pauseFxSampleRate, pauseFxBlockSize);
+        juce::AudioBuffer<float> buffer(2, pauseFxBlockSize);
+        int64_t samplePosition = 0;
+        auto stayedFinite = true;
+        auto maximumStep = 0.0f;
+        std::array<float, 2> previous {};
+        auto hasPrevious = false;
+        const auto render = [&](float amplitude)
+        {
+            for (int channel = 0; channel < 2; ++channel)
+                for (int sample = 0; sample < pauseFxBlockSize; ++sample)
+                    buffer.setSample(channel, sample,
+                        amplitude * static_cast<float>(std::sin(
+                            juce::MathConstants<double>::twoPi * 173.0
+                            * static_cast<double>(samplePosition + sample)
+                            / pauseFxSampleRate)));
+            samplePosition += pauseFxBlockSize;
+            pauseFx.process(buffer, pauseFxBlockSize);
+            auto peak = 0.0f;
+            for (int channel = 0; channel < 2; ++channel)
+            {
+                for (int sample = 0; sample < pauseFxBlockSize; ++sample)
+                {
+                    const auto value = buffer.getSample(channel, sample);
+                    stayedFinite &= std::isfinite(value);
+                    const auto preceding = sample > 0
+                        ? buffer.getSample(channel, sample - 1)
+                        : previous[static_cast<std::size_t>(channel)];
+                    if (hasPrevious || sample > 0)
+                        maximumStep = std::max(maximumStep,
+                                               std::abs(value - preceding));
+                    peak = std::max(peak, std::abs(value));
+                }
+                previous[static_cast<std::size_t>(channel)]
+                    = buffer.getSample(channel, pauseFxBlockSize - 1);
+            }
+            hasPrevious = true;
+            return peak;
+        };
+
+        for (int block = 0; block < 80; ++block)
+            render(0.12f);
+        pauseFx.setLoopTransportPlaying(false);
+        const auto pauseStartPeak = render(0.0f);
+        auto settledPausePeak = 0.0f;
+        for (int block = 0; block < 40; ++block)
+            settledPausePeak = render(0.0f);
+        auto pausedLivePeak = 0.0f;
+        for (int block = 0; block < 12; ++block)
+            pausedLivePeak = std::max(pausedLivePeak, render(0.07f));
+        pauseFx.setLoopTransportPlaying(true);
+        auto resumedPeak = 0.0f;
+        for (int block = 0; block < 20; ++block)
+            resumedPeak = std::max(resumedPeak, render(0.07f));
+
+        passed &= expect(stayedFinite && pauseStartPeak > 0.0001f
+                             && settledPausePeak < 0.0001f
+                             && pausedLivePeak > 0.002f
+                             && resumedPeak > 0.002f
+                             && maximumStep < 0.20f,
+                         "PAUSA RESPIRO in FX SCENA deve sfumare la coda, preservare il sax live e riprendere senza click");
+    }
+
     // The NM2 is a source-aware wearable gate. Its factory notes 60..77 are
     // deliberately interchangeable: the scenario, rather than pad position,
     // chooses one named macro assembled from already allocated sax DSP.
@@ -5648,8 +5720,14 @@ int main()
         float peak = 0.0f;
         float maximumStep = 0.0f;
         double octaveMagnitude = 0.0;
+        double activeOctaveMagnitude = 0.0;
         double referenceOctaveMagnitude = 0.0;
+        double sourceMagnitude = 0.0;
+        double activeSourceMagnitude = 0.0;
+        double differenceRms = 0.0;
+        double referenceRms = 0.0;
         double lateOctaveMagnitude = 0.0;
+        int longestAudibleOctaveRun = 0;
         float ambientDifference = 0.0f;
         float bassDifference = 0.0f;
     };
@@ -5730,6 +5808,7 @@ int main()
         auto hasPrevious = false;
         int64_t samplePosition = 0;
         std::array<std::vector<float>, 2> octaveDifference;
+        std::array<std::vector<float>, 2> activeSignal;
         std::array<std::vector<float>, 2> referenceSignal;
         std::array<std::vector<float>, 2> lateDifference;
         SparklePadProbe result;
@@ -5785,6 +5864,7 @@ int main()
                     {
                         octaveDifference[pairIndex].push_back(
                             activeSample - referenceSample);
+                        activeSignal[pairIndex].push_back(activeSample);
                         referenceSignal[pairIndex].push_back(referenceSample);
                     }
                     if (captureLate)
@@ -5840,20 +5920,94 @@ int main()
                 result.octaveMagnitude,
                 toneMagnitude(octaveDifference[channel], octaveFrequency,
                               sparkleSampleRate));
+            result.activeOctaveMagnitude = std::max(
+                result.activeOctaveMagnitude,
+                toneMagnitude(activeSignal[channel], octaveFrequency,
+                              sparkleSampleRate));
             result.referenceOctaveMagnitude = std::max(
                 result.referenceOctaveMagnitude,
                 toneMagnitude(referenceSignal[channel], octaveFrequency,
+                              sparkleSampleRate));
+            result.sourceMagnitude = std::max(
+                result.sourceMagnitude,
+                toneMagnitude(referenceSignal[channel], sourceFrequency,
+                              sparkleSampleRate));
+            result.activeSourceMagnitude = std::max(
+                result.activeSourceMagnitude,
+                toneMagnitude(activeSignal[channel], sourceFrequency,
                               sparkleSampleRate));
             result.lateOctaveMagnitude = std::max(
                 result.lateOctaveMagnitude,
                 toneMagnitude(lateDifference[channel], octaveFrequency,
                               sparkleSampleRate));
         }
+
+        double differenceSquareSum = 0.0;
+        double referenceSquareSum = 0.0;
+        std::size_t energySampleCount = 0;
+        for (std::size_t channel = 0; channel < 2; ++channel)
+        {
+            for (std::size_t sample = 0;
+                 sample < octaveDifference[channel].size(); ++sample)
+            {
+                const auto difference = static_cast<double>(
+                    octaveDifference[channel][sample]);
+                const auto referenceSample = static_cast<double>(
+                    referenceSignal[channel][sample]);
+                differenceSquareSum += difference * difference;
+                referenceSquareSum += referenceSample * referenceSample;
+                ++energySampleCount;
+            }
+        }
+        if (energySampleCount > 0)
+        {
+            result.differenceRms = std::sqrt(
+                differenceSquareSum
+                / static_cast<double>(energySampleCount));
+            result.referenceRms = std::sqrt(
+                referenceSquareSum
+                / static_cast<double>(energySampleCount));
+        }
+
+        constexpr auto pitchWindowSamples = sparkleBlockSize * 2;
+        auto currentAudibleRun = 0;
+        for (std::size_t start = 0;
+             start + pitchWindowSamples <= octaveDifference[0].size();
+             start += sparkleBlockSize)
+        {
+            auto windowOctave = 0.0;
+            auto windowSource = 0.0;
+            for (std::size_t channel = 0; channel < 2; ++channel)
+            {
+                const auto begin = octaveDifference[channel].begin()
+                    + static_cast<std::ptrdiff_t>(start);
+                const auto end = begin + pitchWindowSamples;
+                const std::vector<float> differenceWindow(begin, end);
+                const auto referenceBegin = referenceSignal[channel].begin()
+                    + static_cast<std::ptrdiff_t>(start);
+                const std::vector<float> referenceWindow(
+                    referenceBegin, referenceBegin + pitchWindowSamples);
+                windowOctave = std::max(
+                    windowOctave,
+                    toneMagnitude(differenceWindow, octaveFrequency,
+                                  sparkleSampleRate));
+                windowSource = std::max(
+                    windowSource,
+                    toneMagnitude(referenceWindow, sourceFrequency,
+                                  sparkleSampleRate));
+            }
+            const auto isAudible = windowOctave >= 0.003
+                && windowOctave >= windowSource * 0.18;
+            currentAudibleRun = isAudible ? currentAudibleRun + 1 : 0;
+            result.longestAudibleOctaveRun = std::max(
+                result.longestAudibleOctaveRun, currentAudibleRun);
+        }
         return result;
     };
 
     {
         auto allPadsCreatedOctave = true;
+        auto allPadsMadeTheOctaveClearlyAudible = true;
         auto allPadsStayedSafe = true;
         auto allPadsReleased = true;
         double weakestOctave = std::numeric_limits<double>::max();
@@ -5871,12 +6025,40 @@ int main()
             allPadsCreatedOctave &= probe.octaveMagnitude > 0.0008
                 && probe.octaveMagnitude
                     > probe.referenceOctaveMagnitude * 1.8 + 0.0002;
+            // A merely detectable FFT bin is not a playable effect. These
+            // ratios keep the generated octave within roughly 10--12 dB of
+            // the played note, make the whole gesture materially different
+            // in energy, and require at least 80 ms above the local pitch
+            // threshold (32 ms Hann window, 16 ms hop, four in a row).
+            const auto octaveToDry = probe.octaveMagnitude
+                / std::max(0.0000001, probe.sourceMagnitude);
+            const auto audibleOctaveToSource
+                = probe.activeOctaveMagnitude
+                / std::max(0.0000001, probe.activeSourceMagnitude);
+            const auto deltaToReference = probe.differenceRms
+                / std::max(0.0000001, probe.referenceRms);
+            const auto clearlyAudible = octaveToDry >= 0.30
+                && audibleOctaveToSource >= 0.26
+                && deltaToReference >= 0.32
+                && probe.activeOctaveMagnitude
+                    >= probe.referenceOctaveMagnitude * 5.0 + 0.002
+                && probe.longestAudibleOctaveRun >= 4;
+            allPadsMadeTheOctaveClearlyAudible &= clearlyAudible;
             allPadsStayedSafe &= probe.finite && probe.peak < 0.90f
                 && probe.maximumStep < 0.12f;
             allPadsReleased &= probe.lateOctaveMagnitude
                 < probe.octaveMagnitude * 0.70 + 0.0001;
             if (pad == 0)
                 bedProbe = probe;
+            if (! clearlyAudible)
+                std::cerr << "SCINTILLE pad " << pad
+                          << ": +12/dry=" << octaveToDry
+                          << ", +12 output/fondamentale="
+                          << audibleOctaveToSource
+                          << ", delta RMS/reference="
+                          << deltaToReference
+                          << ", run finestre="
+                          << probe.longestAudibleOctaveRun << '\n';
         }
         const auto clean = probeSparklePad(
             0, EcosystemEngine::SaxPathMode::cleanLooper, false);
@@ -5885,6 +6067,8 @@ int main()
                              && strongestOctave
                                 <= weakestOctave * 1.05 + 0.0001,
                          "tutti i 18 pad NM2 in AURORA devono produrre la stessa scintilla +12");
+        passed &= expect(allPadsMadeTheOctaveClearlyAudible,
+                         "SCINTILLE +12 deve essere chiaramente udibile rispetto al sax dry, non soltanto misurabile");
         passed &= expect(allPadsStayedSafe && allPadsReleased,
                          "SCINTILLE deve avere attacco/rilascio fluidi, terminare e conservare headroom");
         passed &= expect(clean.octaveMagnitude
@@ -5894,6 +6078,583 @@ int main()
         passed &= expect(bedProbe.ambientDifference < 0.000001f
                              && bedProbe.bassDifference < 0.000001f,
                          "SCINTILLE deve modificare soltanto sax e RESPIRO, mai ambiente o basso");
+    }
+
+    // Holding one pad is also an armed performance state: after the first
+    // particle, a genuinely new sax onset must launch another +12 event
+    // without requiring a pad re-press. Use a different pitch after a long
+    // silent gap so neither the first particle nor its reverb can satisfy the
+    // second-frequency assertion accidentally.
+    {
+        using MidiRole = EcosystemEngine::MidiInputRole;
+        constexpr auto retriggerSampleRate = 8000.0;
+        constexpr auto retriggerBlockSize = 128;
+        constexpr auto firstFrequency = 197.0;
+        constexpr auto secondFrequency = 277.0;
+        constexpr auto pitchWindowSamples = retriggerBlockSize * 2;
+
+        using StereoSignal = std::array<std::vector<float>, 2>;
+        struct CapturedSparkleEvent
+        {
+            StereoSignal difference;
+            StereoSignal active;
+            StereoSignal reference;
+        };
+        struct SparkleEventMetrics
+        {
+            double octave = 0.0;
+            double activeOctave = 0.0;
+            double referenceOctave = 0.0;
+            double source = 0.0;
+            double activeSource = 0.0;
+            int longestAudibleRun = 0;
+        };
+
+        const auto measureSparkleEvent
+            = [&](const CapturedSparkleEvent& event, double sourceFrequency)
+        {
+            SparkleEventMetrics metrics;
+            const auto octaveFrequency = sourceFrequency * 2.0;
+            auto currentAudibleRun = 0;
+            for (std::size_t start = 0;
+                 start + pitchWindowSamples <= event.difference[0].size();
+                 start += retriggerBlockSize)
+            {
+                auto windowOctave = 0.0;
+                auto windowActiveOctave = 0.0;
+                auto windowReferenceOctave = 0.0;
+                auto windowSource = 0.0;
+                auto windowActiveSource = 0.0;
+                for (std::size_t channel = 0; channel < 2; ++channel)
+                {
+                    const auto differenceBegin
+                        = event.difference[channel].begin()
+                        + static_cast<std::ptrdiff_t>(start);
+                    const std::vector<float> differenceWindow(
+                        differenceBegin,
+                        differenceBegin + pitchWindowSamples);
+                    const auto activeBegin = event.active[channel].begin()
+                        + static_cast<std::ptrdiff_t>(start);
+                    const std::vector<float> activeWindow(
+                        activeBegin, activeBegin + pitchWindowSamples);
+                    const auto referenceBegin
+                        = event.reference[channel].begin()
+                        + static_cast<std::ptrdiff_t>(start);
+                    const std::vector<float> referenceWindow(
+                        referenceBegin,
+                        referenceBegin + pitchWindowSamples);
+                    windowOctave = std::max(
+                        windowOctave,
+                        toneMagnitude(differenceWindow, octaveFrequency,
+                                      retriggerSampleRate));
+                    windowActiveOctave = std::max(
+                        windowActiveOctave,
+                        toneMagnitude(activeWindow, octaveFrequency,
+                                      retriggerSampleRate));
+                    windowReferenceOctave = std::max(
+                        windowReferenceOctave,
+                        toneMagnitude(referenceWindow, octaveFrequency,
+                                      retriggerSampleRate));
+                    windowSource = std::max(
+                        windowSource,
+                        toneMagnitude(referenceWindow, sourceFrequency,
+                                      retriggerSampleRate));
+                    windowActiveSource = std::max(
+                        windowActiveSource,
+                        toneMagnitude(activeWindow, sourceFrequency,
+                                      retriggerSampleRate));
+                }
+                metrics.octave = std::max(metrics.octave, windowOctave);
+                metrics.activeOctave = std::max(
+                    metrics.activeOctave, windowActiveOctave);
+                metrics.referenceOctave = std::max(
+                    metrics.referenceOctave, windowReferenceOctave);
+                metrics.source = std::max(metrics.source, windowSource);
+                metrics.activeSource = std::max(
+                    metrics.activeSource, windowActiveSource);
+                const auto audible = windowSource >= 0.01
+                    && windowOctave >= 0.003
+                    && windowOctave >= windowSource * 0.18;
+                currentAudibleRun = audible
+                    ? currentAudibleRun + 1 : 0;
+                metrics.longestAudibleRun = std::max(
+                    metrics.longestAudibleRun, currentAudibleRun);
+            }
+            return metrics;
+        };
+
+        auto active = std::make_unique<EcosystemEngine>();
+        auto reference = std::make_unique<EcosystemEngine>();
+        const auto auroraScenario = nm2ScenarioIndex("AURORA");
+        for (auto* engine : { active.get(), reference.get() })
+        {
+            engine->setScenarioIndex(auroraScenario);
+            engine->setSaxPathMode(
+                EcosystemEngine::SaxPathMode::sceneEffects);
+            engine->setSaxStereoInput(false);
+            engine->prepare(retriggerSampleRate, retriggerBlockSize);
+        }
+
+        OutputBlock<EcosystemEngine::logicalOutputBusCount> activeOutput(
+            retriggerBlockSize);
+        OutputBlock<EcosystemEngine::logicalOutputBusCount> referenceOutput(
+            retriggerBlockSize);
+        std::vector<float> saxInput(
+            static_cast<std::size_t>(retriggerBlockSize));
+        const float* saxInputPointer = saxInput.data();
+        double oscillatorPhase = 0.0;
+        int phraseSample = 0;
+        const auto renderPair = [&](float amplitude, double frequency,
+                                    bool fadeIn,
+                                    CapturedSparkleEvent* capture)
+        {
+            for (int sample = 0; sample < retriggerBlockSize; ++sample)
+            {
+                auto envelope = 1.0f;
+                if (fadeIn)
+                {
+                    const auto progress = juce::jlimit(
+                        0.0f, 1.0f,
+                        static_cast<float>(phraseSample)
+                            / static_cast<float>(retriggerSampleRate * 0.020));
+                    envelope = 0.5f - 0.5f * std::cos(
+                        juce::MathConstants<float>::pi * progress);
+                }
+                saxInput[static_cast<std::size_t>(sample)]
+                    = amplitude * envelope
+                    * static_cast<float>(std::sin(oscillatorPhase));
+                oscillatorPhase += juce::MathConstants<double>::twoPi
+                    * frequency / retriggerSampleRate;
+                if (oscillatorPhase >= juce::MathConstants<double>::twoPi)
+                    oscillatorPhase -= juce::MathConstants<double>::twoPi;
+                ++phraseSample;
+            }
+            activeOutput.clear();
+            referenceOutput.clear();
+            process(*active, &saxInputPointer, 1,
+                    activeOutput.pointers.data(),
+                    EcosystemEngine::logicalOutputBusCount,
+                    retriggerBlockSize);
+            process(*reference, &saxInputPointer, 1,
+                    referenceOutput.pointers.data(),
+                    EcosystemEngine::logicalOutputBusCount,
+                    retriggerBlockSize);
+            if (capture == nullptr)
+                return;
+            for (int pairChannel = 0; pairChannel < 2; ++pairChannel)
+            {
+                const auto outputChannel = pairChannel == 0
+                    ? EcosystemEngine::saxLeftBus
+                    : EcosystemEngine::saxRightBus;
+                const auto outputIndex
+                    = static_cast<std::size_t>(outputChannel);
+                const auto pairIndex
+                    = static_cast<std::size_t>(pairChannel);
+                for (int sample = 0; sample < retriggerBlockSize; ++sample)
+                {
+                    const auto sampleIndex
+                        = static_cast<std::size_t>(sample);
+                    const auto activeSample
+                        = activeOutput.storage[outputIndex][sampleIndex];
+                    const auto referenceSample
+                        = referenceOutput.storage[outputIndex][sampleIndex];
+                    capture->difference[pairIndex].push_back(
+                        activeSample - referenceSample);
+                    capture->active[pairIndex].push_back(activeSample);
+                    capture->reference[pairIndex].push_back(referenceSample);
+                }
+            }
+        };
+
+        for (int block = 0; block < 40; ++block)
+            renderPair(0.14f, firstFrequency, false, nullptr);
+        active->enqueueMidiMessage(
+            juce::MidiMessage::noteOn(
+                EcosystemEngine::nm2MidiChannel,
+                EcosystemEngine::nm2BaseNote, 1.0f),
+            MidiRole::nm2);
+        CapturedSparkleEvent firstEvent;
+        for (int block = 0; block < 20; ++block)
+            renderPair(0.14f, firstFrequency, false, &firstEvent);
+
+        CapturedSparkleEvent quietGap;
+        for (int block = 0; block < 48; ++block)
+            renderPair(0.0f, firstFrequency, false,
+                       block >= 40 ? &quietGap : nullptr);
+        const auto stayedArmed = active->getNm2HeldPadCount() == 1
+            && active->getNm2LatchedScenarioIndex() == auroraScenario;
+
+        oscillatorPhase = 0.0;
+        phraseSample = 0;
+        CapturedSparkleEvent retriggeredEvent;
+        for (int block = 0; block < 32; ++block)
+            renderPair(0.14f, secondFrequency, true, &retriggeredEvent);
+
+        active->enqueueMidiMessage(
+            juce::MidiMessage::noteOff(
+                EcosystemEngine::nm2MidiChannel,
+                EcosystemEngine::nm2BaseNote),
+            MidiRole::nm2);
+        renderPair(0.0f, secondFrequency, false, nullptr);
+
+        const auto first = measureSparkleEvent(firstEvent, firstFrequency);
+        const auto retriggered = measureSparkleEvent(
+            retriggeredEvent, secondFrequency);
+        const auto gapAtSecondOctave = measureSparkleEvent(
+            quietGap, secondFrequency).octave;
+        const auto firstWasStrong = first.octave
+                >= first.source * 0.30
+            && first.activeOctave >= first.activeSource * 0.26
+            && first.longestAudibleRun >= 4;
+        const auto onsetRetriggeredClearly = retriggered.octave
+                >= retriggered.source * 0.30
+            && retriggered.activeOctave
+                >= retriggered.activeSource * 0.26
+            && retriggered.octave
+                >= retriggered.referenceOctave * 5.0 + 0.002
+            && retriggered.octave >= gapAtSecondOctave * 3.0 + 0.002
+            && retriggered.longestAudibleRun >= 3;
+        if (! firstWasStrong || ! onsetRetriggeredClearly)
+            std::cerr << "SCINTILLE retrigger: primo +12/dry="
+                      << first.octave
+                            / std::max(0.0000001, first.source)
+                      << " run=" << first.longestAudibleRun
+                      << ", secondo +12/dry="
+                      << retriggered.octave
+                            / std::max(0.0000001, retriggered.source)
+                      << " output/fondamentale="
+                      << retriggered.activeOctave
+                            / std::max(0.0000001,
+                                       retriggered.activeSource)
+                      << " run=" << retriggered.longestAudibleRun
+                      << '\n';
+        passed &= expect(stayedArmed && firstWasStrong
+                             && onsetRetriggeredClearly
+                             && active->getNm2HeldPadCount() == 0,
+                         "SCINTILLE deve retriggerare un nuovo +12 udibile su un nuovo attacco mentre il pad resta premuto");
+    }
+
+    // The normal gesture is press, then blow. Pressing over silence must not
+    // spend the queued particle on an empty history buffer. Once the played
+    // phrase reaches the fixed lookback, the pending request must become a
+    // clearly audible octave. Probe both possible one-sided Model 12 input
+    // conditions while stereo IN 7/8 remains enabled: neither side may lose
+    // 6 dB through an unconditional (L + R) * 0.5 downmix.
+    {
+        using MidiRole = EcosystemEngine::MidiInputRole;
+        constexpr auto pressFirstSampleRate = 8000.0;
+        constexpr auto pressFirstBlockSize = 128;
+        constexpr auto sourceFrequency = 197.0;
+        constexpr auto octaveFrequency = sourceFrequency * 2.0;
+
+        struct PressFirstProbe
+        {
+            bool finite = true;
+            bool stayedArmed = true;
+            double octaveMagnitude = 0.0;
+            double activeOctaveMagnitude = 0.0;
+            double referenceOctaveMagnitude = 0.0;
+            double sourceMagnitude = 0.0;
+            double activeSourceMagnitude = 0.0;
+            double silentDifferenceRms = 0.0;
+            double soundingDifferenceRms = 0.0;
+            double soundingReferenceRms = 0.0;
+            int longestAudibleRun = 0;
+        };
+
+        const auto probePressThenBlow = [&](int occupiedInputChannel)
+        {
+            auto active = std::make_unique<EcosystemEngine>();
+            auto reference = std::make_unique<EcosystemEngine>();
+            const auto auroraScenario = nm2ScenarioIndex("AURORA");
+            for (auto* engine : { active.get(), reference.get() })
+            {
+                engine->setScenarioIndex(auroraScenario);
+                engine->setSaxPathMode(
+                    EcosystemEngine::SaxPathMode::sceneEffects);
+                // This is the Raspberry Pi factory state: physical IN 7 and
+                // IN 8 form a stereo pair even when the mic occupies one jack.
+                engine->setSaxStereoInput(true);
+                engine->prepare(pressFirstSampleRate, pressFirstBlockSize);
+            }
+
+            OutputBlock<EcosystemEngine::logicalOutputBusCount> activeOutput(
+                pressFirstBlockSize);
+            OutputBlock<EcosystemEngine::logicalOutputBusCount> referenceOutput(
+                pressFirstBlockSize);
+            std::array<std::vector<float>, 2> saxInput;
+            std::array<const float*, 2> saxInputPointers {};
+            for (std::size_t channel = 0; channel < 2; ++channel)
+            {
+                saxInput[channel].assign(
+                    static_cast<std::size_t>(pressFirstBlockSize), 0.0f);
+                saxInputPointers[channel] = saxInput[channel].data();
+            }
+            int64_t samplePosition = 0;
+            std::array<std::vector<float>, 2> differenceSignal;
+            std::array<std::vector<float>, 2> activeSignal;
+            std::array<std::vector<float>, 2> referenceSignal;
+            double silentDifferenceSquareSum = 0.0;
+            std::size_t silentSampleCount = 0;
+            PressFirstProbe result;
+
+            const auto renderPair = [&](bool sounding,
+                                        bool captureSounding,
+                                        bool checkArmed = true)
+            {
+                for (int sample = 0; sample < pressFirstBlockSize; ++sample)
+                {
+                    const auto value = sounding
+                        ? 0.14f * static_cast<float>(std::sin(
+                            juce::MathConstants<double>::twoPi
+                            * sourceFrequency
+                            * static_cast<double>(samplePosition + sample)
+                            / pressFirstSampleRate))
+                        : 0.0f;
+                    saxInput[0][static_cast<std::size_t>(sample)] =
+                        occupiedInputChannel == 0 ? value : 0.0f;
+                    saxInput[1][static_cast<std::size_t>(sample)] =
+                        occupiedInputChannel == 1 ? value : 0.0f;
+                }
+                samplePosition += pressFirstBlockSize;
+                activeOutput.clear();
+                referenceOutput.clear();
+                process(*active, saxInputPointers.data(), 2,
+                        activeOutput.pointers.data(),
+                        EcosystemEngine::logicalOutputBusCount,
+                        pressFirstBlockSize);
+                process(*reference, saxInputPointers.data(), 2,
+                        referenceOutput.pointers.data(),
+                        EcosystemEngine::logicalOutputBusCount,
+                        pressFirstBlockSize);
+                result.finite &= activeOutput.finite(pressFirstBlockSize)
+                    && referenceOutput.finite(pressFirstBlockSize);
+                if (checkArmed)
+                    result.stayedArmed
+                        &= active->getNm2HeldPadCount() == 1
+                        && active->getNm2LatchedScenarioIndex()
+                            == auroraScenario;
+                for (int pairChannel = 0; pairChannel < 2; ++pairChannel)
+                {
+                    const auto outputChannel = pairChannel == 0
+                        ? EcosystemEngine::saxLeftBus
+                        : EcosystemEngine::saxRightBus;
+                    const auto outputIndex
+                        = static_cast<std::size_t>(outputChannel);
+                    const auto pairIndex
+                        = static_cast<std::size_t>(pairChannel);
+                    for (int sample = 0; sample < pressFirstBlockSize;
+                         ++sample)
+                    {
+                        const auto position
+                            = static_cast<std::size_t>(sample);
+                        const auto activeSample
+                            = activeOutput.storage[outputIndex][position];
+                        const auto referenceSample
+                            = referenceOutput.storage[outputIndex][position];
+                        const auto difference
+                            = activeSample - referenceSample;
+                        if (! sounding)
+                        {
+                            silentDifferenceSquareSum
+                                += static_cast<double>(difference)
+                                   * static_cast<double>(difference);
+                            ++silentSampleCount;
+                        }
+                        if (captureSounding)
+                        {
+                            differenceSignal[pairIndex].push_back(difference);
+                            activeSignal[pairIndex].push_back(activeSample);
+                            referenceSignal[pairIndex].push_back(
+                                referenceSample);
+                        }
+                    }
+                }
+            };
+
+            active->enqueueMidiMessage(
+                juce::MidiMessage::noteOn(
+                    EcosystemEngine::nm2MidiChannel,
+                    EcosystemEngine::nm2BaseNote + occupiedInputChannel,
+                    1.0f),
+                MidiRole::nm2);
+            // More than one callback proves this is not a same-block ordering
+            // accident. It is still shorter than the particle history.
+            for (int block = 0; block < 12; ++block)
+                renderPair(false, false);
+            for (int block = 0; block < 52; ++block)
+                renderPair(true, block >= 8);
+            active->enqueueMidiMessage(
+                juce::MidiMessage::noteOff(
+                    EcosystemEngine::nm2MidiChannel,
+                    EcosystemEngine::nm2BaseNote + occupiedInputChannel),
+                MidiRole::nm2);
+            renderPair(false, false, false);
+
+            double soundingDifferenceSquareSum = 0.0;
+            double soundingReferenceSquareSum = 0.0;
+            std::size_t soundingSampleCount = 0;
+            for (std::size_t channel = 0; channel < 2; ++channel)
+            {
+                result.octaveMagnitude = std::max(
+                    result.octaveMagnitude,
+                    toneMagnitude(differenceSignal[channel],
+                                  octaveFrequency,
+                                  pressFirstSampleRate));
+                result.activeOctaveMagnitude = std::max(
+                    result.activeOctaveMagnitude,
+                    toneMagnitude(activeSignal[channel],
+                                  octaveFrequency,
+                                  pressFirstSampleRate));
+                result.referenceOctaveMagnitude = std::max(
+                    result.referenceOctaveMagnitude,
+                    toneMagnitude(referenceSignal[channel],
+                                  octaveFrequency,
+                                  pressFirstSampleRate));
+                result.sourceMagnitude = std::max(
+                    result.sourceMagnitude,
+                    toneMagnitude(referenceSignal[channel],
+                                  sourceFrequency,
+                                  pressFirstSampleRate));
+                result.activeSourceMagnitude = std::max(
+                    result.activeSourceMagnitude,
+                    toneMagnitude(activeSignal[channel],
+                                  sourceFrequency,
+                                  pressFirstSampleRate));
+                for (std::size_t sample = 0;
+                     sample < differenceSignal[channel].size(); ++sample)
+                {
+                    const auto difference = static_cast<double>(
+                        differenceSignal[channel][sample]);
+                    const auto referenceSample = static_cast<double>(
+                        referenceSignal[channel][sample]);
+                    soundingDifferenceSquareSum += difference * difference;
+                    soundingReferenceSquareSum
+                        += referenceSample * referenceSample;
+                    ++soundingSampleCount;
+                }
+            }
+            if (silentSampleCount > 0)
+                result.silentDifferenceRms = std::sqrt(
+                    silentDifferenceSquareSum
+                    / static_cast<double>(silentSampleCount));
+            if (soundingSampleCount > 0)
+            {
+                result.soundingDifferenceRms = std::sqrt(
+                    soundingDifferenceSquareSum
+                    / static_cast<double>(soundingSampleCount));
+                result.soundingReferenceRms = std::sqrt(
+                    soundingReferenceSquareSum
+                    / static_cast<double>(soundingSampleCount));
+            }
+
+            constexpr auto pitchWindowSamples = pressFirstBlockSize * 2;
+            auto currentAudibleRun = 0;
+            for (std::size_t start = 0;
+                 start + pitchWindowSamples <= differenceSignal[0].size();
+                 start += pressFirstBlockSize)
+            {
+                auto windowOctave = 0.0;
+                auto windowSource = 0.0;
+                for (std::size_t channel = 0; channel < 2; ++channel)
+                {
+                    const auto differenceBegin
+                        = differenceSignal[channel].begin()
+                        + static_cast<std::ptrdiff_t>(start);
+                    const std::vector<float> differenceWindow(
+                        differenceBegin,
+                        differenceBegin + pitchWindowSamples);
+                    const auto referenceBegin
+                        = referenceSignal[channel].begin()
+                        + static_cast<std::ptrdiff_t>(start);
+                    const std::vector<float> referenceWindow(
+                        referenceBegin,
+                        referenceBegin + pitchWindowSamples);
+                    windowOctave = std::max(
+                        windowOctave,
+                        toneMagnitude(differenceWindow, octaveFrequency,
+                                      pressFirstSampleRate));
+                    windowSource = std::max(
+                        windowSource,
+                        toneMagnitude(referenceWindow, sourceFrequency,
+                                      pressFirstSampleRate));
+                }
+                // A one-sided physical input naturally makes the dry
+                // reference appear on only one output, while SCINTILLE is
+                // deliberately panned to both. Duration is therefore judged
+                // against the generated event's absolute, already-audible
+                // threshold here; the full-take octave/source ratios below
+                // still enforce pitch balance strictly.
+                const auto audible = windowOctave >= 0.003;
+                currentAudibleRun = audible
+                    ? currentAudibleRun + 1 : 0;
+                result.longestAudibleRun = std::max(
+                    result.longestAudibleRun, currentAudibleRun);
+            }
+            return result;
+        };
+
+        const auto input7 = probePressThenBlow(0);
+        const auto input8 = probePressThenBlow(1);
+        const auto stronglyAudible = [](const PressFirstProbe& probe)
+        {
+            return probe.finite && probe.stayedArmed
+                // AURORA itself owns a diffuse reverb state, so the relevant
+                // press-before-blow contract is not absolute silence at its
+                // output. Instead, the later strong pitched event proves the
+                // queued sparkle was not consumed during these silent blocks.
+                && probe.octaveMagnitude
+                    >= probe.sourceMagnitude * 0.30
+                && probe.activeOctaveMagnitude
+                    >= probe.activeSourceMagnitude * 0.26
+                && probe.octaveMagnitude
+                    >= probe.referenceOctaveMagnitude * 5.0 + 0.002
+                && probe.soundingDifferenceRms
+                    >= probe.soundingReferenceRms * 0.32
+                && probe.longestAudibleRun >= 4;
+        };
+        const auto oneSidedInputsMatch
+            = std::min(input7.octaveMagnitude, input8.octaveMagnitude) > 0.0
+            && std::max(input7.octaveMagnitude, input8.octaveMagnitude)
+                <= std::min(input7.octaveMagnitude, input8.octaveMagnitude)
+                    * 1.08 + 0.0001;
+        if (! stronglyAudible(input7) || ! stronglyAudible(input8)
+            || ! oneSidedInputsMatch)
+            std::cerr << "SCINTILLE press-before-blow: IN7 +12/dry="
+                      << input7.octaveMagnitude
+                            / std::max(0.0000001, input7.sourceMagnitude)
+                      << " output/fond="
+                      << input7.activeOctaveMagnitude
+                            / std::max(0.0000001,
+                                       input7.activeSourceMagnitude)
+                      << " deltaRMS/ref="
+                      << input7.soundingDifferenceRms
+                            / std::max(0.0000001,
+                                       input7.soundingReferenceRms)
+                      << " silent=" << input7.silentDifferenceRms
+                      << " run=" << input7.longestAudibleRun
+                      << ", IN8 +12/dry="
+                      << input8.octaveMagnitude
+                            / std::max(0.0000001, input8.sourceMagnitude)
+                      << " output/fond="
+                      << input8.activeOctaveMagnitude
+                            / std::max(0.0000001,
+                                       input8.activeSourceMagnitude)
+                      << " deltaRMS/ref="
+                      << input8.soundingDifferenceRms
+                            / std::max(0.0000001,
+                                       input8.soundingReferenceRms)
+                      << " silent=" << input8.silentDifferenceRms
+                      << " run=" << input8.longestAudibleRun
+                      << ", IN7/IN8 livello="
+                      << input7.octaveMagnitude
+                            / std::max(0.0000001,
+                                       input8.octaveMagnitude)
+                      << '\n';
+        passed &= expect(stronglyAudible(input7)
+                             && stronglyAudible(input8)
+                             && oneSidedInputsMatch,
+                         "SCINTILLE deve conservare il trigger premuto prima del soffio e non perdere 6 dB con il sax su un solo ingresso stereo 7/8");
     }
 
     // A short deterministic stress take puts material in all three MIDI

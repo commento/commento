@@ -317,12 +317,15 @@ durante il collegamento.
 - usare **PAUSA LOOP** nella pagina GESTI per fermare soltanto la memoria
   selezionata e **PLAY LOOP** per farla ripartire. MAREA, RADICE, SCINTILLA e
   RESPIRO hanno stati indipendenti; BASSO LIVE non e' un loop e il controllo e'
-  disabilitato. Il pulsante resta disabilitato anche mentre quella memoria e'
-  armata o in registrazione. La card mostra `IN PAUSA`, la fase resta congelata
+  disabilitato. Per i loop MIDI resta disabilitato mentre la memoria e' armata
+  o in registrazione; su RESPIRO, durante NUTRI, diventa **FERMA NUTRI E PAUSA**
+  ed esegue entrambe le azioni con un solo tocco. La card mostra `IN PAUSA`, la fase resta congelata
   e PLAY riprende dallo stesso punto. La pausa non cancella il materiale e non
   viene salvata al riavvio. Su RESPIRO si ferma soltanto il loop registrato: il
-  monitor del sax live continua. SEMINA, RISCRIVI, NUTRI e DIMENTICA riportano
-  automaticamente quella memoria in PLAY;
+  monitor del sax live continua; nel percorso FX SCENA anche la coda condivisa
+  sfuma in 100 ms, cosi' non maschera lo stop, e rientra dolcemente con PLAY.
+  SEMINA, RISCRIVI, NUTRI e DIMENTICA riportano automaticamente quella memoria
+  in PLAY;
 - attivare **ASCOLTO** per far arretrare gradualmente soltanto il bus AMBIENTE
   quando il sax live entra, fino a circa 7 dB. BASSO LIVE, RESPIRO e routing
   fisico restano invariati; il follower riusa il meter sax del blocco precedente

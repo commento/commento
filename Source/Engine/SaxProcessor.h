@@ -16,6 +16,7 @@ public:
     void setFreeTailEnabled(bool shouldReleaseTail) noexcept;
     void setStutterEnabled(bool shouldStutter) noexcept;
     void setSparkleAmount(float amount) noexcept;
+    void setLoopTransportPlaying(bool shouldPlay) noexcept;
     void process(juce::AudioBuffer<float>& buffer, int numSamples);
     void advanceMorph(int numSamples) noexcept;
     void resetTails();
@@ -34,6 +35,7 @@ private:
     SaxPatch patch;
     juce::AudioBuffer<float> delayBuffer;
     juce::AudioBuffer<float> sparkleBuffer;
+    juce::AudioBuffer<float> transportDryBuffer;
     juce::Reverb reverb;
     juce::SmoothedValue<float> toneCoefficient;
     juce::SmoothedValue<float> drive;
@@ -51,6 +53,8 @@ private:
     // under freeze the line simply recirculates that short window.
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> stutterMix;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> sparkleMix;
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear>
+        loopTransportFxMix;
     juce::SmoothedValue<float> modulationDepthSamples;
     juce::SmoothedValue<float> modulationRateHz;
     juce::SmoothedValue<float> tremoloDepth;
@@ -78,6 +82,7 @@ private:
     bool requestedFreeze = false;
     bool requestedFreeTail = false;
     bool requestedStutter = false;
+    bool loopTransportPlaying = true;
     bool delayMorphActive = false;
     bool prepared = false;
 
@@ -89,11 +94,14 @@ private:
         float gain = 0.0f;
         float panLeft = 1.0f;
         float panRight = 1.0f;
+        float sourceLeftGain = 0.5f;
+        float sourceRightGain = 0.5f;
         bool active = false;
     };
 
     std::array<SparkleVoice, 2> sparkleVoices {};
     std::array<std::array<float, 4>, 2> sparkleCaptureLowPass {};
+    std::array<float, 2> sparkleInputEnergy {};
     float sparkleOnsetEnvelope = 0.0f;
     float sparklePreviousEnvelope = 0.0f;
     int sparkleTriggerCooldownSamples = 0;

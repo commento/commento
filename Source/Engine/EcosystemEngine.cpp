@@ -3710,6 +3710,7 @@ void EcosystemEngine::renderAudioMemory(
         static_cast<std::size_t>(saxGestureIndex)];
     const auto saxLoopPlaying = loopPlayingApplied[
         static_cast<std::size_t>(saxGestureIndex)];
+    saxProcessor.setLoopTransportPlaying(saxLoopPlaying);
     if (renderFourHead && audioMemory.loopLength > 0)
         for (std::size_t head = 0; head < cosmosHeadPositions.size(); ++head)
         {

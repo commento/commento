@@ -878,8 +878,18 @@ MainComponent::MainComponent()
         const auto waitingForFirstNote = juce::isPositiveAndBelow(
                 selectedMemory, EcosystemEngine::midiMemoryCount)
             && engine.isWaitingForFirstNote(selectedMemory);
-        if (! isBass && engine.hasMaterial(selectedMemory)
-            && ! engine.isRecording(selectedMemory) && ! waitingForFirstNote)
+        const auto recording = engine.isRecording(selectedMemory);
+        const auto canStopSaxOverdub = selectedMemory
+                == EcosystemEngine::midiMemoryCount
+            && recording && engine.hasMaterial(selectedMemory);
+        if (canStopSaxOverdub)
+        {
+            engine.toggleRecording(selectedMemory);
+            engine.setLoopPlaying(selectedMemory, false);
+            updateControls();
+        }
+        else if (! isBass && engine.hasMaterial(selectedMemory)
+                 && ! recording && ! waitingForFirstNote)
         {
             engine.setLoopPlaying(selectedMemory,
                                   ! engine.isLoopPlaying(selectedMemory));
@@ -2847,10 +2857,15 @@ void MainComponent::updateControls()
     saxListenButton.setToggleState(listening > 0.005f,
                                    juce::dontSendNotification);
     const auto loopPlaying = isBass || engine.isLoopPlaying(selectedMemory);
-    loopTransportButton.setEnabled(! isBass && material && ! recording
+    const auto canStopSaxOverdub = selectedMemory
+            == EcosystemEngine::midiMemoryCount
+        && material && recording;
+    loopTransportButton.setEnabled(! isBass && material
+                                   && (! recording || canStopSaxOverdub)
                                    && ! waitingForFirstNote);
-    loopTransportButton.setButtonText(loopPlaying
-        ? "PAUSA LOOP" : "PLAY LOOP");
+    loopTransportButton.setButtonText(canStopSaxOverdub
+        ? "FERMA NUTRI E PAUSA"
+        : (loopPlaying ? "PAUSA LOOP" : "PLAY LOOP"));
     loopTransportButton.setToggleState(! loopPlaying,
                                        juce::dontSendNotification);
 
@@ -2862,6 +2877,12 @@ void MainComponent::updateControls()
         ? nm2LatchedScenario : engine.getScenarioIndex();
     const auto nm2ScenarioName = juce::String(
         CommentoScenarios::get(nm2DisplayScenario).name);
+    const auto sparkleNeedsSceneEffects = nm2GestureName == "SCINTILLE"
+        && engine.getSaxPathMode()
+            != EcosystemEngine::SaxPathMode::sceneEffects;
+    const auto sparklePathWarning = sparkleNeedsSceneEffects
+        ? juce::String("  /  SCINTILLE NON ATTIVA: IN CONNESSIONI SCEGLI FX SCENA E PREMI APPLICA AUDIO")
+        : juce::String();
     if (nm2HeldPadCount > 0)
     {
         const auto heldPads = juce::String(nm2HeldPadCount)
@@ -2869,10 +2890,12 @@ void MainComponent::updateControls()
         gesturesHintLabel.setText(
             "NM2  /  " + nm2GestureName + "  /  " + heldPads
                 + "  /  SCENA " + nm2ScenarioName
-                + "  /  RILASCIA TUTTI PER USCIRE",
+                + "  /  RILASCIA TUTTI PER USCIRE"
+                + sparklePathWarning,
             juce::dontSendNotification);
         gesturesHintLabel.setColour(juce::Label::textColourId,
-                                    juce::Colour(0xffffd08a));
+            sparkleNeedsSceneEffects ? juce::Colour(0xffff8f78)
+                                     : juce::Colour(0xffffd08a));
     }
     else
     {
@@ -2925,11 +2948,13 @@ void MainComponent::updateControls()
                 ? "NM2 PRONTO  /  " + nm2GestureName
                     + "  /  SCENA " + nm2ScenarioName
                     + "  /  QUALSIASI DEI 18 PAD"
+                    + sparklePathWarning
                 : "NM2 IN ATTESA  /  COLLEGA USB O ESPONI BLE MIDI  /  I GESTI TOUCH RESTANO ATTIVI")
                 + traffic,
             juce::dontSendNotification);
         gesturesHintLabel.setColour(juce::Label::textColourId,
-                                    juce::Colour(quietText));
+            sparkleNeedsSceneEffects ? juce::Colour(0xffff8f78)
+                                     : juce::Colour(quietText));
     }
 
     gestureTargetLabel.setText(
