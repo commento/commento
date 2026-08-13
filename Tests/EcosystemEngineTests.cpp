@@ -11,6 +11,7 @@
 #include <cmath>
 #include <iostream>
 #include <iterator>
+#include <limits>
 #include <memory>
 #include <set>
 #include <string>
@@ -4932,10 +4933,10 @@ int main()
                 &= profileName.find("CADUTA") == std::string::npos
                 && profileName.find("GRANA") == std::string::npos;
 
-            const std::array<float, 9> amounts {
+            const std::array<float, 10> amounts {
                 profile.fuzz, profile.dark, profile.radio, profile.narrow,
                 profile.empty, profile.blade, profile.pulse, profile.metal,
-                profile.orbit
+                profile.orbit, profile.sparkle
             };
             profilesAreBounded &= ! profileName.empty()
                 && std::all_of(amounts.begin(), amounts.end(),
@@ -4964,6 +4965,19 @@ int main()
             "GOCCE", "POLVERE", "SCIAME"
         };
         const auto scattoScenario = nm2ScenarioIndex("SCIAME");
+        const auto auroraScenario = nm2ScenarioIndex("AURORA");
+        auto sparkleOnlyBelongsToAurora = auroraScenario >= 0;
+        for (int index = 0; index < CommentoScenarios::count; ++index)
+        {
+            const auto& profile = CommentoScenarios::get(index).nm2;
+            const auto isAurora = index == auroraScenario;
+            sparkleOnlyBelongsToAurora
+                &= isAurora
+                    ? std::string(profile.name) == "SCINTILLE"
+                        && profile.sparkle > 0.0f
+                    : profile.sparkle == 0.0f
+                        && std::string(profile.name) != "SCINTILLE";
+        }
         passed &= expect(profilesAreBounded
                              && gestureNames.size()
                                     == static_cast<std::size_t>(
@@ -4978,6 +4992,8 @@ int main()
                              && std::string(CommentoScenarios::get(
                                     scattoScenario).nm2.name) == "SCATTO",
                          "SCATTO deve appartenere a SCIAME e lo stutter solo a GOCCE/POLVERE/SCIAME");
+        passed &= expect(sparkleOnlyBelongsToAurora,
+                         "SCINTILLE +12 deve appartenere soltanto ad AURORA");
     }
 
     // Every physical pad must expose exactly the same profile for each scene.
@@ -5617,6 +5633,418 @@ int main()
                          "FUZZ dolce NM2 non deve creare salti macroscopici");
         passed &= expect(gentleFuzzWasAudible && gentleFuzzReleased,
                          "FUZZ dolce NM2 deve essere udibile ma tornare al dry al rilascio");
+    }
+
+    // SCINTILLE is not a conventional continuous pitch shifter. It reads a
+    // short piece of the recent sax at twice its original speed, so a clean
+    // 197 Hz source must acquire a finite 394 Hz component only through the
+    // complete FX SCENA route. A Hann-weighted correlation is intentionally
+    // used instead of a broad FFT-bin assertion: it tolerates the particle's
+    // attack/release window and the scenario reverb without depending on an
+    // exact block boundary.
+    struct SparklePadProbe
+    {
+        bool finite = true;
+        float peak = 0.0f;
+        float maximumStep = 0.0f;
+        double octaveMagnitude = 0.0;
+        double referenceOctaveMagnitude = 0.0;
+        double lateOctaveMagnitude = 0.0;
+        float ambientDifference = 0.0f;
+        float bassDifference = 0.0f;
+    };
+
+    const auto toneMagnitude = [](const std::vector<float>& samples,
+                                  double frequency, double rate)
+    {
+        if (samples.size() < 2 || rate <= 0.0)
+            return 0.0;
+
+        double real = 0.0;
+        double imaginary = 0.0;
+        double windowSum = 0.0;
+        const auto denominator = static_cast<double>(samples.size() - 1);
+        for (std::size_t index = 0; index < samples.size(); ++index)
+        {
+            const auto position = static_cast<double>(index);
+            const auto window = 0.5 - 0.5 * std::cos(
+                juce::MathConstants<double>::twoPi * position
+                / denominator);
+            const auto angle = juce::MathConstants<double>::twoPi
+                * frequency * position / rate;
+            real += static_cast<double>(samples[index]) * window
+                  * std::cos(angle);
+            imaginary -= static_cast<double>(samples[index]) * window
+                       * std::sin(angle);
+            windowSum += window;
+        }
+        return windowSum > 0.0
+            ? 2.0 * std::hypot(real, imaginary) / windowSum : 0.0;
+    };
+
+    const auto probeSparklePad = [&](int pad,
+                                     EcosystemEngine::SaxPathMode pathMode,
+                                     bool renderMusicalBed)
+    {
+        using MidiRole = EcosystemEngine::MidiInputRole;
+        constexpr auto sparkleSampleRate = 8000.0;
+        constexpr auto sparkleBlockSize = 128;
+        constexpr auto warmupBlocks = 40;       // 640 ms fills recent history
+        constexpr auto heldBlocks = 12;         // 192 ms contains the particle
+        constexpr auto releaseBlocks = 192;     // 3.07 s for a settled tail
+        constexpr auto lateBlocks = 8;
+        constexpr auto sourceFrequency = 197.0;
+        constexpr auto octaveFrequency = sourceFrequency * 2.0;
+
+        auto active = std::make_unique<EcosystemEngine>();
+        auto reference = std::make_unique<EcosystemEngine>();
+        const auto auroraScenario = nm2ScenarioIndex("AURORA");
+        active->setScenarioIndex(auroraScenario);
+        reference->setScenarioIndex(auroraScenario);
+        active->setSaxPathMode(pathMode);
+        reference->setSaxPathMode(pathMode);
+        active->setSaxStereoInput(false);
+        reference->setSaxStereoInput(false);
+        active->prepare(sparkleSampleRate, sparkleBlockSize);
+        reference->prepare(sparkleSampleRate, sparkleBlockSize);
+
+        if (renderMusicalBed)
+        {
+            for (auto* engine : { active.get(), reference.get() })
+            {
+                engine->enqueueMidiMessage(
+                    juce::MidiMessage::noteOn(2, 57, 0.52f));
+                engine->enqueueMidiMessage(
+                    juce::MidiMessage::noteOn(5, 45, 0.58f));
+            }
+        }
+
+        OutputBlock<EcosystemEngine::logicalOutputBusCount> activeOutput(
+            sparkleBlockSize);
+        OutputBlock<EcosystemEngine::logicalOutputBusCount> referenceOutput(
+            sparkleBlockSize);
+        std::vector<float> saxInput(
+            static_cast<std::size_t>(sparkleBlockSize));
+        const float* saxInputPointer = saxInput.data();
+        std::array<float, 2> previousActive {};
+        auto hasPrevious = false;
+        int64_t samplePosition = 0;
+        std::array<std::vector<float>, 2> octaveDifference;
+        std::array<std::vector<float>, 2> referenceSignal;
+        std::array<std::vector<float>, 2> lateDifference;
+        SparklePadProbe result;
+
+        const auto renderPair = [&](bool captureParticle, bool captureLate)
+        {
+            for (int sample = 0; sample < sparkleBlockSize; ++sample)
+                saxInput[static_cast<std::size_t>(sample)]
+                    = 0.14f * static_cast<float>(std::sin(
+                        juce::MathConstants<double>::twoPi
+                        * sourceFrequency
+                        * static_cast<double>(samplePosition + sample)
+                        / sparkleSampleRate));
+            samplePosition += sparkleBlockSize;
+
+            activeOutput.clear();
+            referenceOutput.clear();
+            process(*active, &saxInputPointer, 1,
+                    activeOutput.pointers.data(),
+                    EcosystemEngine::logicalOutputBusCount,
+                    sparkleBlockSize);
+            process(*reference, &saxInputPointer, 1,
+                    referenceOutput.pointers.data(),
+                    EcosystemEngine::logicalOutputBusCount,
+                    sparkleBlockSize);
+            result.finite &= activeOutput.finite(sparkleBlockSize)
+                && referenceOutput.finite(sparkleBlockSize);
+
+            for (int pairChannel = 0; pairChannel < 2; ++pairChannel)
+            {
+                const auto channel = pairChannel == 0
+                    ? EcosystemEngine::saxLeftBus
+                    : EcosystemEngine::saxRightBus;
+                const auto channelIndex = static_cast<std::size_t>(channel);
+                const auto pairIndex = static_cast<std::size_t>(pairChannel);
+                result.peak = std::max(result.peak,
+                    activeOutput.peak(channelIndex, sparkleBlockSize));
+                for (int sample = 0; sample < sparkleBlockSize; ++sample)
+                {
+                    const auto position = static_cast<std::size_t>(sample);
+                    const auto activeSample
+                        = activeOutput.storage[channelIndex][position];
+                    const auto referenceSample
+                        = referenceOutput.storage[channelIndex][position];
+                    const auto previous = sample > 0
+                        ? activeOutput.storage[channelIndex][position - 1]
+                        : previousActive[pairIndex];
+                    if (hasPrevious || sample > 0)
+                        result.maximumStep = std::max(
+                            result.maximumStep,
+                            std::abs(activeSample - previous));
+                    if (captureParticle)
+                    {
+                        octaveDifference[pairIndex].push_back(
+                            activeSample - referenceSample);
+                        referenceSignal[pairIndex].push_back(referenceSample);
+                    }
+                    if (captureLate)
+                        lateDifference[pairIndex].push_back(
+                            activeSample - referenceSample);
+                }
+                previousActive[pairIndex]
+                    = activeOutput.storage[channelIndex].back();
+            }
+            hasPrevious = true;
+
+            for (int channel = EcosystemEngine::ambientLeftBus;
+                 channel <= EcosystemEngine::bassBus; ++channel)
+            {
+                const auto channelIndex = static_cast<std::size_t>(channel);
+                for (int sample = 0; sample < sparkleBlockSize; ++sample)
+                {
+                    const auto difference = std::abs(
+                        activeOutput.storage[channelIndex][
+                            static_cast<std::size_t>(sample)]
+                        - referenceOutput.storage[channelIndex][
+                            static_cast<std::size_t>(sample)]);
+                    if (channel == EcosystemEngine::bassBus)
+                        result.bassDifference = std::max(
+                            result.bassDifference, difference);
+                    else
+                        result.ambientDifference = std::max(
+                            result.ambientDifference, difference);
+                }
+            }
+        };
+
+        for (int block = 0; block < warmupBlocks; ++block)
+            renderPair(false, false);
+        active->enqueueMidiMessage(
+            juce::MidiMessage::noteOn(
+                EcosystemEngine::nm2MidiChannel,
+                EcosystemEngine::nm2BaseNote + pad, 1.0f),
+            MidiRole::nm2);
+        for (int block = 0; block < heldBlocks; ++block)
+            renderPair(true, false);
+        active->enqueueMidiMessage(
+            juce::MidiMessage::noteOff(
+                EcosystemEngine::nm2MidiChannel,
+                EcosystemEngine::nm2BaseNote + pad),
+            MidiRole::nm2);
+        for (int block = 0; block < releaseBlocks; ++block)
+            renderPair(false, block >= releaseBlocks - lateBlocks);
+
+        for (std::size_t channel = 0; channel < 2; ++channel)
+        {
+            result.octaveMagnitude = std::max(
+                result.octaveMagnitude,
+                toneMagnitude(octaveDifference[channel], octaveFrequency,
+                              sparkleSampleRate));
+            result.referenceOctaveMagnitude = std::max(
+                result.referenceOctaveMagnitude,
+                toneMagnitude(referenceSignal[channel], octaveFrequency,
+                              sparkleSampleRate));
+            result.lateOctaveMagnitude = std::max(
+                result.lateOctaveMagnitude,
+                toneMagnitude(lateDifference[channel], octaveFrequency,
+                              sparkleSampleRate));
+        }
+        return result;
+    };
+
+    {
+        auto allPadsCreatedOctave = true;
+        auto allPadsStayedSafe = true;
+        auto allPadsReleased = true;
+        double weakestOctave = std::numeric_limits<double>::max();
+        double strongestOctave = 0.0;
+        SparklePadProbe bedProbe;
+        for (int pad = 0; pad < EcosystemEngine::nm2PadCount; ++pad)
+        {
+            const auto probe = probeSparklePad(
+                pad, EcosystemEngine::SaxPathMode::sceneEffects,
+                pad == 0);
+            weakestOctave = std::min(weakestOctave,
+                                     probe.octaveMagnitude);
+            strongestOctave = std::max(strongestOctave,
+                                       probe.octaveMagnitude);
+            allPadsCreatedOctave &= probe.octaveMagnitude > 0.0008
+                && probe.octaveMagnitude
+                    > probe.referenceOctaveMagnitude * 1.8 + 0.0002;
+            allPadsStayedSafe &= probe.finite && probe.peak < 0.90f
+                && probe.maximumStep < 0.12f;
+            allPadsReleased &= probe.lateOctaveMagnitude
+                < probe.octaveMagnitude * 0.70 + 0.0001;
+            if (pad == 0)
+                bedProbe = probe;
+        }
+        const auto clean = probeSparklePad(
+            0, EcosystemEngine::SaxPathMode::cleanLooper, false);
+        passed &= expect(allPadsCreatedOctave
+                             && weakestOctave > 0.0008
+                             && strongestOctave
+                                <= weakestOctave * 1.05 + 0.0001,
+                         "tutti i 18 pad NM2 in AURORA devono produrre la stessa scintilla +12");
+        passed &= expect(allPadsStayedSafe && allPadsReleased,
+                         "SCINTILLE deve avere attacco/rilascio fluidi, terminare e conservare headroom");
+        passed &= expect(clean.octaveMagnitude
+                             < weakestOctave * 0.20
+                             && clean.finite && clean.peak < 0.90f,
+                         "SCINTILLE deve esistere soltanto nel percorso FX SCENA");
+        passed &= expect(bedProbe.ambientDifference < 0.000001f
+                             && bedProbe.bassDifference < 0.000001f,
+                         "SCINTILLE deve modificare soltanto sax e RESPIRO, mai ambiente o basso");
+    }
+
+    // A short deterministic stress take puts material in all three MIDI
+    // memories, holds the dedicated live bass, and repeatedly presents sax
+    // onsets while SCINTILLE is armed. This is a signal-safety test rather
+    // than a wall-clock benchmark, so it remains meaningful on both macOS CI
+    // and the Raspberry Pi build.
+    {
+        using MidiRole = EcosystemEngine::MidiInputRole;
+        constexpr auto stressSampleRate = 8000.0;
+        constexpr auto stressBlockSize = 128;
+        const auto auroraScenario = nm2ScenarioIndex("AURORA");
+        EcosystemEngine engine;
+        engine.setScenarioIndex(auroraScenario);
+        engine.setSaxPathMode(EcosystemEngine::SaxPathMode::sceneEffects);
+        for (int memory = 1; memory < EcosystemEngine::midiMemoryCount;
+             ++memory)
+            engine.setPerformanceLevel(memory, 0.42f);
+        engine.prepare(stressSampleRate, stressBlockSize);
+        OutputBlock<EcosystemEngine::logicalOutputBusCount> output(
+            stressBlockSize);
+
+        const auto renderSilence = [&]()
+        {
+            output.clear();
+            process(engine, nullptr, 0, output.pointers.data(),
+                    EcosystemEngine::logicalOutputBusCount,
+                    stressBlockSize);
+        };
+        const auto recordLoop = [&](int memory, int channel, int note,
+                                    int blocks)
+        {
+            engine.toggleRecording(memory);
+            renderSilence();
+            for (int block = 0; block < blocks; ++block)
+            {
+                if (block == 0)
+                    engine.enqueueMidiMessage(
+                        juce::MidiMessage::noteOn(channel, note, 0.62f));
+                if (block == blocks / 2)
+                    engine.enqueueMidiMessage(
+                        juce::MidiMessage::noteOff(channel, note));
+                renderSilence();
+            }
+            engine.toggleRecording(memory);
+            renderSilence();
+        };
+        recordLoop(1, 2, 52, 17);
+        recordLoop(2, 3, 57, 23);
+        recordLoop(3, 4, 64, 29);
+        const auto loopsWereCaptured = engine.hasMaterial(1)
+            && engine.hasMaterial(2) && engine.hasMaterial(3)
+            && engine.getEventCount(1) == 2
+            && engine.getEventCount(2) == 2
+            && engine.getEventCount(3) == 2;
+
+        engine.enqueueMidiMessage(
+            juce::MidiMessage::noteOn(5, 40, 0.78f));
+        std::vector<float> saxInput(
+            static_cast<std::size_t>(stressBlockSize));
+        const float* saxInputPointer = saxInput.data();
+        int64_t samplePosition = 0;
+        bool stressStayedFinite = true;
+        float stressPeak = 0.0f;
+        float stressMaximumStep = 0.0f;
+        std::array<float, EcosystemEngine::logicalOutputBusCount> previous {};
+        auto hasPrevious = false;
+        for (int block = 0; block < 40; ++block)
+        {
+            for (int sample = 0; sample < stressBlockSize; ++sample)
+                saxInput[static_cast<std::size_t>(sample)]
+                    = 0.13f * static_cast<float>(std::sin(
+                        juce::MathConstants<double>::twoPi * 197.0
+                        * static_cast<double>(samplePosition + sample)
+                        / stressSampleRate));
+            samplePosition += stressBlockSize;
+            output.clear();
+            process(engine, &saxInputPointer, 1, output.pointers.data(),
+                    EcosystemEngine::logicalOutputBusCount,
+                    stressBlockSize);
+        }
+        engine.enqueueMidiMessage(
+            juce::MidiMessage::noteOn(
+                EcosystemEngine::nm2MidiChannel,
+                EcosystemEngine::nm2BaseNote + 17, 1.0f),
+            MidiRole::nm2);
+        for (int block = 0; block < 160; ++block)
+        {
+            // A raised-cosine phrase every 400 ms creates real onsets without
+            // introducing a discontinuity that could be mistaken for DSP
+            // crackle by the maximum-step assertion below.
+            for (int sample = 0; sample < stressBlockSize; ++sample)
+            {
+                const auto phrasePosition = static_cast<int>(
+                    (samplePosition + sample) % 3200);
+                auto envelope = 0.0f;
+                if (phrasePosition < 1600)
+                    envelope = 0.5f - 0.5f * static_cast<float>(std::cos(
+                        juce::MathConstants<double>::twoPi
+                        * static_cast<double>(phrasePosition) / 1600.0));
+                saxInput[static_cast<std::size_t>(sample)]
+                    = 0.16f * envelope * static_cast<float>(std::sin(
+                        juce::MathConstants<double>::twoPi * 197.0
+                        * static_cast<double>(samplePosition + sample)
+                        / stressSampleRate));
+            }
+            samplePosition += stressBlockSize;
+            output.clear();
+            process(engine, &saxInputPointer, 1, output.pointers.data(),
+                    EcosystemEngine::logicalOutputBusCount,
+                    stressBlockSize);
+            stressStayedFinite &= output.finite(stressBlockSize);
+            for (int channel = 0;
+                 channel < EcosystemEngine::logicalOutputBusCount; ++channel)
+            {
+                const auto index = static_cast<std::size_t>(channel);
+                stressPeak = std::max(
+                    stressPeak, output.peak(index, stressBlockSize));
+                for (int sample = 0; sample < stressBlockSize; ++sample)
+                {
+                    const auto position = static_cast<std::size_t>(sample);
+                    const auto value = output.storage[index][position];
+                    if (hasPrevious || sample > 0)
+                    {
+                        const auto preceding = sample > 0
+                            ? output.storage[index][position - 1]
+                            : previous[index];
+                        stressMaximumStep = std::max(
+                            stressMaximumStep, std::abs(value - preceding));
+                    }
+                }
+                previous[index] = output.storage[index].back();
+            }
+            hasPrevious = true;
+        }
+        engine.enqueueMidiMessage(
+            juce::MidiMessage::noteOff(
+                EcosystemEngine::nm2MidiChannel,
+                EcosystemEngine::nm2BaseNote + 17),
+            MidiRole::nm2);
+        engine.enqueueMidiMessage(juce::MidiMessage::noteOff(5, 40));
+        renderSilence();
+
+        passed &= expect(loopsWereCaptured
+                             && engine.getEventCount(1) == 2
+                             && engine.getEventCount(2) == 2
+                             && engine.getEventCount(3) == 2,
+                         "SCINTILLE non deve alterare il contenuto dei tre loop");
+        passed &= expect(stressStayedFinite && stressPeak < 0.92f
+                             && stressMaximumStep < 0.20f,
+                         "tre loop, basso tenuto e SCINTILLE devono restare finiti, fluidi e con headroom");
     }
 
     EcosystemEngine scenarioEngine;

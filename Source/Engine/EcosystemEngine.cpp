@@ -1347,6 +1347,7 @@ void EcosystemEngine::prepare(double newSampleRate, int maximumBlockSize)
     }
     saxProcessor.setFreezeEnabled(false);
     saxProcessor.setFreeTailEnabled(false);
+    saxProcessor.setSparkleAmount(0.0f);
     saxProcessor.setDelayLevel(getDelayLevel(midiMemoryCount));
     saxProcessor.prepare(sampleRate, maximumBlockSize);
     fourHeadSaxLoopMix.reset(sampleRate, 0.001);
@@ -1948,6 +1949,8 @@ void EcosystemEngine::updateNm2EffectTargets(int numSamples) noexcept
 
     nm2ListenActive = profile != nullptr && profile->listen;
     nm2StutterActive = profile != nullptr && profile->stutter;
+    saxProcessor.setSparkleAmount(
+        profile != nullptr ? profile->sparkle : 0.0f);
 
     const auto setTarget = [this](auto& mix, float target,
                                   double attack, double release) noexcept

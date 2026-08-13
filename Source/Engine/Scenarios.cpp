@@ -345,10 +345,10 @@ Nm2SceneGesture makeNm2Gesture(
     const char* name, float fuzz, float dark, float radio, float narrow,
     float empty, float blade, float pulse, float metal, float orbit,
     bool echoThrow = false, bool freeze = false, bool freeTail = false,
-    bool listen = false, bool stutter = false)
+    bool listen = false, bool stutter = false, float sparkle = 0.0f)
 {
     return { name, fuzz, dark, radio, narrow, empty, blade, pulse, metal,
-             orbit, echoThrow, freeze, freeTail, listen, stutter };
+             orbit, sparkle, echoThrow, freeze, freeTail, listen, stutter };
 }
 
 const std::array<SoundScenario, CommentoScenarios::count> scenarios {{
@@ -415,9 +415,9 @@ const std::array<SoundScenario, CommentoScenarios::count> scenarios {{
         }},
         makeSax("ALONE", 9800.0f, 0.94f, 1220.0f, 1.21f, 0.48f, 0.72f,
                 0.39f, 0.16f, 7.0f, 0.92f, 0.27f, 0.51f, 0.08f, 0.15f, 0.56f, 0.974f),
-        makeNm2Gesture("BAGLIORE", 0.0f, 0.0f, 0.0f, 0.0f, 0.0f,
-                       0.38f, 0.0f, 0.0f, 0.62f, false, false, false,
-                       true)
+        makeNm2Gesture("SCINTILLE", 0.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+                       0.18f, 0.0f, 0.0f, 0.32f, false, false, false,
+                       false, false, 1.0f)
     },
     {
         "MAREA", "onde asincrone e spazio largo",

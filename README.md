@@ -157,7 +157,7 @@ mappa e senza guardare il controller montato sul sax.
 | GOCCE | RIMBALZO |
 | NASTRO | CONSUMA |
 | CATTEDRALE | NAVATA |
-| AURORA | BAGLIORE |
+| AURORA | SCINTILLE |
 | MAREA | RISACCA |
 | RADICE | CORTECCIA |
 | ORBITA | SATELLITE |
@@ -173,6 +173,13 @@ mentre il primo e' ancora giu' non riavvia l'effetto: lo mantiene semplicemente
 attivo. Il rilascio di un solo pad non lo interrompe se ce ne sono altri
 premuti; termina soltanto quando viene rilasciato l'ultimo. `Note Off` e
 `Note On` con velocity zero sono entrambi rilasci validi, anche via BLE MIDI.
+
+`SCINTILLE` e' il gesto piu' evidente: raccoglie brevi frammenti recenti di
+sax e RESPIRO, li rilegge a velocita' doppia come piccole copie a +12
+semitoni e li alterna nello stereo. Un filtro anti-alias a quattro poli,
+attacco e rilascio morbidi impediscono il bordo metallico del vecchio pitch
+shifter continuo; una parte della scintilla entra nel delay e nel riverbero
+della scena. Il gesto esiste solo in `AURORA` e richiede `FX SCENA`.
 
 Se parte un cambio scena mentre uno o piu' pad sono premuti, il gesto gia'
 catturato resta stabile fino all'ultimo rilascio. Una nuova pressione usa poi il

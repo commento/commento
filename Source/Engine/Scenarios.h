@@ -82,6 +82,7 @@ struct Nm2SceneGesture
     float pulse = 0.0f;
     float metal = 0.0f;
     float orbit = 0.0f;
+    float sparkle = 0.0f;
     bool echoThrow = false;
     bool freeze = false;
     bool freeTail = false;
