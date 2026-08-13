@@ -341,6 +341,16 @@ SaxPatch makeSax(const char* name, float tone, float drive, float delay,
              tremoloDepth, gain, decay };
 }
 
+Nm2SceneGesture makeNm2Gesture(
+    const char* name, float fuzz, float dark, float radio, float narrow,
+    float empty, float blade, float pulse, float metal, float orbit,
+    bool echoThrow = false, bool freeze = false, bool freeTail = false,
+    bool listen = false, bool stutter = false)
+{
+    return { name, fuzz, dark, radio, narrow, empty, blade, pulse, metal,
+             orbit, echoThrow, freeze, freeTail, listen, stutter };
+}
+
 const std::array<SoundScenario, CommentoScenarios::count> scenarios {{
     {
         "ABISSO", "scuro, lento, profondo",
@@ -351,7 +361,9 @@ const std::array<SoundScenario, CommentoScenarios::count> scenarios {{
             makeAir("POLVERE FONDA", 2.4f, 11.0f, 1800.0f, 0.34f, 0.92f)
         }},
         makeSax("CAVERNA", 2300.0f, 1.08f, 2800.0f, 1.37f, 0.72f, 0.78f,
-                0.58f, 0.035f, 4.0f, 0.94f, 0.67f, 0.48f, 0.0f, 0.0f, 0.52f, 0.955f)
+                0.58f, 0.035f, 4.0f, 0.94f, 0.67f, 0.48f, 0.0f, 0.0f, 0.52f, 0.955f),
+        makeNm2Gesture("SPROFONDA", 0.0f, 0.88f, 0.0f, 0.32f, 0.38f,
+                       0.0f, 0.0f, 0.0f, 0.0f, true)
     },
     {
         "GOCCE", "pluck dilatati e riflessi",
@@ -362,7 +374,10 @@ const std::array<SoundScenario, CommentoScenarios::count> scenarios {{
             makePluck("FILO DI LUCE", OscillatorModel::glass, 7600.0f, 2310.0f, 0.68f, 0.38f)
         }},
         makeSax("PING PONG LIQUIDO", 7200.0f, 1.0f, 980.0f, 1.73f, 0.57f, 0.88f,
-                0.52f, 0.11f, 2.8f, 0.83f, 0.34f, 0.34f, 0.0f, 0.0f, 0.58f, 0.968f)
+                0.52f, 0.11f, 2.8f, 0.83f, 0.34f, 0.34f, 0.0f, 0.0f, 0.58f, 0.968f),
+        makeNm2Gesture("RIMBALZO", 0.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+                       0.25f, 0.0f, 0.0f, 0.45f, true, false, false,
+                       false, true)
     },
     {
         "NASTRO", "caldo, instabile, consumato",
@@ -373,7 +388,9 @@ const std::array<SoundScenario, CommentoScenarios::count> scenarios {{
             makeBell("SCINTILLA OPACA", 5100.0f, 1460.0f, 0.38f, -12)
         }},
         makeSax("ECO A NASTRO", 4600.0f, 1.32f, 690.0f, 1.09f, 0.64f, 0.32f,
-                0.47f, 0.23f, 9.0f, 0.76f, 0.62f, 0.30f, 0.17f, 0.10f, 0.56f, 0.958f)
+                0.47f, 0.23f, 9.0f, 0.76f, 0.62f, 0.30f, 0.17f, 0.10f, 0.56f, 0.958f),
+        makeNm2Gesture("CONSUMA", 0.10f, 0.40f, 0.0f, 0.0f, 0.0f,
+                       0.0f, 0.12f, 0.0f, 0.0f)
     },
     {
         "CATTEDRALE", "code immense e armoniche",
@@ -384,7 +401,9 @@ const std::array<SoundScenario, CommentoScenarios::count> scenarios {{
             makePad("CORO ALTO", OscillatorModel::cloud, 2.7f, 14.0f, 6400.0f, 0.31f, 1.0f)
         }},
         makeSax("NAVATA", 6200.0f, 1.03f, 1850.0f, 1.47f, 0.55f, 0.65f,
-                0.40f, 0.028f, 2.5f, 0.99f, 0.31f, 0.68f, 0.0f, 0.0f, 0.50f, 0.972f)
+                0.40f, 0.028f, 2.5f, 0.99f, 0.31f, 0.68f, 0.0f, 0.0f, 0.50f, 0.972f),
+        makeNm2Gesture("NAVATA", 0.0f, 0.10f, 0.0f, 0.0f, 0.0f,
+                       0.0f, 0.0f, 0.0f, 0.18f, true, false, true, true)
     },
     {
         "AURORA", "chiaro, mobile, aperto",
@@ -395,7 +414,10 @@ const std::array<SoundScenario, CommentoScenarios::count> scenarios {{
             makeBell("CRISTALLO", 12000.0f, 2180.0f, 0.39f, 12)
         }},
         makeSax("ALONE", 9800.0f, 0.94f, 1220.0f, 1.21f, 0.48f, 0.72f,
-                0.39f, 0.16f, 7.0f, 0.92f, 0.27f, 0.51f, 0.08f, 0.15f, 0.56f, 0.974f)
+                0.39f, 0.16f, 7.0f, 0.92f, 0.27f, 0.51f, 0.08f, 0.15f, 0.56f, 0.974f),
+        makeNm2Gesture("BAGLIORE", 0.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+                       0.38f, 0.0f, 0.0f, 0.62f, false, false, false,
+                       true)
     },
     {
         "MAREA", "onde asincrone e spazio largo",
@@ -406,7 +428,9 @@ const std::array<SoundScenario, CommentoScenarios::count> scenarios {{
             makeAir("SCHIUMA", 0.75f, 7.8f, 5700.0f, 0.37f, 0.84f)
         }},
         makeSax("RISACCA", 5400.0f, 1.02f, 2140.0f, 1.53f, 0.67f, 0.74f,
-                0.55f, 0.052f, 5.5f, 0.89f, 0.53f, 0.46f, 0.045f, 0.22f, 0.54f, 0.960f)
+                0.55f, 0.052f, 5.5f, 0.89f, 0.53f, 0.46f, 0.045f, 0.22f, 0.54f, 0.960f),
+        makeNm2Gesture("RISACCA", 0.0f, 0.16f, 0.0f, 0.0f, 0.0f,
+                       0.0f, 0.46f, 0.0f, 0.56f, true)
     },
     {
         "RADICE", "legno, terra, attacchi organici",
@@ -417,7 +441,9 @@ const std::array<SoundScenario, CommentoScenarios::count> scenarios {{
             makeAir("FIATO", 0.38f, 4.7f, 4200.0f, 0.31f, 0.46f)
         }},
         makeSax("STANZA DI LEGNO", 4100.0f, 1.22f, 540.0f, 1.29f, 0.38f, 0.24f,
-                0.29f, 0.19f, 3.0f, 0.66f, 0.71f, 0.20f, 0.0f, 0.0f, 0.62f, 0.982f)
+                0.29f, 0.19f, 3.0f, 0.66f, 0.71f, 0.20f, 0.0f, 0.0f, 0.62f, 0.982f),
+        makeNm2Gesture("CORTECCIA", 0.12f, 0.0f, 0.34f, 0.24f, 0.0f,
+                       0.0f, 0.0f, 0.0f, 0.0f)
     },
     {
         "ORBITA", "impulsi sospesi fuori tempo",
@@ -428,7 +454,9 @@ const std::array<SoundScenario, CommentoScenarios::count> scenarios {{
             makePad("COSMO", OscillatorModel::cloud, 2.1f, 11.0f, 4600.0f, 0.35f, 0.93f)
         }},
         makeSax("ELLISSE", 6800.0f, 1.06f, 1370.0f, 1.91f, 0.71f, 0.92f,
-                0.57f, 0.074f, 4.2f, 0.90f, 0.39f, 0.43f, 0.13f, 0.30f, 0.52f, 0.956f)
+                0.57f, 0.074f, 4.2f, 0.90f, 0.39f, 0.43f, 0.13f, 0.30f, 0.52f, 0.956f),
+        makeNm2Gesture("SATELLITE", 0.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+                       0.0f, 0.30f, 0.0f, 0.82f, true)
     },
     {
         "POLVERE", "fragile, opaco, granuloso",
@@ -440,7 +468,10 @@ const std::array<SoundScenario, CommentoScenarios::count> scenarios {{
             makePad("FANTASMA", OscillatorModel::cloud, 2.8f, 12.0f, 1900.0f, 0.36f, 0.88f)
         }},
         makeSax("RADIO LONTANA", 2700.0f, 1.55f, 760.0f, 1.04f, 0.59f, 0.18f,
-                0.42f, 0.31f, 12.0f, 0.74f, 0.78f, 0.24f, 0.27f, 0.28f, 0.52f, 0.948f)
+                0.42f, 0.31f, 12.0f, 0.74f, 0.78f, 0.24f, 0.27f, 0.28f, 0.52f, 0.948f),
+        makeNm2Gesture("FRAMMENTA", 0.0f, 0.0f, 0.42f, 0.25f, 0.12f,
+                       0.0f, 0.0f, 0.0f, 0.0f, false, false, false,
+                       false, true)
     },
     {
         "VUOTO", "pochi elementi, molto respiro",
@@ -451,7 +482,9 @@ const std::array<SoundScenario, CommentoScenarios::count> scenarios {{
             makeAir("SOSPESO", 3.6f, 15.0f, 3100.0f, 0.34f, 0.82f)
         }},
         makeSax("UN SOLO ECO", 5200.0f, 0.98f, 4200.0f, 1.13f, 0.43f, 0.12f,
-                0.31f, 0.018f, 1.5f, 0.82f, 0.58f, 0.22f, 0.0f, 0.0f, 0.64f, 0.986f)
+                0.31f, 0.018f, 1.5f, 0.82f, 0.58f, 0.22f, 0.0f, 0.0f, 0.64f, 0.986f),
+        makeNm2Gesture("SCOMPARE", 0.0f, 0.0f, 0.0f, 0.88f, 0.86f,
+                       0.0f, 0.0f, 0.0f, 0.0f, false, false, true)
     },
     {
         "DRONE", "masse lente, pedali e deriva profonda",
@@ -467,7 +500,9 @@ const std::array<SoundScenario, CommentoScenarios::count> scenarios {{
         }},
         makeSax("COLONNA D'ARIA", 2200.0f, 1.05f, 3100.0f, 1.41f, 0.62f, 0.58f,
                 0.46f, 0.024f, 5.0f, 0.96f, 0.64f, 0.52f, 0.025f, 0.14f,
-                0.49f, 0.972f)
+                0.49f, 0.972f),
+        makeNm2Gesture("TRATTIENI", 0.0f, 0.72f, 0.0f, 0.58f, 0.0f,
+                       0.0f, 0.0f, 0.0f, 0.0f, false, true)
     },
     {
         "FERRO", "urti metallici, risonanze corte e taglienti",
@@ -483,7 +518,9 @@ const std::array<SoundScenario, CommentoScenarios::count> scenarios {{
         }},
         makeSax("LASTRA", 9200.0f, 1.38f, 430.0f, 1.67f, 0.54f, 0.86f,
                 0.45f, 0.33f, 2.0f, 0.61f, 0.23f, 0.18f, 0.43f, 0.32f,
-                0.52f, 0.950f)
+                0.52f, 0.950f),
+        makeNm2Gesture("LAMINA", 0.22f, 0.0f, 0.0f, 0.0f, 0.0f,
+                       0.52f, 0.0f, 0.68f, 0.0f)
     },
     {
         "SCIAME", "rumore vivo, scatti e traiettorie instabili",
@@ -499,7 +536,10 @@ const std::array<SoundScenario, CommentoScenarios::count> scenarios {{
         }},
         makeSax("RONZIO", 3600.0f, 1.46f, 1040.0f, 1.97f, 0.65f, 0.90f,
                 0.56f, 0.41f, 11.0f, 0.78f, 0.69f, 0.31f, 0.23f, 0.45f,
-                0.48f, 0.952f)
+                0.48f, 0.952f),
+        makeNm2Gesture("SCATTO", 0.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+                       0.0f, 0.58f, 0.28f, 0.62f, false, false, false,
+                       false, true)
     },
     {
         "COSMOS", "anelli armonici e respiro sospeso",
@@ -514,6 +554,8 @@ const std::array<SoundScenario, CommentoScenarios::count> scenarios {{
         makeSax("ALONE COSMOS", 3900.0f, 0.98f, 1150.0f, 1.29f, 0.36f, 0.38f,
                 0.28f, 0.027f, 2.2f, 0.86f, 0.68f, 0.31f, 0.013f, 0.07f,
                 0.54f, 0.972f),
+        makeNm2Gesture("SOSPENDI", 0.0f, 0.16f, 0.0f, 0.0f, 0.0f,
+                       0.0f, 0.0f, 0.0f, 0.78f, false, true, true),
         true
     }
 }};

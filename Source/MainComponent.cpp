@@ -700,7 +700,7 @@ MainComponent::MainComponent()
     addChildComponent(gesturesTitleLabel);
 
     gesturesHintLabel.setText(
-        "NM2: SAX + RESPIRO  /  TOUCH: SCEGLI UNA MEMORIA  /  TIENI PER TRASFORMARE",
+        "NM2: 18 PAD, UN GESTO DI SCENA  /  TOUCH: SCEGLI UNA MEMORIA  /  TIENI PER TRASFORMARE",
         juce::dontSendNotification);
     gesturesHintLabel.setFont(juce::FontOptions(17.0f, juce::Font::bold));
     gesturesHintLabel.setColour(juce::Label::textColourId,
@@ -2854,17 +2854,22 @@ void MainComponent::updateControls()
     loopTransportButton.setToggleState(! loopPlaying,
                                        juce::dontSendNotification);
 
-    const auto nm2HeldMask = engine.getNm2HeldMask();
-    if (nm2HeldMask != 0u)
+    const auto nm2HeldPadCount = engine.getNm2HeldPadCount();
+    const auto nm2GestureName = juce::String(engine.getNm2SceneGestureName());
+    const auto nm2LatchedScenario = engine.getNm2LatchedScenarioIndex();
+    const auto nm2DisplayScenario = nm2HeldPadCount > 0
+        && nm2LatchedScenario >= 0
+        ? nm2LatchedScenario : engine.getScenarioIndex();
+    const auto nm2ScenarioName = juce::String(
+        CommentoScenarios::get(nm2DisplayScenario).name);
+    if (nm2HeldPadCount > 0)
     {
-        juce::StringArray heldGestures;
-        for (int index = 0; index < EcosystemEngine::nm2GestureCount; ++index)
-            if ((nm2HeldMask & (1u << static_cast<unsigned int>(index))) != 0u)
-                heldGestures.add(EcosystemEngine::getNm2GestureName(
-                    static_cast<EcosystemEngine::Nm2Gesture>(index)));
+        const auto heldPads = juce::String(nm2HeldPadCount)
+            + (nm2HeldPadCount == 1 ? " PAD PREMUTO" : " PAD PREMUTI");
         gesturesHintLabel.setText(
-            "NM2 PREMUTO  /  " + heldGestures.joinIntoString(" + ")
-                + "  /  SAX + RESPIRO  /  RILASCIA PER USCIRE",
+            "NM2  /  " + nm2GestureName + "  /  " + heldPads
+                + "  /  SCENA " + nm2ScenarioName
+                + "  /  RILASCIA TUTTI PER USCIRE",
             juce::dontSendNotification);
         gesturesHintLabel.setColour(juce::Label::textColourId,
                                     juce::Colour(0xffffd08a));
@@ -2917,7 +2922,9 @@ void MainComponent::updateControls()
 
         gesturesHintLabel.setText(
             (nm2InputWasPresent
-                ? "NM2 PRONTO  /  COLORI SU SAX + RESPIRO  /  ASCOLTO APRE IL TAPPETO"
+                ? "NM2 PRONTO  /  " + nm2GestureName
+                    + "  /  SCENA " + nm2ScenarioName
+                    + "  /  QUALSIASI DEI 18 PAD"
                 : "NM2 IN ATTESA  /  COLLEGA USB O ESPONI BLE MIDI  /  I GESTI TOUCH RESTANO ATTIVI")
                 + traffic,
             juce::dontSendNotification);
@@ -2929,8 +2936,8 @@ void MainComponent::updateControls()
         "BERSAGLIO TOUCH  /  "
             + memoryNames[static_cast<std::size_t>(selectedMemory)]
             + (isBass
-                ? "  /  TOUCH NON ELABORA IL BASSO  /  NM2: RESPIRO"
-                : "  /  NM2 RESTA SU SAX + RESPIRO"),
+                ? "  /  TOUCH NON ELABORA IL BASSO  /  NM2: GESTO DI SCENA"
+                : "  /  NM2: GESTO DI SCENA SU SAX + RESPIRO"),
         juce::dontSendNotification);
     gestureTargetLabel.setColour(
         juce::Label::outlineColourId, selectedColour.withAlpha(0.72f));

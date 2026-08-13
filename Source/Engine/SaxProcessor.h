@@ -14,7 +14,6 @@ public:
     void setDelayLevel(float newLevel) noexcept;
     void setFreezeEnabled(bool shouldFreeze) noexcept;
     void setFreeTailEnabled(bool shouldReleaseTail) noexcept;
-    void setDiveEnabled(bool shouldDive) noexcept;
     void setStutterEnabled(bool shouldStutter) noexcept;
     void process(juce::AudioBuffer<float>& buffer, int numSamples);
     void advanceMorph(int numSamples) noexcept;
@@ -43,10 +42,6 @@ private:
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> freezeMix;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear>
         excitationGain;
-    // CADUTA lengthens the tap by a fixed number of samples rather than by a
-    // ratio, so the interval of the fall is the same under every scenario
-    // instead of following whatever delay time the patch happens to use.
-    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> diveSamples;
     // SCATTO reads a second, short tap in parallel and crossfades into it, so
     // there is no glissando while the tap moves and no seam at the loop point:
     // under freeze the line simply recirculates that short window.
@@ -75,7 +70,6 @@ private:
     float requestedDelayLevel = 1.0f;
     bool requestedFreeze = false;
     bool requestedFreeTail = false;
-    bool requestedDive = false;
     bool requestedStutter = false;
     bool delayMorphActive = false;
     bool prepared = false;

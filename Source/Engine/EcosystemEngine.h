@@ -45,40 +45,6 @@ public:
         nm2
     };
 
-    // Physical order on the NM2: three rows of six pads. The factory mapping
-    // already sends these as notes 60..77 on MIDI channel 1.
-    //
-    // A player wearing the controller memorises geography, not names, so each
-    // row is one family: the top row throws something that keeps sounding, the
-    // middle row recolours the tone, the bottom row moves it or changes its
-    // level. Within a row the gestures run from the gentlest to the most
-    // extreme.
-    enum class Nm2Gesture : int
-    {
-        // Top row: time and space.
-        codaLibera = 0,
-        ecoThrow,
-        gelo,
-        caduta,
-        scatto,
-        abisso,
-        // Middle row: timbre.
-        ombra,
-        radio,
-        lama,
-        grana,
-        fuzz,
-        ferro,
-        // Bottom row: movement and levels.
-        pulso,
-        orbita,
-        stretto,
-        vuoto,
-        ascolto,
-        pausa,
-        count
-    };
-
     enum class SaxFootswitchMessageType : int
     {
         none = 0,
@@ -115,14 +81,7 @@ public:
     static constexpr int logicalOutputBusCount = 5;
     static constexpr int nm2MidiChannel = 1;
     static constexpr int nm2BaseNote = 60;
-    // Factory mapping of the motion sensor. The two axes arrive on their own
-    // channels, but Commento owns every message from this endpoint, so the
-    // controller number alone is enough to recognise them even under a
-    // customised preset.
-    static constexpr int nm2TiltXController = 74;
-    static constexpr int nm2TiltYController = 75;
-    static constexpr int nm2GestureCount
-        = static_cast<int>(Nm2Gesture::count);
+    static constexpr int nm2PadCount = 18;
     static constexpr double scenarioMorphSeconds = 8.0;
     static_assert(PerformanceLevels::count == memoryCount);
 
@@ -158,11 +117,9 @@ public:
     [[nodiscard]] Nm2Diagnostics getNm2Diagnostics() const noexcept;
     void resetNm2Diagnostics() noexcept;
     [[nodiscard]] std::uint32_t getNm2HeldMask() const noexcept;
-    [[nodiscard]] bool isNm2GestureHeld(Nm2Gesture gesture) const noexcept;
-    [[nodiscard]] float getNm2TiltDepth() const noexcept;
-    [[nodiscard]] bool hasNm2TiltSensor() const noexcept;
-    [[nodiscard]] static const char* getNm2GestureName(
-        Nm2Gesture gesture) noexcept;
+    [[nodiscard]] int getNm2HeldPadCount() const noexcept;
+    [[nodiscard]] int getNm2LatchedScenarioIndex() const noexcept;
+    [[nodiscard]] const char* getNm2SceneGestureName() const noexcept;
 
     [[nodiscard]] bool isRecording(int memoryIndex) const;
     [[nodiscard]] bool isWaitingForFirstNote(int memoryIndex) const;
@@ -360,7 +317,6 @@ private:
     void updatePerformanceEffectTargets() noexcept;
     void updateMomentaryGestureTargets(int numSamples) noexcept;
     void updateNm2EffectTargets(int numSamples) noexcept;
-    void updateNm2TiltDepth(int numSamples) noexcept;
     void updateNm2ColourFilter() noexcept;
     void applyLoopTransportCommands(juce::MidiBuffer& output) noexcept;
     static void addPrivateLoopPanic(juce::MidiBuffer& output,
@@ -418,10 +374,6 @@ private:
     [[nodiscard]] bool consumeNm2Message(
         const juce::MidiMessage& message, MidiInputRole role) noexcept;
     void releaseNm2GesturesUnlocked() noexcept;
-    void setNm2TargetGesture(
-        std::array<std::atomic<std::uint8_t>, memoryCount>& masks,
-        std::atomic<int>& capturedTarget, std::uint8_t ownerBit,
-        bool shouldEnable) noexcept;
     [[nodiscard]] bool consumeSaxFootswitchMessage(
         const juce::MidiMessage& message, MidiInputRole role) noexcept;
 
@@ -458,14 +410,15 @@ private:
     std::atomic<int> nm2LastEventChannel { 0 };
     std::atomic<int> nm2LastEventValue { 0 };
     std::atomic<int> nm2EventCount { 0 };
-    // Only MIDI/device-management threads enter this very short critical
-    // section. The audio callback merely reads the atomics above/below.
-    juce::SpinLock nm2ControlLock;
-    std::atomic<int> nm2FreezeTarget { -1 };
-    std::atomic<int> nm2EchoThrowTarget { -1 };
-    std::atomic<int> nm2FreeTailTarget { -1 };
-    std::atomic<int> nm2PauseTarget { -1 };
-    std::atomic<int> nm2AbyssTarget { -1 };
+    // Advances only when the aggregate 18-pad gate changes between empty and
+    // non-empty. It closes the narrow panic/repress race without sharing any
+    // non-atomic audio-thread state with MIDI or device-management threads.
+    std::atomic<std::uint32_t> nm2GateGeneration { 0u };
+    std::atomic<int> nm2LatchedScenario { -1 };
+    int nm2StructuralScenario = -1;
+    bool nm2StructuralActive = false;
+    bool nm2ListenActive = false;
+    bool nm2StutterActive = false;
     // Binding, learn and edge state share one lock-free word, so MIDI input and
     // UI threads cannot observe a partially published learned assignment.
     std::atomic<std::uint32_t> saxFootswitchState { 0u };
@@ -555,16 +508,6 @@ private:
         fuzzEffectMix;
     std::array<float, logicalOutputBusCount> grainHeldSamples {};
     std::array<float, logicalOutputBusCount> grainFilteredSamples {};
-    // The NM2 crush is far harsher than the scenario texture, and the two
-    // cannot share a hold counter or a quantisation: the factory bass levels
-    // are calibrated against the global one, so it has to stay exactly as it
-    // is while the wearable pad hits much harder on the sax bus alone.
-    std::array<float, logicalOutputBusCount> nm2GrainHeldSamples {};
-    std::array<float, logicalOutputBusCount> nm2GrainFilteredSamples {};
-    int nm2GrainHoldCounter = 0;
-    bool nm2GrainFilterNeedsPrime = true;
-    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear>
-        nm2GrainMix;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear>
         nm2FuzzMix;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear>
@@ -615,20 +558,8 @@ private:
     double nm2MetalPhase = 0.0;
     double nm2OrbitPhase = 0.0;
     std::uint32_t nm2PreviousHeldMask = 0u;
+    std::uint32_t nm2ProcessedGateGeneration = 0u;
     bool nm2FiltersNeedPrime = true;
-    // Tilt depth. Until the sensor is enabled on the controller no CC ever
-    // arrives, nm2TiltSeen stays false and every gesture keeps its full
-    // strength, so a controller with tilt switched off behaves exactly as it
-    // did before this existed.
-    std::atomic<float> nm2TiltX { 0.5f };
-    std::atomic<float> nm2TiltY { 0.5f };
-    std::atomic<bool> nm2TiltSeen { false };
-    float nm2TiltReferenceX = 0.5f;
-    float nm2TiltReferenceY = 0.5f;
-    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> nm2TiltDepth;
-    // Written once per block by the audio thread and readable from the UI, so
-    // it follows the same convention as the other display-facing values.
-    std::atomic<float> nm2TiltBlockDepth { 1.0f };
     float grainLowPassCoefficient = 1.0f;
     float activeGrainEffectTarget = -1.0f;
     float activeFuzzEffectTarget = -1.0f;

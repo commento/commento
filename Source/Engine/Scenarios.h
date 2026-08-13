@@ -66,12 +66,36 @@ struct SaxPatch
     float loopDecay = 0.965f;
 };
 
+// One deliberately simple wearable gesture per scenario. Every physical pad
+// on the NM2 recalls this same profile, so it can be played without looking at
+// the controller. Values are mixed by the already allocated sax-only DSP;
+// structural flags reuse the existing delay and tail controls.
+struct Nm2SceneGesture
+{
+    const char* name = "GESTO";
+    float fuzz = 0.0f;
+    float dark = 0.0f;
+    float radio = 0.0f;
+    float narrow = 0.0f;
+    float empty = 0.0f;
+    float blade = 0.0f;
+    float pulse = 0.0f;
+    float metal = 0.0f;
+    float orbit = 0.0f;
+    bool echoThrow = false;
+    bool freeze = false;
+    bool freeTail = false;
+    bool listen = false;
+    bool stutter = false;
+};
+
 struct SoundScenario
 {
     const char* name = "";
     const char* character = "";
     std::array<SynthPatch, 4> layers;
     SaxPatch sax;
+    Nm2SceneGesture nm2;
     bool useFourHeadSaxLoopPlayback = false;
 };
 
