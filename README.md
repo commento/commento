@@ -390,7 +390,10 @@ Model 12 escono da AUDIO 7/8.
 Per usarla, selezionare **RESPIRO**, registrare il sax con **SEMINA** e chiudere
 il ciclo; **NUTRI / OVERDUB** continua ad aggiungere nuovo suono e a consumare
 lentamente la memoria senza ridefinirne la durata. Il MIDI 5 resta indipendente
-e continua sempre a pilotare BASSO LIVE sul canale AUDIO 5.
+e continua sempre a pilotare BASSO LIVE sul canale AUDIO 5. In COSMOS il basso
+usa due denti di sega band-limited con un detune molto stretto e lento, piu' un
+sub sinusoidale un'ottava sotto; attacco e rilascio sono piu' morbidi rispetto
+alla precedente coppia di onde quadre.
 I nuovi gesti non cambiano questo routing o il comportamento automatico di
 COSMOS; intervengono soltanto mentre vengono azionati esplicitamente.
 

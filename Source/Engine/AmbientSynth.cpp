@@ -152,6 +152,7 @@ SynthPatch interpolatePatch(const SynthPatch& source,
     result.drive = linearMorph(source.drive, target.drive, amount);
     result.harmonicMix = linearMorph(source.harmonicMix,
                                      target.harmonicMix, amount);
+    result.subMix = linearMorph(source.subMix, target.subMix, amount);
     result.noiseMix = linearMorph(source.noiseMix, target.noiseMix, amount);
     result.pulseWidth = linearMorph(source.pulseWidth,
                                     target.pulseWidth, amount);
@@ -288,6 +289,7 @@ public:
             phaseA = 0.0;
             phaseB = 0.0;
             phaseC = 0.0;
+            phaseSub = 0.0;
             triangleState = -1.0f;
             lfoPhase = 0.0;
             filterStateA = filterStateB = 0.0f;
@@ -449,8 +451,14 @@ public:
             const auto a = oscillator(phaseA, deltaA, activeModel);
             const auto b = secondaryOscillator(baseFrequency, activeModel);
             const auto noise = nextNoise();
-            auto tone = a * (1.0f - patch.harmonicMix)
-                      + b * patch.harmonicMix + noise * patch.noiseMix;
+            const auto subAmount = juce::jlimit(0.0f, 0.48f, patch.subMix);
+            const auto sub = subAmount > 0.00001f
+                ? fastSine(phaseSub) : 0.0f;
+            const auto pitchedTone = a * (1.0f - patch.harmonicMix)
+                                   + b * patch.harmonicMix;
+            auto tone = pitchedTone * (1.0f - subAmount)
+                      + sub * subAmount
+                      + noise * patch.noiseMix;
             tone = applyDrive(tone, patch.drive);
 
             filterStateA = (1.0f - pole) * tone + pole * filterStateA;
@@ -493,6 +501,8 @@ public:
             advancePhase(phaseB, deltaA * secondaryDetuneRatio * secondaryRatioA);
             if (secondaryRatioB > 0.0)
                 advancePhase(phaseC, deltaA * secondaryDetuneRatio * secondaryRatioB);
+            if (subAmount > 0.00001f)
+                advancePhase(phaseSub, deltaA * 0.5);
             lfoPhase += twoPi * patch.lfoRateHz / getSampleRate();
             if (lfoPhase >= twoPi)
                 lfoPhase -= twoPi;
@@ -562,6 +572,16 @@ private:
         return juce::jlimit(-1.0f, 1.0f, triangleState);
     }
 
+    float bandLimitedSaw(double phase, double phaseIncrement) const
+    {
+        const auto normalisedPhase = static_cast<float>(
+            phase / juce::MathConstants<double>::twoPi);
+        const auto normalisedIncrement = static_cast<float>(
+            phaseIncrement / juce::MathConstants<double>::twoPi);
+        return 2.0f * normalisedPhase - 1.0f
+             - polyBlep(normalisedPhase, normalisedIncrement);
+    }
+
     float oscillator(double phase, double phaseIncrement, OscillatorModel model)
     {
         const auto sine = fastSine(phase);
@@ -581,8 +601,8 @@ private:
             case OscillatorModel::cloud: return sine * 0.72f + nextNoise() * 0.16f;
             case OscillatorModel::pulse:
                 return bandLimitedPulse(phase, phaseIncrement, patch.pulseWidth);
-            case OscillatorModel::dualSquare:
-                return bandLimitedPulse(phase, phaseIncrement, 0.5f);
+            case OscillatorModel::dualSaw:
+                return bandLimitedSaw(phase, phaseIncrement);
             case OscillatorModel::bell:  return sine;
             case OscillatorModel::air:   return sine * 0.52f + nextNoise() * 0.30f;
         }
@@ -598,7 +618,7 @@ private:
             case OscillatorModel::bell:  return { 2.01, 3.99 };
             case OscillatorModel::reed:  return { 2.0, 0.0 };
             case OscillatorModel::pulse: return { 2.0, 0.0 };
-            case OscillatorModel::dualSquare: return { 1.0, 0.0 };
+            case OscillatorModel::dualSaw: return { 1.0, 0.0 };
             case OscillatorModel::warm:
             case OscillatorModel::pluck:
             case OscillatorModel::cloud:
@@ -627,12 +647,12 @@ private:
     {
         const auto firstGain = partialGain(
             baseFrequency * secondaryDetuneRatio * secondaryRatioA);
-        if (model == OscillatorModel::dualSquare)
+        if (model == OscillatorModel::dualSaw)
         {
             const auto increment = juce::MathConstants<double>::twoPi
                 * baseFrequency * secondaryDetuneRatio * secondaryRatioA
                 / getSampleRate();
-            return bandLimitedPulse(phaseB, increment, 0.5f) * firstGain;
+            return bandLimitedSaw(phaseB, increment) * firstGain;
         }
         if (model == OscillatorModel::bell)
         {
@@ -654,6 +674,7 @@ private:
     double phaseA = 0.0;
     double phaseB = 0.0;
     double phaseC = 0.0;
+    double phaseSub = 0.0;
     double lfoPhase = 0.0;
     double currentFrequency = 0.0;
     double targetFrequency = 0.0;

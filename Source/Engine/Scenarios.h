@@ -11,7 +11,7 @@ enum class OscillatorModel
     reed,
     cloud,
     pulse,
-    dualSquare,
+    dualSaw,
     bell,
     air
 };
@@ -30,6 +30,10 @@ struct SynthPatch
     float keyTrack = 0.5f;
     float drive = 1.0f;
     float harmonicMix = 0.25f;
+    // Optional clean sine one octave below the played oscillator. Kept as an
+    // explicit patch parameter so the scenario morph can introduce/remove it
+    // without changing oscillator topology or allocating another voice.
+    float subMix = 0.0f;
     float noiseMix = 0.0f;
     float pulseWidth = 0.5f;
     float lfoRateHz = 0.08f;

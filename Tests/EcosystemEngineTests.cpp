@@ -203,11 +203,14 @@ int main()
                      "solo COSMOS deve rileggere RESPIRO con quattro testine");
     const auto& cosmosBass = cosmosScenario.layers[
         static_cast<std::size_t>(EcosystemEngine::bassLayerIndex)];
-    passed &= expect(cosmosBass.model == OscillatorModel::dualSquare
-                         && cosmosBass.detuneCents >= 3.0f
-                         && cosmosBass.detuneCents <= 12.0f
-                         && cosmosBass.harmonicMix >= 0.35f,
-                     "COSMOS deve dichiarare due onde quadre leggermente detunate");
+    passed &= expect(cosmosBass.model == OscillatorModel::dualSaw
+                         && cosmosBass.detuneCents >= 1.0f
+                         && cosmosBass.detuneCents <= 2.5f
+                         && cosmosBass.harmonicMix >= 0.35f
+                         && cosmosBass.subMix >= 0.18f
+                         && cosmosBass.attackSeconds >= 0.015f
+                         && cosmosBass.releaseSeconds >= 0.65f,
+                     "COSMOS deve avere due denti di sega lenti e un sub stabile");
     passed &= expect(droneScenarioIndex >= legacyScenarioCount,
                      "le nuove scene devono includere un vero assetto drone");
     passed &= expect(noiseScenarioIndex >= legacyScenarioCount,
@@ -2308,7 +2311,98 @@ int main()
                                        blockSize)
                 && cosmosOutput.silent(EcosystemEngine::saxLeftBus, blockSize)
                 && cosmosOutput.silent(EcosystemEngine::saxRightBus, blockSize),
-            "il basso due-quadre COSMOS deve usare solo il bus dedicato");
+            "il basso doppia-sega con sub COSMOS deve usare solo il bus dedicato");
+
+        // Render the real COSMOS patch against an otherwise identical copy
+        // with subMix zero. This proves that the DSP produces the octave-down
+        // component, rather than merely checking the patch declaration. MIDI
+        // 48 is transposed to MIDI 36, so the expected sub is MIDI 24.
+        const auto cosmosPatch = cosmosScenario.layers[
+            static_cast<std::size_t>(EcosystemEngine::bassLayerIndex)];
+        auto cosmosWithoutSubPatch = cosmosPatch;
+        cosmosWithoutSubPatch.subMix = 0.0f;
+        AmbientSynth cosmosSpectrumSynth(0);
+        AmbientSynth cosmosWithoutSubSynth(0);
+        cosmosSpectrumSynth.prepare(sampleRate, cosmosCaptureSamples);
+        cosmosWithoutSubSynth.prepare(sampleRate, cosmosCaptureSamples);
+        cosmosSpectrumSynth.setPatch(cosmosPatch);
+        cosmosWithoutSubSynth.setPatch(cosmosWithoutSubPatch);
+        juce::AudioBuffer<float> cosmosSpectrumOutput(
+            2, cosmosCaptureSamples);
+        juce::AudioBuffer<float> cosmosWithoutSubOutput(
+            2, cosmosCaptureSamples);
+        cosmosSpectrumOutput.clear();
+        cosmosWithoutSubOutput.clear();
+        juce::MidiBuffer cosmosSpectrumMidi;
+        cosmosSpectrumMidi.addEvent(
+            juce::MidiMessage::noteOn(5, 48, 1.0f), 0);
+        cosmosSpectrumSynth.render(cosmosSpectrumOutput, cosmosSpectrumMidi,
+                                   0, cosmosCaptureSamples);
+        cosmosWithoutSubSynth.render(cosmosWithoutSubOutput,
+                                     cosmosSpectrumMidi, 0,
+                                     cosmosCaptureSamples);
+
+        constexpr auto spectrumSkipSamples = 4096;
+        constexpr auto spectrumSamples
+            = cosmosCaptureSamples - spectrumSkipSamples;
+        const auto cosmosSpectralPower = [&](const auto& rendered,
+                                              double frequency)
+        {
+            auto real = 0.0;
+            auto imaginary = 0.0;
+            for (int sample = 0; sample < spectrumSamples; ++sample)
+            {
+                const auto phase = juce::MathConstants<double>::twoPi
+                    * frequency * static_cast<double>(sample) / sampleRate;
+                const auto window = 0.5 - 0.5 * std::cos(
+                    juce::MathConstants<double>::twoPi
+                    * static_cast<double>(sample)
+                    / static_cast<double>(spectrumSamples - 1));
+                const auto value = static_cast<double>(
+                    rendered.getSample(0, sample + spectrumSkipSamples))
+                    * window;
+                real += value * std::cos(phase);
+                imaginary -= value * std::sin(phase);
+            }
+            return real * real + imaginary * imaginary;
+        };
+        const auto cosmosMainFrequency
+            = juce::MidiMessage::getMidiNoteInHertz(36);
+        const auto cosmosSubFrequency = cosmosMainFrequency * 0.5;
+        const auto cosmosSubPower = cosmosSpectralPower(
+            cosmosSpectrumOutput, cosmosSubFrequency);
+        const auto cosmosNoSubPower = cosmosSpectralPower(
+            cosmosWithoutSubOutput, cosmosSubFrequency);
+        const auto cosmosMainPower = cosmosSpectralPower(
+            cosmosSpectrumOutput, cosmosMainFrequency);
+        const auto cosmosLowerGuardPower = cosmosSpectralPower(
+            cosmosSpectrumOutput, cosmosSubFrequency - 8.0);
+        const auto cosmosUpperGuardPower = cosmosSpectralPower(
+            cosmosSpectrumOutput, cosmosSubFrequency + 8.0);
+        auto cosmosSpectrumPeak = 0.0f;
+        auto cosmosSpectrumFinite = true;
+        for (int channel = 0; channel < cosmosSpectrumOutput.getNumChannels();
+             ++channel)
+            for (int sample = 0; sample < cosmosCaptureSamples; ++sample)
+            {
+                const auto value = cosmosSpectrumOutput.getSample(channel,
+                                                                   sample);
+                cosmosSpectrumFinite &= std::isfinite(value);
+                cosmosSpectrumPeak = std::max(cosmosSpectrumPeak,
+                                               std::abs(value));
+            }
+        passed &= expect(
+            cosmosSpectrumFinite
+                && cosmosSpectrumPeak > 0.0001f
+                && cosmosSpectrumPeak < 0.50f,
+            "il nuovo basso COSMOS deve restare finito e con headroom");
+        passed &= expect(
+            cosmosSubPower > 0.000001
+                && cosmosSubPower > cosmosNoSubPower * 16.0
+                && cosmosSubPower > cosmosMainPower * 0.01
+                && cosmosSubPower > cosmosLowerGuardPower * 8.0
+                && cosmosSubPower > cosmosUpperGuardPower * 8.0,
+            "il bus basso COSMOS deve contenere davvero il sub a un'ottava sotto");
 
         std::array<std::vector<float>, 2> cosmosInputStorage;
         std::array<const float*, 2> cosmosInputs {};

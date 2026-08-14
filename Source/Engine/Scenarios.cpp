@@ -19,7 +19,7 @@ float calibratedBassLevel(OscillatorModel model) noexcept
         case OscillatorModel::warm:  return 0.240f;
         case OscillatorModel::pluck: return 0.215f;
         case OscillatorModel::pulse: return 0.192f;
-        case OscillatorModel::dualSquare: return 0.197f;
+        case OscillatorModel::dualSaw: return 0.228f;
         case OscillatorModel::glass:
         case OscillatorModel::reed:
         case OscillatorModel::cloud:
@@ -58,14 +58,17 @@ SynthPatch makeBass(const char* name, OscillatorModel model, int transpose,
 
 SynthPatch makeCosmosBass()
 {
-    auto patch = makeBass("DUE QUADRE", OscillatorModel::dualSquare, -12,
-                          2450.0f, 0.005f, 0.34f, 1.48f);
-    patch.detuneCents = 6.5f;
-    patch.decaySeconds = 0.34f;
-    patch.sustain = 0.72f;
-    patch.keyTrack = 0.22f;
-    patch.harmonicMix = 0.47f;
-    patch.pulseWidth = 0.5f;
+    auto patch = makeBass("DENTE DOPPIO + SUB", OscillatorModel::dualSaw,
+                          -12, 1850.0f, 0.022f, 0.75f, 1.20f);
+    // At 6.5 cents the two old square waves beat every few seconds in the
+    // bass register. 1.8 cents keeps a slow living width without turning the
+    // held bass into a rhythmic pulse.
+    patch.detuneCents = 1.8f;
+    patch.decaySeconds = 0.70f;
+    patch.sustain = 0.80f;
+    patch.keyTrack = 0.18f;
+    patch.harmonicMix = 0.42f;
+    patch.subMix = 0.22f;
     patch.lfoRateHz = 0.0f;
     patch.lfoDepth = 0.0f;
     return patch;
