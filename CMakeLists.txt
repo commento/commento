@@ -37,6 +37,7 @@ target_sources(Commento PRIVATE
     Source/Engine/SaxProcessor.cpp
     Source/Engine/Scenarios.cpp
     Source/Hardware/Model12AudioRouter.cpp
+    Source/Ui/LinuxMultitouchBridge.cpp
 )
 
 target_include_directories(Commento PRIVATE Source)

@@ -31,8 +31,10 @@ constexpr std::uint32_t saxFootswitchTypeShift = 8u;
 constexpr std::uint32_t saxFootswitchTypeMask = 0x7u << saxFootswitchTypeShift;
 constexpr std::uint32_t saxFootswitchRoleShift = 11u;
 constexpr std::uint32_t saxFootswitchRoleMask = 0x3u << saxFootswitchRoleShift;
+constexpr std::uint32_t saxFootswitchPressedHighBit = 1u << 29u;
 constexpr std::uint32_t saxFootswitchBindingMask
-    = saxFootswitchNumberMask | saxFootswitchTypeMask | saxFootswitchRoleMask;
+    = saxFootswitchNumberMask | saxFootswitchTypeMask | saxFootswitchRoleMask
+      | saxFootswitchPressedHighBit;
 constexpr std::uint32_t saxFootswitchHeldBit = 1u << 30u;
 constexpr std::uint32_t saxFootswitchLearningBit = 1u << 31u;
 
@@ -55,7 +57,8 @@ constexpr std::uint32_t saxFootswitchLearningBit = 1u << 31u;
         | (static_cast<std::uint32_t>(binding.type)
             << saxFootswitchTypeShift)
         | (static_cast<std::uint32_t>(binding.role)
-            << saxFootswitchRoleShift);
+            << saxFootswitchRoleShift)
+        | (binding.pressedWhenHigh ? saxFootswitchPressedHighBit : 0u);
 }
 
 [[nodiscard]] EcosystemEngine::SaxFootswitchBinding
@@ -67,6 +70,8 @@ decodeSaxFootswitchBinding(std::uint32_t state) noexcept
         (state & saxFootswitchTypeMask) >> saxFootswitchTypeShift);
     binding.role = static_cast<EcosystemEngine::MidiInputRole>(
         (state & saxFootswitchRoleMask) >> saxFootswitchRoleShift);
+    binding.pressedWhenHigh
+        = (state & saxFootswitchPressedHighBit) != 0u;
     return binding;
 }
 
@@ -81,11 +86,16 @@ saxFootswitchCandidate(const juce::MidiMessage& message,
     if (message.isController())
     {
         const auto controller = message.getControllerNumber();
-        if (message.getControllerValue() >= 64
+        const auto value = message.getControllerValue();
+        // A real footswitch transition should be close to an endpoint. This
+        // accepts both polarities without allowing a moving expression pedal
+        // to win Learn around its centre value.
+        if ((value <= 31 || value >= 96)
             && ! isReservedPerformanceController(controller))
         {
             binding.type = MessageType::controller;
             binding.number = controller;
+            binding.pressedWhenHigh = value >= 64;
         }
     }
     return binding;
@@ -335,7 +345,14 @@ bool EcosystemEngine::consumeSaxFootswitchMessage(
             if (saxFootswitchState.compare_exchange_weak(
                     state, learnedState, std::memory_order_acq_rel,
                     std::memory_order_acquire))
+            {
+                // The instruction on screen explicitly asks for a physical
+                // press. Make that first press useful: bind the pedal and
+                // operate RESPIRO immediately instead of appearing inert
+                // until a second press/release cycle.
+                toggleRecording(midiMemoryCount);
                 return true;
+            }
         }
 
         // Another input may have won the learn CAS. This event still belonged
@@ -392,8 +409,11 @@ bool EcosystemEngine::consumeSaxFootswitchMessage(
     if (binding.type == SaxFootswitchMessageType::controller
         && message.isController()
         && message.getControllerNumber() == binding.number)
-        return message.getControllerValue() >= 64
+    {
+        const auto high = message.getControllerValue() >= 64;
+        return high == binding.pressedWhenHigh
             ? toggleOnPress() : releaseHeld();
+    }
 
     return false;
 }

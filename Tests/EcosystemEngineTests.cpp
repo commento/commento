@@ -1836,20 +1836,21 @@ int main()
                          "note, Program Change e transport non devono essere apprendibili");
         pedalEngine.cancelSaxFootswitchLearn();
 
-        // Learn the common KeyStep sustain pedal. Its initial high message
-        // establishes a held binding: repeated highs are inert until the first
-        // low, so learning with the pedal down can never start a capture.
+        // Learn the common KeyStep sustain pedal. The first physical press is
+        // useful immediately: it both establishes the binding and operates
+        // RESPIRO. Repeated values remain inert until the release edge.
         pedalEngine.beginSaxFootswitchLearn();
         pedalEngine.enqueueMidiMessage(
             juce::MidiMessage::controllerEvent(1, 64, 127),
             MidiRole::keyStep);
         renderPedal(false);
         const auto learnedCc = pedalEngine.getSaxFootswitchBinding();
-        const auto ccLearnWasInert
+        const auto ccLearnStartedSax
             = bindingMatches(learnedCc, MidiRole::keyStep,
                              PedalType::controller, 64)
+            && learnedCc.pressedWhenHigh
             && ! pedalEngine.isSaxFootswitchLearning()
-            && ! pedalEngine.isRecording(saxMemory);
+            && pedalEngine.isRecording(saxMemory);
         pedalEngine.enqueueMidiMessage(
             juce::MidiMessage::controllerEvent(1, 64, 127),
             MidiRole::keyStep);
@@ -1857,9 +1858,20 @@ int main()
             juce::MidiMessage::controllerEvent(1, 64, 127),
             MidiRole::keyStep);
         renderPedal(false);
-        passed &= expect(ccLearnWasInert
-                             && ! pedalEngine.isRecording(saxMemory),
-                         "il CC appreso e i doppi valori alti non devono ritoggle prima del rilascio");
+        passed &= expect(ccLearnStartedSax
+                             && pedalEngine.isRecording(saxMemory),
+                         "la prima pressione deve apprendere e azionare RESPIRO una sola volta");
+
+        // End the short learning capture and return to an empty RESPIRO so the
+        // following sequence can measure a fresh two-block cycle.
+        pedalEngine.enqueueMidiMessage(
+            juce::MidiMessage::controllerEvent(1, 64, 0),
+            MidiRole::keyStep);
+        pedalEngine.toggleRecording(saxMemory);
+        renderPedal(false);
+        pedalEngine.clearMemory(saxMemory);
+        for (int block = 0; block < 24; ++block)
+            renderPedal(false);
 
         pedalEngine.setGestureTarget(3);
         pedalEngine.enqueueMidiMessage(
@@ -1916,6 +1928,36 @@ int main()
                              && closedCycle && startedNurture
                              && stoppedNurture,
                          "il pedale deve compiere SEMINA/CHIUDI/NUTRI/STOP sempre su RESPIRO");
+
+        // A normally-closed/inverted pedal can send zero on the physical
+        // press. Learn must capture that polarity and still toggle only on the
+        // low edge, not on its high release.
+        pedalEngine.clearSaxFootswitchBinding();
+        pedalEngine.beginSaxFootswitchLearn();
+        pedalEngine.enqueueMidiMessage(
+            juce::MidiMessage::controllerEvent(1, 67, 0),
+            MidiRole::keyStep);
+        renderPedal(true);
+        const auto invertedBinding = pedalEngine.getSaxFootswitchBinding();
+        const auto invertedPressStarted = bindingMatches(
+            invertedBinding, MidiRole::keyStep, PedalType::controller, 67)
+            && ! invertedBinding.pressedWhenHigh
+            && pedalEngine.isRecording(saxMemory);
+        pedalEngine.enqueueMidiMessage(
+            juce::MidiMessage::controllerEvent(1, 67, 127),
+            MidiRole::keyStep);
+        renderPedal(true);
+        const auto invertedReleaseWasInert
+            = pedalEngine.isRecording(saxMemory);
+        pedalEngine.enqueueMidiMessage(
+            juce::MidiMessage::controllerEvent(1, 67, 0),
+            MidiRole::keyStep);
+        renderPedal(false);
+        passed &= expect(invertedPressStarted && invertedReleaseWasInert
+                             && ! pedalEngine.isRecording(saxMemory),
+                         "MIDI Learn deve funzionare anche con polarita' bassa");
+        pedalEngine.setSaxFootswitchBinding(
+            { MidiRole::keyStep, PedalType::controller, 64, true });
 
         // A bound CC is removed before the ordinary MIDI FIFO, both on press
         // and release. Record a known note around pedal activity and verify the

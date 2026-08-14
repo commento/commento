@@ -100,9 +100,10 @@ Commento conserva la configurazione precedente. **RILEGGI DISPOSITIVI** aggiorna
 l'elenco e **RILEGGI MIDI** ripete la ricerca di KeyStep Pro, Model 12 e NM2.
 
 Nella stessa pagina, **IMPARA PEDALE SAX** mette Commento in ascolto del prossimo
-Control Change MIDI con valore almeno 64. Fermare temporaneamente sequenze e
-automazioni MIDI, poi premere una volta il footswitch: l'associazione mostrata a
-schermo viene salvata e, da quel momento, il pedale aziona sempre il grande
+Control Change MIDI vicino a uno dei due estremi. Fermare temporaneamente
+sequenze e automazioni MIDI, lasciare il pedale rilasciato e poi premerlo una
+volta: Commento apprende anche la polarita', salva l'associazione e usa gia'
+quella prima pressione per azionare il grande
 pulsante di RESPIRO (`SEMINA`, `CHIUDI IL CICLO`, `NUTRI / OVERDUB` o
 `FERMA NUTRI`) anche quando e' selezionata un'altra card. **RIMUOVI** cancella
 soltanto questa associazione. Il messaggio associato viene consumato dal comando
@@ -314,6 +315,12 @@ durante il collegamento.
   anche se nel frattempo cambia la selezione. E' disponibile per MAREA, RADICE e
   SCINTILLA, oltre che per RESPIRO nel percorso EFFETTI SCENA; non e' disponibile
   per BASSO LIVE e non crea nuovi buffer o riverberi;
+- sulla pagina **GESTI** il touchscreen e' realmente multitouch anche nel kiosk
+  Linux/X11: si puo', per esempio, tenere **CODA LIBERA** con un dito e toccare
+  **PAUSA LOOP** con un altro. Il primo contatto continua a passare dalla UI
+  JUCE normale; Commento legge da `evdev` soltanto i contatti aggiuntivi, senza
+  sottrarre il dispositivo a Xorg. Lo script kiosk aggiunge gia' l'utente al
+  gruppo `input` necessario;
 - usare **PAUSA LOOP** nella pagina GESTI per fermare soltanto la memoria
   selezionata e **PLAY LOOP** per farla ripartire. MAREA, RADICE, SCINTILLA e
   RESPIRO hanno stati indipendenti; BASSO LIVE non e' un loop e il controllo e'

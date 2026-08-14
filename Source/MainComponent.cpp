@@ -1,5 +1,7 @@
 #include "MainComponent.h"
+#include "Ui/LinuxMultitouchBridge.h"
 
+#include <algorithm>
 #include <cmath>
 
 namespace
@@ -112,6 +114,8 @@ constexpr auto defaultPerformanceLevelDb = -6.0;
 constexpr auto saxFootswitchRoleSettingKey = "saxFootswitchRole";
 constexpr auto saxFootswitchTypeSettingKey = "saxFootswitchType";
 constexpr auto saxFootswitchNumberSettingKey = "saxFootswitchNumber";
+constexpr auto saxFootswitchPressedHighSettingKey
+    = "saxFootswitchPressedWhenHigh";
 
 enum class MidiMonitorKind : std::uint32_t
 {
@@ -253,7 +257,8 @@ bool sameSaxFootswitchBinding(
 {
     return first.role == second.role
         && first.type == second.type
-        && first.number == second.number;
+        && first.number == second.number
+        && first.pressedWhenHigh == second.pressedWhenHigh;
 }
 
 juce::String saxFootswitchBindingText(
@@ -275,7 +280,9 @@ juce::String saxFootswitchBindingText(
     switch (binding.type)
     {
         case EcosystemEngine::SaxFootswitchMessageType::controller:
-            message = "CC " + juce::String(binding.number);
+            message = "CC " + juce::String(binding.number)
+                + (binding.pressedWhenHigh ? " / PREME ALTO"
+                                           : " / PREME BASSO");
             break;
         case EcosystemEngine::SaxFootswitchMessageType::none:
             break;
@@ -1193,12 +1200,25 @@ MainComponent::MainComponent()
     updateMidiMonitor();
     setSize(1600, 1000);
     initialiseAudio();
+   #if JUCE_LINUX
+    const juce::Component::SafePointer<MainComponent> safeThis(this);
+    linuxMultitouch = std::make_unique<LinuxMultitouchBridge>(
+        [safeThis](const LinuxMultitouchBridge::Contact& contact)
+        {
+            if (safeThis != nullptr)
+                safeThis->handleSecondaryTouch(
+                    contact.id, contact.normalisedPosition,
+                    contact.phase == LinuxMultitouchBridge::Phase::down);
+        });
+   #endif
     juce::Timer::startTimerHz(30);
 }
 
 MainComponent::~MainComponent()
 {
     juce::Timer::stopTimer();
+    linuxMultitouch.reset();
+    releaseSecondaryTouchCaptures();
     deviceManager.removeMidiInputDeviceCallback({}, this);
     engine.releaseNm2Gestures();
     savePerformanceLevels(false);
@@ -1291,6 +1311,154 @@ void MainComponent::toggleSaxListening()
     updateControls();
 }
 
+void MainComponent::handleSecondaryTouch(
+    int contactId, juce::Point<float> normalisedPosition, bool isDown)
+{
+    if (! isDown)
+    {
+        for (auto& capture : secondaryTouchCaptures)
+        {
+            if (capture.id != contactId)
+                continue;
+
+            switch (capture.action)
+            {
+                case SecondaryTouchAction::freeze:
+                    engine.setFreezeEnabled(capture.target, false);
+                    if (touchscreenFreezeTarget == capture.target)
+                        touchscreenFreezeTarget = -1;
+                    break;
+                case SecondaryTouchAction::echoThrow:
+                    engine.setEchoThrowEnabled(capture.target, false);
+                    if (touchscreenEchoThrowTarget == capture.target)
+                        touchscreenEchoThrowTarget = -1;
+                    break;
+                case SecondaryTouchAction::freeTail:
+                    engine.setFreeTailEnabled(capture.target, false);
+                    if (touchscreenFreeTailTarget == capture.target)
+                        touchscreenFreeTailTarget = -1;
+                    break;
+                case SecondaryTouchAction::none:
+                    break;
+            }
+            capture = {};
+            updateControls();
+            return;
+        }
+        return;
+    }
+
+    // Raw contacts are deliberately useful only on GESTI.  Everywhere else
+    // JUCE's normal primary pointer remains the sole input path, so connection
+    // choices and destructive hold actions retain their existing semantics.
+    if (! gesturesVisible || getWidth() <= 0 || getHeight() <= 0)
+        return;
+    for (const auto& capture : secondaryTouchCaptures)
+        if (capture.id == contactId)
+            return;
+
+    const auto position = juce::Point<int>(
+        juce::jlimit(0, getWidth() - 1, juce::roundToInt(
+            normalisedPosition.x * static_cast<float>(getWidth() - 1))),
+        juce::jlimit(0, getHeight() - 1, juce::roundToInt(
+            normalisedPosition.y * static_cast<float>(getHeight() - 1))));
+    const auto hits = [position](const juce::Component& component)
+    {
+        return component.isVisible() && component.isEnabled()
+            && component.getBounds().contains(position);
+    };
+
+    const auto captureMomentary = [this, contactId](
+        SecondaryTouchAction action, int target)
+    {
+        const auto empty = std::find_if(
+            secondaryTouchCaptures.begin(), secondaryTouchCaptures.end(),
+            [](const SecondaryTouchCapture& capture)
+            {
+                return capture.action == SecondaryTouchAction::none;
+            });
+        if (empty == secondaryTouchCaptures.end())
+            return false;
+        *empty = { contactId, target, action };
+        return true;
+    };
+
+    if (hits(freezeButton) && touchscreenFreezeTarget < 0
+        && captureMomentary(SecondaryTouchAction::freeze, selectedMemory))
+    {
+        touchscreenFreezeTarget = selectedMemory;
+        engine.setFreezeEnabled(touchscreenFreezeTarget, true);
+        updateControls();
+        return;
+    }
+    if (hits(echoThrowButton) && touchscreenEchoThrowTarget < 0
+        && captureMomentary(SecondaryTouchAction::echoThrow, selectedMemory))
+    {
+        touchscreenEchoThrowTarget = selectedMemory;
+        engine.setEchoThrowEnabled(touchscreenEchoThrowTarget, true);
+        updateControls();
+        return;
+    }
+    if (hits(freeTailButton) && touchscreenFreeTailTarget < 0)
+    {
+        const auto saxEffectsAvailable =
+            selectedMemory != EcosystemEngine::midiMemoryCount
+            || engine.getSaxPathMode()
+                == EcosystemEngine::SaxPathMode::sceneEffects;
+        if (! EcosystemEngine::isLiveBassLayer(selectedMemory)
+            && saxEffectsAvailable
+            && captureMomentary(SecondaryTouchAction::freeTail,
+                                selectedMemory))
+        {
+            touchscreenFreeTailTarget = selectedMemory;
+            engine.setFreeTailEnabled(touchscreenFreeTailTarget, true);
+            updateControls();
+        }
+        return;
+    }
+
+    const auto triggerIfHit = [&hits](juce::Button& button)
+    {
+        if (! hits(button))
+            return false;
+        button.triggerClick();
+        return true;
+    };
+
+    for (auto& button : gestureTargetButtons)
+        if (triggerIfHit(*button))
+            return;
+    for (auto* button : { &textureButton, &fuzzButton, &evolutionButton,
+                          &thinningButton, &saxListenButton,
+                          &loopTransportButton, &previousScenarioButton,
+                          &nextScenarioButton, &settingsButton,
+                          &gesturesButton })
+        if (triggerIfHit(*button))
+            return;
+}
+
+void MainComponent::releaseSecondaryTouchCaptures()
+{
+    for (auto& capture : secondaryTouchCaptures)
+    {
+        switch (capture.action)
+        {
+            case SecondaryTouchAction::freeze:
+                engine.setFreezeEnabled(capture.target, false);
+                break;
+            case SecondaryTouchAction::echoThrow:
+                engine.setEchoThrowEnabled(capture.target, false);
+                break;
+            case SecondaryTouchAction::freeTail:
+                engine.setFreeTailEnabled(capture.target, false);
+                break;
+            case SecondaryTouchAction::none:
+                break;
+        }
+        capture = {};
+    }
+}
+
 void MainComponent::updateTextureButton()
 {
     const auto amount = engine.getTextureAmount();
@@ -1376,6 +1544,8 @@ void MainComponent::loadSaxFootswitchBinding()
                 static_cast<int>(EcosystemEngine::SaxFootswitchMessageType::none)));
         binding.number = settings->getIntValue(
             saxFootswitchNumberSettingKey, -1);
+        binding.pressedWhenHigh = settings->getBoolValue(
+            saxFootswitchPressedHighSettingKey, true);
     }
 
     if (binding.valid())
@@ -1397,6 +1567,8 @@ void MainComponent::saveSaxFootswitchBinding(bool flushToDisk)
     settings->setValue(saxFootswitchTypeSettingKey,
                        static_cast<int>(binding.type));
     settings->setValue(saxFootswitchNumberSettingKey, binding.number);
+    settings->setValue(saxFootswitchPressedHighSettingKey,
+                       binding.pressedWhenHigh);
     if (flushToDisk)
         settings->saveIfNeeded();
     persistedSaxFootswitchBinding = binding;
@@ -1412,7 +1584,7 @@ void MainComponent::updateSaxFootswitchControls()
                                             juce::dontSendNotification);
     saxFootswitchClearButton.setEnabled(binding.valid());
     saxFootswitchBindingLabel.setText(
-        learning ? "PEDALE SAX: APPRENDIMENTO - PREMI IL PEDALE"
+        learning ? "PEDALE SAX: RILASCIALO, POI PREMI UNA VOLTA"
                  : saxFootswitchBindingText(binding),
         juce::dontSendNotification);
     saxFootswitchBindingLabel.setColour(
@@ -1429,12 +1601,24 @@ void MainComponent::updateMidiMonitor()
         const auto value = sustainPacked & 0x7f;
         const auto role = static_cast<EcosystemEngine::MidiInputRole>(
             (sustainPacked >> 8) & 0x3);
+        const auto channel = (sustainPacked >> 10) & 0x1f;
         const auto edges = sustainEdgeMask.load(std::memory_order_relaxed);
         const auto completeCycle = (edges & 0x3u) == 0x3u;
+        const auto binding = engine.getSaxFootswitchBinding();
+        const auto controlsSax = binding.valid()
+            && binding.type
+                == EcosystemEngine::SaxFootswitchMessageType::controller
+            && binding.role == role && binding.number == 64;
+        const auto physicallyPressed = controlsSax
+            ? ((value >= 64) == binding.pressedWhenHigh)
+            : value >= 64;
         sustainMonitorLabel.setText(
             "PEDALE RICEVUTO  /  " + midiRoleText(role)
+                + "  /  CH " + juce::String(channel)
                 + "  /  CC64 = " + juce::String(value)
-                + (value >= 64 ? "  PREMUTO" : "  RILASCIATO")
+                + (physicallyPressed ? "  PREMUTO" : "  RILASCIATO")
+                + (controlsSax ? "  /  COMANDA RESPIRO"
+                               : "  /  PREMI IMPARA PEDALE SAX")
                 + (completeCycle ? "  /  CICLO 127-0 OK"
                                  : "  /  MUOVILO FINO AL RILASCIO"),
             juce::dontSendNotification);
@@ -2513,7 +2697,8 @@ void MainComponent::handleIncomingMidiMessage(juce::MidiInput* source,
         {
             lastSustainValue.store(
                 message.getControllerValue()
-                    | (static_cast<int>(role) << 8),
+                    | (static_cast<int>(role) << 8)
+                    | (message.getChannel() << 10),
                                    std::memory_order_relaxed);
             sustainEdgeMask.fetch_or(
                 message.getControllerValue() >= 64 ? 2u : 1u,
@@ -3004,6 +3189,7 @@ void MainComponent::toggleSettings()
     settingsVisible = ! settingsVisible;
     gesturesVisible = false;
     // Never leave a hidden learn or a held edge behind when crossing pages.
+    releaseSecondaryTouchCaptures();
     engine.releaseSaxFootswitch();
     engine.cancelSaxFootswitchLearn();
     engine.releaseMomentaryGestures();
@@ -3033,6 +3219,7 @@ void MainComponent::toggleGestures()
     settingsVisible = false;
     // A hidden momentary pad must never remain held. The DSP performs the
     // release ramp after these ownership bits are cleared.
+    releaseSecondaryTouchCaptures();
     engine.releaseMomentaryGestures();
     touchscreenFreezeTarget = -1;
     touchscreenEchoThrowTarget = -1;

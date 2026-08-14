@@ -56,6 +56,9 @@ public:
         MidiInputRole role = MidiInputRole::generic;
         SaxFootswitchMessageType type = SaxFootswitchMessageType::none;
         int number = -1;
+        // Most pedals send 127 while pressed, but an inverted normally-closed
+        // switch can send 0. MIDI Learn captures the physical press edge.
+        bool pressedWhenHigh = true;
 
         [[nodiscard]] bool valid() const noexcept
         {

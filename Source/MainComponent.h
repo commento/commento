@@ -11,6 +11,7 @@
 
 class MemoryOrb;
 class ConnectionChoice;
+class LinuxMultitouchBridge;
 
 class MainComponent final : public juce::Component,
                             private juce::MidiInputCallback,
@@ -78,6 +79,10 @@ private:
     void updateScenarioLabels();
     void cycleTexture();
     void toggleSaxListening();
+    void handleSecondaryTouch(int contactId,
+                              juce::Point<float> normalisedPosition,
+                              bool isDown);
+    void releaseSecondaryTouchCaptures();
     void updateTextureButton();
     void updatePerformanceLevelControl();
     void savePerformanceLevels(bool flushToDisk);
@@ -182,6 +187,21 @@ private:
     int touchscreenFreezeTarget = -1;
     int touchscreenEchoThrowTarget = -1;
     int touchscreenFreeTailTarget = -1;
+    enum class SecondaryTouchAction : std::uint8_t
+    {
+        none,
+        freeze,
+        echoThrow,
+        freeTail
+    };
+    struct SecondaryTouchCapture
+    {
+        int id = -1;
+        int target = -1;
+        SecondaryTouchAction action = SecondaryTouchAction::none;
+    };
+    std::array<SecondaryTouchCapture, 8> secondaryTouchCaptures {};
+    std::unique_ptr<LinuxMultitouchBridge> linuxMultitouch;
     // Endpoints are matched by identifier, not by name. The scan sees the name
     // reported by getAvailableDevices() while the callback sees the one on the
     // opened MidiInput, and on ALSA those two strings are not always the same:
