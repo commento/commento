@@ -203,6 +203,7 @@ private:
     {
         juce::MidiMessage message;
         int64_t samplePosition = 0;
+        std::uint16_t noteDepth = 1;
     };
 
     struct IncomingMidiEvent
@@ -214,6 +215,11 @@ private:
     struct MidiMemory
     {
         std::vector<TimedMidiEvent> events;
+        // A MIDI overdub is collected separately while the original loop
+        // keeps playing. Both vectors are permanently reserved at startup;
+        // the audio callback never grows storage or sorts a large take.
+        std::vector<TimedMidiEvent> overdubEvents;
+        std::vector<TimedMidiEvent> mergeScratch;
         std::atomic<bool> recordingRequested { false };
         std::atomic<bool> recordingForDisplay { false };
         std::atomic<bool> waitingForFirstNoteForDisplay { false };
@@ -228,15 +234,27 @@ private:
         int64_t recordPosition = 0;
         int64_t playbackPosition = 0;
         int64_t loopLength = 0;
-        std::array<bool, 128> activeRecordedNotes {};
+        bool overdubActive = false;
+        bool overdubExpressionSeedPending = false;
+        bool recordedSustainDown = false;
+        std::uint8_t overdubControllerTouched = 0;
+        // Depth, not a boolean: repeated note-ons of the same pitch require
+        // the matching number of note-offs before an overdub considers that
+        // pitch closed.
+        std::array<std::uint16_t, 128> activeRecordedNotes {};
         // Logical controller/note state immediately before playbackPosition.
         // PAUSA silences only the private stored-loop voices but preserves
         // this fixed-size snapshot, so PLAY can rebuild held and sustained
         // notes without scanning the event list in the realtime callback.
         std::array<bool, 128> playbackKeyDownNotes {};
         std::array<bool, 128> playbackActiveNotes {};
+        // A union gate prevents an overdub note-off from truncating the same
+        // pitch still owned by another take. Overlapping retriggers become one
+        // continuous ambient note until the last owner releases it.
+        std::array<std::uint16_t, 128> playbackKeyDownDepths {};
         std::array<float, 128> playbackNoteVelocities {};
         bool playbackSustainDown = false;
+        std::uint16_t playbackSustainDepth = 0;
         int playbackPitchWheel = 8192;
         int playbackModulation = 0;
         int playbackBrightness = 0;
@@ -306,6 +324,11 @@ private:
     [[nodiscard]] static int memoryIndexForMidiChannel(int midiChannel);
 
     void applyMidiCommands(MidiMemory& memory, int channel, juce::MidiBuffer& output);
+    [[nodiscard]] bool insertMidiOverdubEvent(
+        MidiMemory& memory, const juce::MidiMessage& message,
+        int64_t samplePosition, bool safetyEvent = false,
+        std::uint16_t noteDepth = 1) noexcept;
+    void finishMidiOverdub(MidiMemory& memory, int channel) noexcept;
     void applyAudioCommands();
     void finishInitialAudioCapture() noexcept;
     void beginAudioMemoryGainTransition(float targetGain, double seconds,

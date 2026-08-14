@@ -2785,10 +2785,11 @@ void MainComponent::updateControls()
     else if (waitingForFirstNote)
         recordButton.setButtonText("ATTENDO NOTA");
     else if (recording)
-        recordButton.setButtonText(material ? "FERMA NUTRI" : "CHIUDI IL CICLO");
+        recordButton.setButtonText(material
+            ? (isMidiLoopMemory ? "FERMA OVERDUB" : "FERMA NUTRI")
+            : "CHIUDI IL CICLO");
     else if (material)
-        recordButton.setButtonText(selectedMemory == EcosystemEngine::midiMemoryCount
-                                       ? "NUTRI / OVERDUB" : "RISCRIVI");
+        recordButton.setButtonText("NUTRI / OVERDUB");
     else
         recordButton.setButtonText("SEMINA");
     recordButton.setToggleState(isBass ? engine.isBassEnabled()
@@ -2980,13 +2981,17 @@ void MainComponent::updateControls()
     const auto type = waitingForFirstNote
         ? "LOOP MIDI " + juce::String(engine.getMidiChannelForMemory(selectedMemory))
             + " / ATTENDO PRIMO NOTE-ON"
+        : (isMidiLoopMemory && recording && material
+            ? "LOOP MIDI "
+                + juce::String(engine.getMidiChannelForMemory(selectedMemory))
+                + " / OVERDUB NON DISTRUTTIVO"
         : (isBass
             ? "BASSO LIVE / MIDI 5 -> USCITA CONFIGURATA"
         : (selectedMemory < EcosystemEngine::midiMemoryCount
             ? "LOOP MIDI " + juce::String(engine.getMidiChannelForMemory(selectedMemory))
             : (material
                 ? "SAX / NUTRI: AGGIUNGE E CONSUMA LENTAMENTE LA MEMORIA"
-                : "SAX / ROUTING AUDIO CONFIGURATO")));
+                : "SAX / ROUTING AUDIO CONFIGURATO"))));
     const auto count = ! waitingForFirstNote
         && selectedMemory > EcosystemEngine::bassLayerIndex
         && selectedMemory < EcosystemEngine::midiMemoryCount

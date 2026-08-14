@@ -4485,9 +4485,10 @@ int main()
                              && transportMaximumStep < 0.20f,
                          "PLAY deve ricostruire e sfumare le note attraversate senza fermare il basso o creare click");
 
-        // SEMINA on a paused MIDI memory deliberately returns it to PLAY and
-        // replaces the old loop. DIMENTICA also normalises transport state so
-        // an empty card can never remain marked IN PAUSA.
+        // NUTRI on a paused, populated MIDI memory deliberately returns it to
+        // PLAY and adds to the old loop without changing its duration.
+        // DIMENTICA also normalises transport state so an empty card can never
+        // remain marked IN PAUSA.
         transportEngine.setLoopPlaying(1, false);
         renderTransport();
         auto midiFadeOutStartEnergy = 0.0;
@@ -4507,6 +4508,10 @@ int main()
                 midiFadeOutStartEnergy += first * first;
                 midiFadeOutEndEnergy += last * last;
             }
+        const auto midiEventsBeforePausedOverdub
+            = transportEngine.getEventCount(1);
+        const auto midiLengthBeforePausedOverdub
+            = transportEngine.getLengthSeconds(1);
         transportEngine.toggleRecording(1);
         const auto midiRecordForcedPlay = transportEngine.isLoopPlaying(1);
         transportEngine.enqueueMidiMessage(
@@ -4520,8 +4525,11 @@ int main()
         }
         transportEngine.toggleRecording(1);
         renderTransport();
-        const auto midiRecordedFromPause = transportEngine.hasMaterial(1)
-            && transportEngine.getEventCount(1) == 2
+        const auto midiOverdubbedFromPause = transportEngine.hasMaterial(1)
+            && transportEngine.getEventCount(1)
+                >= midiEventsBeforePausedOverdub + 2
+            && std::abs(transportEngine.getLengthSeconds(1)
+                        - midiLengthBeforePausedOverdub) < 0.000001
             && transportEngine.isLoopPlaying(1);
         transportEngine.setLoopPlaying(1, false);
         transportEngine.clearMemory(1);
@@ -4541,8 +4549,8 @@ int main()
         passed &= expect(midiFadeOutStartEnergy
                                     > midiFadeOutEndEnergy * 1.5,
                          "PAUSA MIDI deve usare un fade-out progressivo");
-        passed &= expect(midiRecordForcedPlay && midiRecordedFromPause,
-                         "SEMINA MIDI deve uscire da PAUSA e riscrivere il loop");
+        passed &= expect(midiRecordForcedPlay && midiOverdubbedFromPause,
+                         "NUTRI MIDI deve uscire da PAUSA preservando il loop");
         passed &= expect(midiClearRestoredPlay,
                          "DIMENTICA MIDI deve uscire da PAUSA e cancellare il materiale");
         passed &= expect(midiClearDrained,
@@ -4567,6 +4575,311 @@ int main()
             && transportEngine.hasMaterial(3);
         passed &= expect(prepareRestoredPlay && stopRestoredPlay,
                          "prepare e stop audio devono ripartire in PLAY conservando i loop chiusi");
+    }
+
+    // NUTRI on a closed MIDI memory is an overdub, not a replacement take.
+    // Exercise all three ambient memories because each owns a different live
+    // and private-playback channel.  The first overdub deliberately crosses
+    // the loop boundary with both a held key and sustain; after draining the
+    // synth under PAUSA, PLAY at a logically silent phase must remain silent.
+    // This catches missing wrap note-offs without inspecting realtime-owned
+    // event storage from the test thread.
+    {
+        constexpr auto overdubSampleRate = 8000.0;
+        constexpr auto overdubBlockSize = 400;
+        constexpr auto initialLoopBlocks = 80; // Four seconds.
+        auto overdubScenario = 0;
+        for (int scenario = 0; scenario < CommentoScenarios::count; ++scenario)
+            if (std::string(CommentoScenarios::get(scenario).name) == "FERRO")
+                overdubScenario = scenario;
+
+        auto everyMemoryPreservedOriginal = true;
+        auto everyMemoryAddedBothTakes = true;
+        auto everyPausedOverdubForcedPlay = true;
+        auto everyWrapStateReleased = true;
+        auto everyOriginalAndOverdubPlayed = true;
+        auto everyMemoryClearedCleanly = true;
+        auto everyOverdubStayedFinite = true;
+
+        for (int memory = 1; memory < EcosystemEngine::midiMemoryCount;
+             ++memory)
+        {
+            auto engineStorage = std::make_unique<EcosystemEngine>();
+            auto& engine = *engineStorage;
+            engine.setScenarioIndex(overdubScenario);
+            engine.setDelayLevel(memory, 0.0f);
+            engine.prepare(overdubSampleRate, overdubBlockSize);
+            OutputBlock<EcosystemEngine::logicalOutputBusCount> output(
+                overdubBlockSize);
+            auto maximumPeak = 0.0f;
+            auto finite = true;
+            const auto render = [&]
+            {
+                output.clear();
+                process(engine, nullptr, 0, output.pointers.data(),
+                        EcosystemEngine::logicalOutputBusCount,
+                        overdubBlockSize);
+                finite &= output.finite(overdubBlockSize);
+                maximumPeak = std::max(maximumPeak,
+                    std::max(output.peak(EcosystemEngine::ambientLeftBus,
+                                         overdubBlockSize),
+                             output.peak(EcosystemEngine::ambientRightBus,
+                                         overdubBlockSize)));
+            };
+            const auto outputPeak = [&]
+            {
+                return std::max(
+                    output.peak(EcosystemEngine::ambientLeftBus,
+                                overdubBlockSize),
+                    output.peak(EcosystemEngine::ambientRightBus,
+                                overdubBlockSize));
+            };
+            // Move forward to target. If it is behind the current phase,
+            // wait for exactly one wrap before accepting it.
+            const auto advanceToPhase = [&](double target)
+            {
+                auto previous = engine.getPhase(memory);
+                auto needsWrap = previous > target + 0.02;
+                for (int block = 0; block < initialLoopBlocks * 3; ++block)
+                {
+                    const auto current = engine.getPhase(memory);
+                    if (! needsWrap && current >= target)
+                        return true;
+                    render();
+                    const auto advanced = engine.getPhase(memory);
+                    if (needsWrap && advanced + 0.25 < previous)
+                        needsWrap = false;
+                    previous = advanced;
+                }
+                return false;
+            };
+
+            const auto channel = engine.getMidiChannelForMemory(memory);
+            const auto openingNote = 43 + memory;
+            const auto preservedNote = 55 + memory;
+            const auto crossingNote = 71 + memory;
+            const auto secondTakeNote = 62 + memory;
+
+            // SEMINA: a short opening event defines zero and another note at
+            // phase 0.35 gives us an audible proof that the original event
+            // list survives both later overdubs.
+            engine.toggleRecording(memory);
+            engine.enqueueMidiMessage(
+                juce::MidiMessage::noteOn(channel, openingNote, 0.76f));
+            for (int block = 0; block < initialLoopBlocks; ++block)
+            {
+                if (block == 2)
+                    engine.enqueueMidiMessage(
+                        juce::MidiMessage::noteOff(channel, openingNote));
+                if (block == 28)
+                    engine.enqueueMidiMessage(
+                        juce::MidiMessage::noteOn(
+                            channel, preservedNote, 0.84f));
+                if (block == 32)
+                    engine.enqueueMidiMessage(
+                        juce::MidiMessage::noteOff(channel, preservedNote));
+                render();
+            }
+            engine.toggleRecording(memory);
+            render();
+            const auto initialEvents = engine.getEventCount(memory);
+            const auto initialLength = engine.getLengthSeconds(memory);
+            const auto initialMaterial = engine.hasMaterial(memory)
+                && initialEvents >= 4 && initialLength > 3.9
+                && initialLength < 4.1;
+
+            // First NUTRI starts from PAUSA near the end. The key is released
+            // after wrap and sustain is lifted slightly later, exercising two
+            // independent ways a note can span the loop boundary.
+            const auto reachedCrossingStart = advanceToPhase(0.77);
+            engine.setLoopPlaying(memory, false);
+            render();
+            // Drain the voice before NUTRI so the following peak cannot be a
+            // release left by SEMINA. The closed loop must resume and keep
+            // advancing while the overdub is armed, even before a new note is
+            // played.
+            for (int block = 0; block < 240; ++block)
+                render();
+            engine.toggleRecording(memory);
+            const auto forcedPlay = engine.isLoopPlaying(memory);
+            auto originalDuringOverdubPeak = 0.0f;
+            auto previousOverdubPhase = engine.getPhase(memory);
+            auto overdubWrapped = false;
+            auto originalContinuedDuringOverdub = false;
+            for (int block = 0; block < initialLoopBlocks * 2; ++block)
+            {
+                render();
+                const auto phase = engine.getPhase(memory);
+                if (phase + 0.25 < previousOverdubPhase)
+                    overdubWrapped = true;
+                if (overdubWrapped && phase >= 0.31 && phase <= 0.44)
+                    originalDuringOverdubPeak = std::max(
+                        originalDuringOverdubPeak, outputPeak());
+                if (overdubWrapped && phase >= 0.44)
+                {
+                    originalContinuedDuringOverdub = true;
+                    break;
+                }
+                previousOverdubPhase = phase;
+            }
+            const auto returnedToCrossingStart = advanceToPhase(0.77);
+            engine.enqueueMidiMessage(
+                juce::MidiMessage::controllerEvent(channel, 64, 127));
+            engine.enqueueMidiMessage(
+                juce::MidiMessage::noteOn(channel, crossingNote, 0.88f));
+            render();
+            const auto reachedAfterWrap = advanceToPhase(0.10);
+            engine.enqueueMidiMessage(
+                juce::MidiMessage::noteOff(channel, crossingNote));
+            render();
+            const auto reachedSustainRelease = advanceToPhase(0.15);
+            engine.enqueueMidiMessage(
+                juce::MidiMessage::controllerEvent(channel, 64, 0));
+            render();
+            advanceToPhase(0.19);
+            engine.toggleRecording(memory);
+            render();
+            const auto firstOverdubEvents = engine.getEventCount(memory);
+            const auto firstOverdubLength = engine.getLengthSeconds(memory);
+            const auto firstTakePreserved = engine.hasMaterial(memory)
+                && std::abs(firstOverdubLength - initialLength)
+                    <= 1.0 / overdubSampleRate
+                && firstOverdubEvents >= initialEvents + 4;
+
+            // A second NUTRI must accumulate on the first one. Include two
+            // ordinary expression CCs: they should be retained when supported
+            // but must never replace notes or redefine loop duration.
+            const auto reachedSecondTake = advanceToPhase(0.52);
+            engine.toggleRecording(memory);
+            engine.enqueueMidiMessage(
+                juce::MidiMessage::controllerEvent(channel, 1, 91));
+            engine.enqueueMidiMessage(
+                juce::MidiMessage::controllerEvent(channel, 74, 103));
+            engine.enqueueMidiMessage(
+                juce::MidiMessage::noteOn(channel, secondTakeNote, 0.80f));
+            render();
+            render();
+            engine.enqueueMidiMessage(
+                juce::MidiMessage::noteOff(channel, secondTakeNote));
+            render();
+            engine.toggleRecording(memory);
+            render();
+            const auto secondOverdubEvents = engine.getEventCount(memory);
+            const auto secondOverdubLength = engine.getLengthSeconds(memory);
+            const auto secondTakeAccumulated = engine.hasMaterial(memory)
+                && std::abs(secondOverdubLength - initialLength)
+                    <= 1.0 / overdubSampleRate
+                && secondOverdubEvents >= firstOverdubEvents + 4;
+
+            // Stop at phase 0.20, after both wrap releases and before the
+            // preserved event at 0.35. PAUSA drains old voices; on PLAY the
+            // silent prefix proves no key/sustain state remained stuck, then
+            // the original note proves SEMINA was not erased.
+            const auto reachedSilentPhase = advanceToPhase(0.20);
+            const auto phaseBeforePause = engine.getPhase(memory);
+            engine.setLoopPlaying(memory, false);
+            render();
+            for (int block = 0; block < 240; ++block)
+                render();
+            const auto pauseDrainedPeak = outputPeak();
+            const auto phaseStayedFrozen = std::abs(
+                engine.getPhase(memory) - phaseBeforePause) < 0.000000001;
+            engine.setLoopPlaying(memory, true);
+            auto silentPrefixPeak = 0.0f;
+            while (engine.getPhase(memory) < 0.32)
+            {
+                render();
+                silentPrefixPeak = std::max(silentPrefixPeak, outputPeak());
+            }
+            auto preservedNotePeak = 0.0f;
+            while (engine.getPhase(memory) < 0.44)
+            {
+                render();
+                preservedNotePeak = std::max(preservedNotePeak, outputPeak());
+            }
+            auto secondTakePeak = 0.0f;
+            while (engine.getPhase(memory) < 0.61)
+            {
+                render();
+                secondTakePeak = std::max(secondTakePeak, outputPeak());
+            }
+
+            // Drain once more in the gap before 0.77. The next sound must be
+            // the newly overdubbed crossing note, proving merged-event
+            // playback in addition to the public event-count checks.
+            const auto reachedSecondGap = advanceToPhase(0.65);
+            engine.setLoopPlaying(memory, false);
+            render();
+            for (int block = 0; block < 240; ++block)
+                render();
+            engine.setLoopPlaying(memory, true);
+            auto preCrossingPeak = 0.0f;
+            while (engine.getPhase(memory) < 0.76)
+            {
+                render();
+                preCrossingPeak = std::max(preCrossingPeak, outputPeak());
+            }
+            auto crossingPlaybackPeak = 0.0f;
+            auto previousPhase = engine.getPhase(memory);
+            auto playbackWrapped = false;
+            for (int block = 0; block < initialLoopBlocks; ++block)
+            {
+                render();
+                crossingPlaybackPeak = std::max(crossingPlaybackPeak,
+                                                outputPeak());
+                const auto phase = engine.getPhase(memory);
+                if (phase + 0.25 < previousPhase)
+                    playbackWrapped = true;
+                if (playbackWrapped && phase >= 0.04)
+                    break;
+                previousPhase = phase;
+            }
+
+            engine.clearMemory(memory);
+            render();
+            for (int block = 0; block < 240; ++block)
+                render();
+            const auto clearDrainedPeak = outputPeak();
+            const auto cleared = ! engine.hasMaterial(memory)
+                && engine.getEventCount(memory) == 0
+                && engine.getLengthSeconds(memory) == 0.0
+                && engine.isLoopPlaying(memory)
+                && clearDrainedPeak < 0.0002f;
+
+            everyMemoryPreservedOriginal &= initialMaterial
+                && reachedCrossingStart && returnedToCrossingStart
+                && reachedAfterWrap && reachedSustainRelease
+                && originalContinuedDuringOverdub
+                && originalDuringOverdubPeak > 0.0005f
+                && firstTakePreserved;
+            everyMemoryAddedBothTakes &= reachedSecondTake
+                && secondTakeAccumulated;
+            everyPausedOverdubForcedPlay &= forcedPlay;
+            everyWrapStateReleased &= reachedSilentPhase
+                && phaseStayedFrozen && pauseDrainedPeak < 0.0002f
+                && silentPrefixPeak < 0.0006f;
+            everyOriginalAndOverdubPlayed &= preservedNotePeak > 0.0005f
+                && secondTakePeak > 0.0005f && reachedSecondGap
+                && preCrossingPeak < 0.0006f
+                && crossingPlaybackPeak > 0.0005f && playbackWrapped;
+            everyMemoryClearedCleanly &= cleared;
+            everyOverdubStayedFinite &= finite && maximumPeak < 0.90f;
+        }
+
+        passed &= expect(everyMemoryPreservedOriginal,
+                         "NUTRI MIDI 1/2/3 deve preservare eventi e durata della SEMINA");
+        passed &= expect(everyMemoryAddedBothTakes,
+                         "due NUTRI MIDI devono accumulare note, sustain e CC senza sostituirsi");
+        passed &= expect(everyPausedOverdubForcedPlay,
+                         "NUTRI MIDI avviato da PAUSA deve forzare PLAY");
+        passed &= expect(everyWrapStateReleased,
+                         "note e sustain sovraincisi attraverso il wrap non devono restare bloccati");
+        passed &= expect(everyOriginalAndOverdubPlayed,
+                         "PLAY deve riprodurre sia la SEMINA originale sia le nuove note NUTRI");
+        passed &= expect(everyMemoryClearedCleanly,
+                         "DIMENTICA deve cancellare completamente ogni overdub MIDI");
+        passed &= expect(everyOverdubStayedFinite,
+                         "overdub MIDI multipli devono restare finiti e con headroom");
     }
 
     // DIRADA cannot own a paused memory. With only one eligible MIDI loop,

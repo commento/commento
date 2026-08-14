@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 #if JUCE_LINUX
  #include <pthread.h>
@@ -19,6 +20,11 @@ constexpr int echoThrowController = 81;
 constexpr int saxListenController = 82;
 constexpr int freeTailController = 83;
 constexpr int thinningController = 84;
+constexpr std::uint8_t overdubPitchTouched = 1u;
+constexpr std::uint8_t overdubModulationTouched = 2u;
+constexpr std::uint8_t overdubBrightnessTouched = 4u;
+constexpr std::uint8_t overdubPressureTouched = 8u;
+constexpr std::uint8_t overdubSustainTouched = 16u;
 constexpr std::uint32_t saxFootswitchNumberMask = 0xffu;
 
 constexpr std::uint32_t saxFootswitchTypeShift = 8u;
@@ -179,7 +185,12 @@ EcosystemEngine::EcosystemEngine()
     for (int index = 0; index < midiMemoryCount; ++index)
     {
         auto& memory = midiMemories[static_cast<size_t>(index)];
-        memory.events.reserve(maximumMidiEvents + 128);
+        // The normal budget is fixed; the extra slots are reserved for one
+        // definitive note-off per pitch plus controller restoration.
+        constexpr auto reservedMidiEvents = maximumMidiEvents + 256;
+        memory.events.reserve(reservedMidiEvents);
+        memory.overdubEvents.reserve(reservedMidiEvents);
+        memory.mergeScratch.reserve(reservedMidiEvents);
         memory.evolutionRandomState ^= static_cast<std::uint32_t>(
             0x85ebca6bu * static_cast<std::uint32_t>(index + 1));
         internalSynths[static_cast<size_t>(index)] = std::make_unique<AmbientSynth>(index);
@@ -628,6 +639,11 @@ bool EcosystemEngine::isWaitingForFirstNote(int memoryIndex) const
         return false;
 
     const auto& memory = midiMemories[static_cast<size_t>(memoryIndex)];
+    // A populated MIDI memory enters overdub immediately and never waits for
+    // a first note. This also prevents a one-frame ATTENDO NOTA flash between
+    // the touch event and the next audio callback.
+    if (memory.containsMaterial.load(std::memory_order_acquire))
+        return false;
     return memory.recordingRequested.load()
         && (! memory.recordingForDisplay.load()
             || memory.waitingForFirstNoteForDisplay.load());
@@ -1330,9 +1346,9 @@ void EcosystemEngine::prepare(double newSampleRate, int maximumBlockSize)
     audioEvolutionLowPassCoefficient = static_cast<float>(1.0 - std::exp(
         -juce::MathConstants<double>::twoPi * safeEvolutionCutoff
         / sampleRate));
-    blockMidiOutput.ensureSize(128 * 1024);
+    blockMidiOutput.ensureSize(256 * 1024);
     for (auto& midi : layerMidiBuffers)
-        midi.ensureSize(64 * 1024);
+        midi.ensureSize(128 * 1024);
     for (int index = 0; index < midiMemoryCount; ++index)
     {
         auto& synth = internalSynths[static_cast<std::size_t>(index)];
@@ -1400,22 +1416,53 @@ void EcosystemEngine::audioDeviceStopped()
         auto& memory = midiMemories[static_cast<size_t>(index)];
         if (memory.recordingActive)
         {
-            const auto closingPosition = juce::jmax<int64_t>(0, memory.recordPosition - 1);
-            for (int note = 0;
-                 note < static_cast<int>(memory.activeRecordedNotes.size()); ++note)
-                if (memory.activeRecordedNotes[static_cast<size_t>(note)])
-                    memory.events.push_back({ juce::MidiMessage::noteOff(
-                                                  midiChannels[static_cast<size_t>(index)], note),
-                                              closingPosition });
-            memory.activeRecordedNotes.fill(false);
-            memory.loopLength = memory.recordPosition;
-            memory.playbackPosition = 0;
-            resetMidiPlaybackSnapshot(memory);
-            const auto usable = memory.loopLength > 0 && ! memory.events.empty();
-            memory.containsMaterial.store(usable);
-            memory.eventCount.store(static_cast<int>(memory.events.size()));
-            memory.lengthSeconds.store(usable
-                ? static_cast<double>(memory.loopLength) / sampleRate : 0.0);
+            if (memory.overdubActive)
+            {
+                // A device restart is not a musical "close take" gesture.
+                // Discard only the uncommitted layer and preserve the base
+                // loop, its playhead and its duration exactly.
+                memory.overdubEvents.clear();
+                memory.mergeScratch.clear();
+                memory.overdubActive = false;
+                memory.overdubExpressionSeedPending = false;
+                memory.recordedSustainDown = false;
+                memory.overdubControllerTouched = 0u;
+                memory.activeRecordedNotes.fill(false);
+                memory.eventCount.store(
+                    static_cast<int>(memory.events.size()));
+            }
+            else
+            {
+                const auto closingPosition = juce::jmax<int64_t>(
+                    0, memory.recordPosition - 1);
+                for (int note = 0;
+                     note < static_cast<int>(
+                         memory.activeRecordedNotes.size()); ++note)
+                    if (const auto depth = memory.activeRecordedNotes[
+                            static_cast<size_t>(note)]; depth > 0)
+                        memory.events.push_back({
+                            juce::MidiMessage::noteOff(
+                                midiChannels[static_cast<size_t>(index)], note),
+                            closingPosition, depth });
+                if (memory.recordedSustainDown)
+                    memory.events.push_back({
+                        juce::MidiMessage::controllerEvent(
+                            midiChannels[static_cast<size_t>(index)], 64, 0),
+                        closingPosition });
+                memory.activeRecordedNotes.fill(false);
+                memory.recordedSustainDown = false;
+                memory.loopLength = memory.recordPosition;
+                memory.playbackPosition = 0;
+                resetMidiPlaybackSnapshot(memory);
+                const auto usable = memory.loopLength > 0
+                    && ! memory.events.empty();
+                memory.containsMaterial.store(usable);
+                memory.eventCount.store(
+                    static_cast<int>(memory.events.size()));
+                memory.lengthSeconds.store(usable
+                    ? static_cast<double>(memory.loopLength) / sampleRate
+                    : 0.0);
+            }
         }
         memory.recordingRequested.store(false);
         memory.recordingActive = false;
@@ -1518,9 +1565,7 @@ void EcosystemEngine::audioDeviceIOCallbackWithContext(
     updateThinningState();
 
     blockMidiOutput.clear();
-    if (midiOverflowed.exchange(false))
-        for (const auto channel : midiChannels)
-            blockMidiOutput.addEvent(juce::MidiMessage::allNotesOff(channel), 0);
+    const auto midiOverflowThisBlock = midiOverflowed.exchange(false);
 
     applyScenarioIfNeeded();
     advanceScenarioMorph(numSamples);
@@ -1534,6 +1579,28 @@ void EcosystemEngine::audioDeviceIOCallbackWithContext(
     applyAudioCommands();
     applyLoopTransportCommands(blockMidiOutput);
     recordIncomingMidi(numSamples, blockMidiOutput);
+    if (midiOverflowThisBlock)
+    {
+        // Drain accepted events first, then panic at the end of the block. If
+        // the lost FIFO item was a note-off, emitting panic before the drain
+        // would allow an older queued note-on to restart afterwards and stick.
+        const auto panicOffset = juce::jmax(0, numSamples - 1);
+        for (int index = 0; index < midiMemoryCount; ++index)
+        {
+            const auto channel = midiChannels[static_cast<std::size_t>(index)];
+            blockMidiOutput.addEvent(
+                juce::MidiMessage::controllerEvent(channel, 64, 0),
+                panicOffset);
+            blockMidiOutput.addEvent(
+                juce::MidiMessage::allNotesOff(channel), panicOffset);
+            auto& memory = midiMemories[static_cast<std::size_t>(index)];
+            memory.liveSustainDown = false;
+            memory.livePitchWheel = 8192;
+            memory.liveModulation = 0;
+            memory.liveBrightness = 0;
+            memory.livePressure = 0;
+        }
+    }
     renderMidiMemories(numSamples, blockMidiOutput);
     renderInternalSynths(outputChannelData, numOutputChannels,
                          numSamples, blockMidiOutput);
@@ -2064,8 +2131,10 @@ void EcosystemEngine::resetMidiPlaybackSnapshot(MidiMemory& memory) noexcept
 {
     memory.playbackKeyDownNotes.fill(false);
     memory.playbackActiveNotes.fill(false);
+    memory.playbackKeyDownDepths.fill(0);
     memory.playbackNoteVelocities.fill(0.0f);
     memory.playbackSustainDown = false;
+    memory.playbackSustainDepth = 0;
     memory.playbackPitchWheel = 8192;
     memory.playbackModulation = 0;
     memory.playbackBrightness = 0;
@@ -2664,6 +2733,116 @@ void EcosystemEngine::processNm2Effects(
     }
 }
 
+bool EcosystemEngine::insertMidiOverdubEvent(
+    MidiMemory& memory, const juce::MidiMessage& message,
+    int64_t samplePosition, bool safetyEvent,
+    std::uint16_t noteDepth) noexcept
+{
+    if (memory.loopLength <= 0)
+        return false;
+
+    auto wrappedPosition = samplePosition % memory.loopLength;
+    if (wrappedPosition < 0)
+        wrappedPosition += memory.loopLength;
+
+    // Normal material never exceeds the factory event budget. The additional
+    // reserved slots are exclusively for definitive note-offs and sustain-up
+    // messages when the player closes an overdub while notes are still held.
+    if (! safetyEvent
+        && static_cast<int>(memory.events.size()
+                            + memory.overdubEvents.size())
+            >= maximumMidiEvents)
+    {
+        droppedMidiMessages.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
+    if (memory.overdubEvents.size() >= memory.overdubEvents.capacity())
+        return false;
+
+    const auto insertionPoint = std::upper_bound(
+        memory.overdubEvents.begin(), memory.overdubEvents.end(),
+        wrappedPosition,
+        [](int64_t position, const TimedMidiEvent& event)
+        {
+            return position < event.samplePosition;
+        });
+    memory.overdubEvents.insert(
+        insertionPoint, TimedMidiEvent {
+            message, wrappedPosition,
+            juce::jmax<std::uint16_t>(1, noteDepth) });
+    return true;
+}
+
+void EcosystemEngine::finishMidiOverdub(MidiMemory& memory,
+                                         int channel) noexcept
+{
+    const auto closingPosition = memory.loopLength > 0
+        ? (memory.playbackPosition + memory.loopLength - 1)
+            % memory.loopLength
+        : 0;
+    for (int note = 0;
+         note < static_cast<int>(memory.activeRecordedNotes.size()); ++note)
+        if (const auto depth = memory.activeRecordedNotes[
+                static_cast<std::size_t>(note)]; depth > 0)
+            static_cast<void>(insertMidiOverdubEvent(
+                memory, juce::MidiMessage::noteOff(channel, note),
+                closingPosition, true, depth));
+
+    // Controller messages are channel-wide. Return only the controls touched
+    // by this take to the original loop's logical state at the stop playhead,
+    // so NUTRI forms a closed cycle instead of leaking bend or pedal forever.
+    if (memory.recordedSustainDown)
+        static_cast<void>(insertMidiOverdubEvent(
+            memory, juce::MidiMessage::controllerEvent(channel, 64, 0),
+            closingPosition, true));
+    if ((memory.overdubControllerTouched & overdubPitchTouched) != 0u)
+        static_cast<void>(insertMidiOverdubEvent(
+            memory, juce::MidiMessage::pitchWheel(
+                channel, memory.playbackPitchWheel),
+            closingPosition, true));
+    if ((memory.overdubControllerTouched & overdubModulationTouched) != 0u)
+        static_cast<void>(insertMidiOverdubEvent(
+            memory, juce::MidiMessage::controllerEvent(
+                channel, 1, memory.playbackModulation),
+            closingPosition, true));
+    if ((memory.overdubControllerTouched & overdubBrightnessTouched) != 0u)
+        static_cast<void>(insertMidiOverdubEvent(
+            memory, juce::MidiMessage::controllerEvent(
+                channel, 74, memory.playbackBrightness),
+            closingPosition, true));
+    if ((memory.overdubControllerTouched & overdubPressureTouched) != 0u)
+        static_cast<void>(insertMidiOverdubEvent(
+            memory, juce::MidiMessage::channelPressureChange(
+                channel, memory.playbackPressure),
+            closingPosition, true));
+
+    memory.activeRecordedNotes.fill(false);
+    memory.recordedSustainDown = false;
+    memory.overdubExpressionSeedPending = false;
+    memory.overdubControllerTouched = 0u;
+
+    // Both sources are already sorted by loop position. Merge linearly into a
+    // third permanently-reserved vector rather than invoking stable_sort (and
+    // its optional heap allocation) in the realtime callback.
+    memory.mergeScratch.clear();
+    auto original = memory.events.begin();
+    auto added = memory.overdubEvents.begin();
+    while (original != memory.events.end()
+           || added != memory.overdubEvents.end())
+    {
+        const auto takeOriginal = added == memory.overdubEvents.end()
+            || (original != memory.events.end()
+                && original->samplePosition <= added->samplePosition);
+        if (memory.mergeScratch.size() >= memory.mergeScratch.capacity())
+            break;
+        memory.mergeScratch.push_back(takeOriginal ? *original++ : *added++);
+    }
+    memory.events.swap(memory.mergeScratch);
+    memory.mergeScratch.clear();
+    memory.overdubEvents.clear();
+    memory.overdubActive = false;
+}
+
 void EcosystemEngine::applyMidiCommands(MidiMemory& memory, int channel,
                                          juce::MidiBuffer& output)
 {
@@ -2678,11 +2857,17 @@ void EcosystemEngine::applyMidiCommands(MidiMemory& memory, int channel,
     {
         cancelThinningForMemory(memoryIndex);
         memory.events.clear();
+        memory.overdubEvents.clear();
+        memory.mergeScratch.clear();
         memory.loopLength = 0;
         memory.recordPosition = 0;
         memory.playbackPosition = 0;
         memory.recordingRequested.store(false);
         memory.recordingActive = false;
+        memory.overdubActive = false;
+        memory.overdubExpressionSeedPending = false;
+        memory.recordedSustainDown = false;
+        memory.overdubControllerTouched = 0u;
         memory.recordingForDisplay.store(false);
         memory.waitingForFirstNote = false;
         memory.waitingForFirstNoteForDisplay.store(false);
@@ -2710,17 +2895,42 @@ void EcosystemEngine::applyMidiCommands(MidiMemory& memory, int channel,
 
     memory.recordingActive = shouldRecord;
     memory.recordingForDisplay.store(shouldRecord);
-    memory.waitingForFirstNote = shouldRecord;
-    memory.waitingForFirstNoteForDisplay.store(shouldRecord);
     if (shouldRecord)
         cancelThinningForMemory(memoryIndex);
-    addPrivateLoopPanic(output, playbackChannel, ghostChannel, 0);
 
     if (shouldRecord)
     {
+        const auto canOverdub = memory.loopLength > 0
+            && ! memory.events.empty()
+            && memory.containsMaterial.load(std::memory_order_acquire);
+        memory.overdubActive = canOverdub;
+        memory.recordedSustainDown = false;
+        memory.overdubControllerTouched = 0u;
+        memory.waitingForFirstNote = ! canOverdub;
+        memory.waitingForFirstNoteForDisplay.store(! canOverdub);
         if (activeMidiEvolutionMemory == memoryIndex)
             activeMidiEvolutionMemory = -1;
+        memory.evolution = LoopEvolution::normal;
+        memory.evolutionForDisplay.store(
+            static_cast<int>(LoopEvolution::normal),
+            std::memory_order_relaxed);
+
+        if (canOverdub)
+        {
+            memory.overdubEvents.clear();
+            memory.mergeScratch.clear();
+            memory.activeRecordedNotes.fill(false);
+            memory.overdubExpressionSeedPending = true;
+            // The original stored loop keeps sounding. Only a DERIVA ghost is
+            // stopped, otherwise an overdub press would create a musical cut.
+            addPrivateLoopPanic(output, 0, ghostChannel, 0);
+            return;
+        }
+
+        addPrivateLoopPanic(output, playbackChannel, ghostChannel, 0);
         memory.events.clear();
+        memory.overdubEvents.clear();
+        memory.mergeScratch.clear();
         memory.recordPosition = 0;
         memory.playbackPosition = 0;
         memory.loopLength = 0;
@@ -2742,14 +2952,38 @@ void EcosystemEngine::applyMidiCommands(MidiMemory& memory, int channel,
         memory.waitingForFirstNote = false;
         memory.waitingForFirstNoteForDisplay.store(false);
         memory.armedAfterTimestampSeconds.store(0.0);
+
+        if (memory.overdubActive)
+        {
+            finishMidiOverdub(memory, channel);
+            const auto usable = memory.loopLength > 0
+                && ! memory.events.empty();
+            memory.containsMaterial.store(usable);
+            memory.eventCount.store(static_cast<int>(memory.events.size()));
+            memory.lengthSeconds.store(
+                usable ? static_cast<double>(memory.loopLength) / sampleRate
+                       : 0.0);
+            if (usable)
+                chooseMidiEvolution(memory, memoryIndex);
+            return;
+        }
+
+        addPrivateLoopPanic(output, playbackChannel, ghostChannel, 0);
         const auto closingPosition = juce::jmax<int64_t>(0, memory.recordPosition - 1);
         for (int note = 0; note < static_cast<int>(memory.activeRecordedNotes.size()); ++note)
         {
-            if (memory.activeRecordedNotes[static_cast<size_t>(note)])
-                memory.events.push_back({ juce::MidiMessage::noteOff(channel, note),
-                                          closingPosition });
+            if (const auto depth = memory.activeRecordedNotes[
+                    static_cast<size_t>(note)]; depth > 0)
+                memory.events.push_back({
+                    juce::MidiMessage::noteOff(channel, note),
+                    closingPosition, depth });
         }
+        if (memory.recordedSustainDown)
+            memory.events.push_back({
+                juce::MidiMessage::controllerEvent(channel, 64, 0),
+                closingPosition });
         memory.activeRecordedNotes.fill(false);
+        memory.recordedSustainDown = false;
         memory.loopLength = memory.recordPosition;
         memory.playbackPosition = 0;
         resetMidiPlaybackSnapshot(memory);
@@ -3030,6 +3264,16 @@ void EcosystemEngine::recordIncomingMidi(int numSamples, juce::MidiBuffer& liveM
             if (! memory.recordingActive)
                 continue;
 
+            if (memory.overdubActive)
+            {
+                const auto armedAfter
+                    = memory.armedAfterTimestampSeconds.load();
+                if (incoming.timestampSeconds > 0.0 && armedAfter > 0.0
+                    && incoming.timestampSeconds < armedAfter)
+                    continue;
+                memory.armedAfterTimestampSeconds.store(0.0);
+            }
+
             auto& captureStartOffset
                 = captureStartOffsets[static_cast<size_t>(memoryIndex)];
             auto seedExpressionAfterFirstNote = false;
@@ -3060,22 +3304,80 @@ void EcosystemEngine::recordIncomingMidi(int numSamples, juce::MidiBuffer& liveM
                     seedController(juce::MidiMessage::pitchWheel(
                         channel, memory.livePitchWheel));
                 if (memory.liveSustainDown)
+                {
                     seedController(juce::MidiMessage::controllerEvent(
                         channel, 64, 127));
+                    memory.recordedSustainDown = true;
+                }
                 seedExpressionAfterFirstNote = true;
             }
 
-            if (static_cast<int>(memory.events.size()) < maximumMidiEvents)
+            const auto eventPosition = memory.overdubActive
+                ? (memory.playbackPosition + sampleOffset)
+                    % memory.loopLength
+                : memory.recordPosition
+                    + juce::jmax(0, sampleOffset - captureStartOffset);
+            const auto appendEvent = [this, &memory, eventPosition](
+                const juce::MidiMessage& event)
             {
-                const auto relativeOffset = juce::jmax(
-                    0, sampleOffset - captureStartOffset);
-                memory.events.push_back(
-                    { message, memory.recordPosition + relativeOffset });
+                if (memory.overdubActive)
+                    return insertMidiOverdubEvent(
+                        memory, event, eventPosition);
+                if (static_cast<int>(memory.events.size())
+                    >= maximumMidiEvents)
+                {
+                    droppedMidiMessages.fetch_add(
+                        1, std::memory_order_relaxed);
+                    return false;
+                }
+                memory.events.push_back({ event, eventPosition });
+                return true;
+            };
+
+            // NUTRI starts immediately so the old loop never drops out. Seed
+            // controller state only when the first added note arrives: a pad
+            // can be held before NUTRI without creating a controller-only
+            // discontinuity in the stored cycle.
+            if (memory.overdubActive
+                && memory.overdubExpressionSeedPending
+                && message.isNoteOn())
+            {
+                if (memory.livePitchWheel != 8192)
+                    if (appendEvent(juce::MidiMessage::pitchWheel(
+                            channel, memory.livePitchWheel)))
+                        memory.overdubControllerTouched
+                            |= overdubPitchTouched;
+                if (memory.liveSustainDown
+                    && (memory.overdubControllerTouched
+                        & overdubSustainTouched) == 0u)
+                {
+                    if (appendEvent(juce::MidiMessage::controllerEvent(
+                            channel, 64, 127)))
+                    {
+                        memory.recordedSustainDown = true;
+                        memory.overdubControllerTouched
+                            |= overdubSustainTouched;
+                    }
+                }
+                memory.overdubExpressionSeedPending = false;
+                seedExpressionAfterFirstNote = true;
+            }
+
+            // A note released after NUTRI was pressed, but whose note-on
+            // happened before it, belongs only to the live performance. Do
+            // not write an orphan note-off into every future loop.
+            const auto unmatchedOverdubNoteOff = memory.overdubActive
+                && message.isNoteOff()
+                && ! memory.activeRecordedNotes[
+                    static_cast<std::size_t>(message.getNoteNumber())];
+            if (! unmatchedOverdubNoteOff && appendEvent(message))
+            {
                 if (message.isNoteOn())
                 {
                     auto& active = memory.activeRecordedNotes[
                         static_cast<size_t>(message.getNoteNumber())];
-                    active = true;
+                    if (active < std::numeric_limits<std::uint16_t>::max())
+                        ++active;
                     if (memory.evolutionNote < 0)
                     {
                         memory.evolutionNote = message.getNoteNumber();
@@ -3087,33 +3389,64 @@ void EcosystemEngine::recordIncomingMidi(int numSamples, juce::MidiBuffer& liveM
                     // Voice-local controls must follow the first note-on;
                     // JUCE does not cache them for voices that do not yet
                     // exist on the private playback channel.
-                    const auto seedAfterNote = [&memory, channel](
-                        const juce::MidiMessage& seed)
+                    const auto seedAfterNote = [&appendEvent, &memory](
+                        const juce::MidiMessage& seed, std::uint8_t touchedBit)
                     {
-                        if (static_cast<int>(memory.events.size())
-                            < maximumMidiEvents)
-                            memory.events.push_back({ seed, 0 });
+                        if (appendEvent(seed) && memory.overdubActive)
+                            memory.overdubControllerTouched |= touchedBit;
                     };
                     if (seedExpressionAfterFirstNote)
                     {
                         if (memory.liveModulation != 0)
                             seedAfterNote(juce::MidiMessage::controllerEvent(
-                                channel, 1, memory.liveModulation));
+                                channel, 1, memory.liveModulation),
+                                overdubModulationTouched);
                         if (memory.liveBrightness != 0)
                             seedAfterNote(juce::MidiMessage::controllerEvent(
-                                channel, 74, memory.liveBrightness));
+                                channel, 74, memory.liveBrightness),
+                                overdubBrightnessTouched);
                         if (memory.livePressure != 0)
                             seedAfterNote(
                                 juce::MidiMessage::channelPressureChange(
-                                    channel, memory.livePressure));
+                                    channel, memory.livePressure),
+                                overdubPressureTouched);
                     }
                 }
                 else if (message.isNoteOff())
                 {
                     auto& active = memory.activeRecordedNotes[
                         static_cast<size_t>(message.getNoteNumber())];
-                    active = false;
+                    if (active > 0)
+                        --active;
                 }
+                else if (message.isController())
+                {
+                    const auto controller = message.getControllerNumber();
+                    const auto value = message.getControllerValue();
+                    if (controller == 64)
+                    {
+                        memory.recordedSustainDown = value >= 64;
+                        if (memory.overdubActive)
+                            memory.overdubControllerTouched
+                                |= overdubSustainTouched;
+                    }
+                    else if (memory.overdubActive && controller == 1)
+                        memory.overdubControllerTouched
+                            |= overdubModulationTouched;
+                    else if (memory.overdubActive && controller == 74)
+                        memory.overdubControllerTouched
+                            |= overdubBrightnessTouched;
+                    else if (controller == 120 || controller == 121
+                             || controller == 123)
+                    {
+                        memory.activeRecordedNotes.fill(false);
+                        memory.recordedSustainDown = false;
+                    }
+                }
+                else if (memory.overdubActive && message.isPitchWheel())
+                    memory.overdubControllerTouched |= overdubPitchTouched;
+                else if (memory.overdubActive && message.isChannelPressure())
+                    memory.overdubControllerTouched |= overdubPressureTouched;
             }
         }
     };
@@ -3128,6 +3461,12 @@ void EcosystemEngine::recordIncomingMidi(int numSamples, juce::MidiBuffer& liveM
         auto& memory = midiMemories[static_cast<size_t>(index)];
         if (! memory.recordingActive || memory.waitingForFirstNote)
             continue;
+        if (memory.overdubActive)
+        {
+            memory.eventCount.store(static_cast<int>(
+                memory.events.size() + memory.overdubEvents.size()));
+            continue;
+        }
         memory.recordPosition += numSamples
             - captureStartOffsets[static_cast<size_t>(index)];
         memory.phase.store(std::fmod(static_cast<double>(memory.recordPosition) / sampleRate, 1.0));
@@ -3445,7 +3784,8 @@ void EcosystemEngine::renderMidiMemories(int numSamples, juce::MidiBuffer& outpu
     for (int index = 1; index < midiMemoryCount; ++index)
     {
         auto& memory = midiMemories[static_cast<size_t>(index)];
-        if (memory.recordingActive || memory.loopLength <= 0 || memory.events.empty())
+        if ((memory.recordingActive && ! memory.overdubActive)
+            || memory.loopLength <= 0 || memory.events.empty())
             continue;
         if (! loopPlayingApplied[static_cast<std::size_t>(index)])
             continue;
@@ -3467,9 +3807,11 @@ void EcosystemEngine::renderMidiMemories(int numSamples, juce::MidiBuffer& outpu
             {
                 renderMidiSegment(memory, index, memory.playbackPosition,
                                   untilWrap, outputOffset, output);
-                renderMidiEvolutionSegment(memory, index,
-                                           memory.playbackPosition,
-                                           untilWrap, outputOffset, output);
+                if (! memory.overdubActive)
+                    renderMidiEvolutionSegment(memory, index,
+                                               memory.playbackPosition,
+                                               untilWrap, outputOffset,
+                                               output);
             }
             else
                 // DIRADA skips sound, not logical note state. This makes a
@@ -3492,8 +3834,12 @@ void EcosystemEngine::renderMidiMemories(int numSamples, juce::MidiBuffer& outpu
                 if (activeThinnedMemory == index)
                     finishThinningCycle(index, outputOffset, numSamples,
                                         output);
-                chooseMidiEvolution(memory, index);
-                startThinningCycle(index, outputOffset, numSamples, output);
+                if (! memory.overdubActive)
+                {
+                    chooseMidiEvolution(memory, index);
+                    startThinningCycle(index, outputOffset, numSamples,
+                                       output);
+                }
             }
         }
         memory.phase.store(static_cast<double>(memory.playbackPosition)
@@ -3576,6 +3922,8 @@ void EcosystemEngine::renderMidiSegment(MidiMemory& memory, int memoryIndex,
                                          bool emitEvents)
 {
     const auto segmentEnd = segmentStart + segmentLength;
+    const auto playbackChannel = playbackMidiChannels[
+        static_cast<std::size_t>(memoryIndex)];
     for (const auto& event : memory.events)
     {
         if (event.samplePosition < segmentStart)
@@ -3583,33 +3931,32 @@ void EcosystemEngine::renderMidiSegment(MidiMemory& memory, int memoryIndex,
         if (event.samplePosition >= segmentEnd)
             break;
         const auto& message = event.message;
-        if (emitEvents)
-        {
-            const auto playbackChannel = playbackMidiChannels[
-                static_cast<std::size_t>(memoryIndex)];
-            const auto eventOffset = outputOffset + static_cast<int>(
-                event.samplePosition - segmentStart);
-            if (message.isAllNotesOff() || message.isAllSoundOff())
-                addPrivateLoopPanic(output, playbackChannel, 0, eventOffset);
-            else
-            {
-                auto playbackMessage = message;
-                playbackMessage.setChannel(playbackChannel);
-                output.addEvent(playbackMessage, eventOffset);
-            }
-        }
+        auto shouldEmit = true;
+        auto emitPanic = false;
         if (message.isNoteOn())
         {
             const auto note = static_cast<std::size_t>(message.getNoteNumber());
-            memory.playbackKeyDownNotes[note] = true;
+            auto& depth = memory.playbackKeyDownDepths[note];
+            const auto wasDown = depth > 0;
+            depth = static_cast<std::uint16_t>(juce::jmin<int>(
+                std::numeric_limits<std::uint16_t>::max(),
+                static_cast<int>(depth) + event.noteDepth));
+            memory.playbackKeyDownNotes[note] = depth > 0;
             memory.playbackActiveNotes[note] = true;
-            memory.playbackNoteVelocities[note] = message.getFloatVelocity();
+            if (! wasDown)
+                memory.playbackNoteVelocities[note]
+                    = message.getFloatVelocity();
+            shouldEmit = ! wasDown;
         }
         else if (message.isNoteOff())
         {
             const auto note = static_cast<std::size_t>(message.getNoteNumber());
-            memory.playbackKeyDownNotes[note] = false;
-            if (! memory.playbackSustainDown)
+            auto& depth = memory.playbackKeyDownDepths[note];
+            const auto released = juce::jmin(depth, event.noteDepth);
+            depth = static_cast<std::uint16_t>(depth - released);
+            memory.playbackKeyDownNotes[note] = depth > 0;
+            shouldEmit = released > 0 && depth == 0;
+            if (shouldEmit && ! memory.playbackSustainDown)
             {
                 memory.playbackActiveNotes[note] = false;
                 memory.playbackNoteVelocities[note] = 0.0f;
@@ -3619,8 +3966,11 @@ void EcosystemEngine::renderMidiSegment(MidiMemory& memory, int memoryIndex,
         {
             memory.playbackKeyDownNotes.fill(false);
             memory.playbackActiveNotes.fill(false);
+            memory.playbackKeyDownDepths.fill(0);
             memory.playbackNoteVelocities.fill(0.0f);
             memory.playbackSustainDown = false;
+            memory.playbackSustainDepth = 0;
+            emitPanic = true;
         }
         else if (message.isController())
         {
@@ -3628,9 +3978,24 @@ void EcosystemEngine::renderMidiSegment(MidiMemory& memory, int memoryIndex,
             const auto value = message.getControllerValue();
             if (controller == 64)
             {
-                const auto wasDown = memory.playbackSustainDown;
-                memory.playbackSustainDown = value >= 64;
-                if (wasDown && ! memory.playbackSustainDown)
+                const auto previousDepth = memory.playbackSustainDepth;
+                if (value >= 64)
+                {
+                    if (memory.playbackSustainDepth
+                        < std::numeric_limits<std::uint16_t>::max())
+                        ++memory.playbackSustainDepth;
+                    shouldEmit = previousDepth == 0;
+                }
+                else
+                {
+                    if (memory.playbackSustainDepth > 0)
+                        --memory.playbackSustainDepth;
+                    shouldEmit = previousDepth > 0
+                        && memory.playbackSustainDepth == 0;
+                }
+                memory.playbackSustainDown
+                    = memory.playbackSustainDepth > 0;
+                if (previousDepth > 0 && ! memory.playbackSustainDown)
                     for (int note = 0; note < 128; ++note)
                         if (! memory.playbackKeyDownNotes[
                                 static_cast<std::size_t>(note)])
@@ -3650,6 +4015,20 @@ void EcosystemEngine::renderMidiSegment(MidiMemory& memory, int memoryIndex,
             memory.playbackPitchWheel = message.getPitchWheelValue();
         else if (message.isChannelPressure())
             memory.playbackPressure = message.getChannelPressureValue();
+
+        if (emitEvents && shouldEmit)
+        {
+            const auto eventOffset = outputOffset + static_cast<int>(
+                event.samplePosition - segmentStart);
+            if (emitPanic)
+                addPrivateLoopPanic(output, playbackChannel, 0, eventOffset);
+            else
+            {
+                auto playbackMessage = message;
+                playbackMessage.setChannel(playbackChannel);
+                output.addEvent(playbackMessage, eventOffset);
+            }
+        }
     }
 }
 

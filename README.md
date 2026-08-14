@@ -324,7 +324,7 @@ durante il collegamento.
   viene salvata al riavvio. Su RESPIRO si ferma soltanto il loop registrato: il
   monitor del sax live continua; nel percorso FX SCENA anche la coda condivisa
   sfuma in 100 ms, cosi' non maschera lo stop, e rientra dolcemente con PLAY.
-  SEMINA, RISCRIVI, NUTRI e DIMENTICA riportano automaticamente quella memoria
+  SEMINA, NUTRI / OVERDUB e DIMENTICA riportano automaticamente quella memoria
   in PLAY;
 - attivare **ASCOLTO** per far arretrare gradualmente soltanto il bus AMBIENTE
   quando il sax live entra, fino a circa 7 dB. BASSO LIVE, RESPIRO e routing
@@ -356,6 +356,15 @@ durante il collegamento.
   nuovo **ATTENDO NOTA** prima di suonare annulla l'armamento senza creare un
   loop;
 - premere **CHIUDI IL CICLO** per stabilire la durata libera;
+- su MAREA, RADICE e SCINTILLA gia' popolate, premere **NUTRI / OVERDUB**:
+  il loop originale continua a suonare e il playhead non riparte da zero. Le
+  nuove note, il sustain e i controlli espressivi vengono collocati sulla fase
+  corrente senza modificare la durata del ciclo; **FERMA OVERDUB** fonde la
+  nuova take con quelle precedenti. Se due take sovrappongono la stessa nota,
+  Commento la mantiene come un unico gate continuo fino all'ultimo note-off,
+  evitando che una take tronchi l'altra. Un riavvio del dispositivo audio
+  durante NUTRI scarta soltanto la take non ancora chiusa e conserva la memoria
+  base;
 - tenere premuto **TIENI PER DISSOLVERE** per 1,1 secondi per cancellare;
 - su RESPIRO, premere **SEMINA** per iniziare la registrazione audio oppure
   **NUTRI / OVERDUB** per aggiungere nuovo suono mentre la memoria precedente
