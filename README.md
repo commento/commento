@@ -383,7 +383,15 @@ durante il collegamento.
 - **PERSISTENZA DEL RESPIRO** decide quanto materiale precedente sopravvive a ogni
   overdub (`1.000` seleziona la persistenza massima; internamente resta un
   margine di sicurezza dello 0,5%, mentre valori inferiori dissolvono piu'
-  rapidamente il passato).
+  rapidamente il passato);
+- **SISTEMA**, in basso a destra, apre il menu di spegnimento: **RIAVVIA** e
+  **SPEGNI** chiedono un secondo tocco di conferma prima di agire, quindi un
+  contatto involontario durante un concerto non ferma la macchina. Il pulsante
+  e' presente su tutte le pagine e il menu si chiude da solo passando a
+  CONNESSIONI o a GESTI; finche' e' aperto i pad dei gesti non ricevono tocchi.
+  Su Raspberry Pi il menu chiede lo spegnimento a systemd, cosi' la microSD
+  viene smontata correttamente invece di perdere corrente a caldo. Sulla build
+  macOS il menu resta visibile ma dichiara che l'azione esiste solo sul Pi.
 
 ### COSMOS: quattro testine per RESPIRO
 
@@ -607,6 +615,16 @@ sudo systemctl restart commento-kiosk.service
 systemctl status commento-kiosk.service
 journalctl -u commento-kiosk.service -f
 ```
+
+Senza tastiera collegata il touchscreen basta a fermare il Pi: il pulsante
+**SISTEMA** in basso a destra apre RIAVVIA e SPEGNI, ognuno con un secondo
+tocco di conferma. Commento chiede l'azione a `systemctl`, che sulla sessione
+locale attiva del kiosk viene gia' autorizzata da polkit; lo script di
+installazione aggiunge inoltre `/etc/sudoers.d/commento-kiosk-power`, limitato
+ai soli `systemctl poweroff` e `systemctl reboot` per l'utente del kiosk, per le
+installazioni dove polkit rifiuta. Se entrambe le strade falliscono il pannello
+mostra **COMANDO RIFIUTATO** e resta possibile spegnere da SSH. La rimozione del
+kiosk cancella anche quella regola sudo.
 
 Il servizio concede a Commento memoria bloccabile e priorita' realtime. L'app
 blocca in RAM loop e delay e porta esplicitamente il callback ALSA su

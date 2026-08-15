@@ -46,7 +46,8 @@ install -d -m 0700 "${state_directory}"
 binary_stage=$(mktemp /opt/commento/bin/.Commento.XXXXXX)
 launcher_stage=$(mktemp /opt/commento/bin/.start-commento-kiosk.XXXXXX)
 unit_file=$(mktemp)
-trap 'rm -f "${binary_stage}" "${launcher_stage}" "${unit_file}"' EXIT
+sudoers_stage=$(mktemp)
+trap 'rm -f "${binary_stage}" "${launcher_stage}" "${unit_file}" "${sudoers_stage}"' EXIT
 
 install -m 0755 "${commento_binary}" "${binary_stage}"
 install -m 0755 "${project_root}/deploy/raspberry-pi/start-commento-kiosk.sh" \
@@ -59,6 +60,19 @@ for hardware_group in audio video input render; do
         usermod -aG "${hardware_group}" "${commento_user}"
     fi
 done
+
+# Il menu SISTEMA chiede a logind di riavviare o spegnere. Sulla sessione
+# locale attiva polkit lo consente gia'; questa regola, limitata ai due
+# comandi esatti, copre le installazioni dove invece rifiuta.
+systemctl_path=$(command -v systemctl)
+cat > "${sudoers_stage}" <<EOF
+${commento_user} ALL=(root) NOPASSWD: ${systemctl_path} poweroff, ${systemctl_path} reboot
+EOF
+if visudo -cf "${sudoers_stage}" >/dev/null; then
+    install -m 0440 "${sudoers_stage}" /etc/sudoers.d/commento-kiosk-power
+else
+    echo "Regola sudo non valida: il menu SISTEMA restera' affidato a polkit." >&2
+fi
 
 if [[ ! -f ${state_directory}/previous-target ]]; then
     systemctl get-default > "${state_directory}/previous-target"

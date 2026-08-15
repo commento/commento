@@ -11,6 +11,7 @@
 
 class MemoryOrb;
 class ConnectionChoice;
+class SystemMenu;
 class LinuxMultitouchBridge;
 
 class MainComponent final : public juce::Component,
@@ -57,6 +58,9 @@ private:
     void updateControls();
     void toggleSettings();
     void toggleGestures();
+    void toggleSystemMenu();
+    void closeSystemMenu();
+    void requestSystemPower(bool restart);
     void updatePageVisibility();
     void updateMidiMonitor();
     void scanAudioDevices();
@@ -107,6 +111,7 @@ private:
     juce::TextButton clearButton { "DIMENTICA" };
     juce::TextButton settingsButton { "CONNESSIONI" };
     juce::TextButton gesturesButton { "GESTI" };
+    juce::TextButton systemButton { "SISTEMA" };
     juce::TextButton textureButton { "GRANA: PULITA" };
     juce::TextButton fuzzButton { "FUZZ: SPENTO" };
     juce::TextButton evolutionButton { "DERIVA: SPENTA" };
@@ -152,6 +157,7 @@ private:
     std::unique_ptr<ConnectionChoice> saxOutputChoice;
     std::unique_ptr<ConnectionChoice> saxPathChoice;
     std::unique_ptr<ConnectionChoice> diagnosticToneChoice;
+    std::unique_ptr<SystemMenu> systemMenu;
 
     AudioConnectionDraft audioDraft;
     juce::StringArray backendNames;

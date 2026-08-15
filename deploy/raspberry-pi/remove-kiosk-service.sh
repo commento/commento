@@ -10,6 +10,7 @@ state_directory=/var/lib/commento-kiosk
 systemctl disable --now commento-kiosk.service 2>/dev/null || true
 systemctl unmask getty@tty1.service
 rm -f /etc/systemd/system/commento-kiosk.service
+rm -f /etc/sudoers.d/commento-kiosk-power
 
 if [[ -f ${state_directory}/previous-target ]]; then
     previous_target=$(tr -d '\n' < "${state_directory}/previous-target")

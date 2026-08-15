@@ -306,6 +306,49 @@ juce::String delayLevelText(float amount)
         : juce::String("ECO ")
             + juce::String(static_cast<int>(std::round(amount * 100.0f))) + "%";
 }
+
+#if JUCE_LINUX
+bool runSystemPowerCommand(const juce::StringArray& command)
+{
+    juce::ChildProcess process;
+    if (! process.start(command, 0))
+        return false;
+
+    // systemctl torna subito dopo che logind ha accettato la richiesta. Se non
+    // torna affatto la macchina si sta gia' fermando sotto di noi: il processo
+    // resta vivo, non lo uccidiamo a meta' spegnimento.
+    if (! process.waitForProcessToFinish(4000))
+        return true;
+
+    return process.getExitCode() == 0;
+}
+#endif
+
+// Il kiosk gira come utente non privilegiato: logind accetta reboot e poweroff
+// dalla sessione locale attiva, e la regola sudo installata con il servizio
+// copre i sistemi dove polkit rifiuta.
+bool requestSystemPowerAction(bool restart)
+{
+#if JUCE_LINUX
+    const juce::String verb = restart ? "reboot" : "poweroff";
+
+    juce::StringArray direct;
+    direct.add("systemctl");
+    direct.add(verb);
+    if (runSystemPowerCommand(direct))
+        return true;
+
+    juce::StringArray elevated;
+    elevated.add("sudo");
+    elevated.add("-n");
+    elevated.add("systemctl");
+    elevated.add(verb);
+    return runSystemPowerCommand(elevated);
+#else
+    juce::ignoreUnused(restart);
+    return false;
+#endif
+}
 }
 
 class MemoryOrb final : public juce::Component
@@ -575,6 +618,152 @@ private:
     int selectedIndex = -1;
 };
 
+// Menu di sistema in basso a destra. Ogni azione chiede due tocchi separati:
+// un contatto involontario durante un concerto non puo' spegnere il Pi.
+class SystemMenu final : public juce::Component
+{
+public:
+    SystemMenu()
+    {
+        titleLabel.setText("SISTEMA", juce::dontSendNotification);
+        titleLabel.setFont(juce::FontOptions(24.0f, juce::Font::bold));
+        titleLabel.setColour(juce::Label::textColourId, juce::Colour(paleText));
+        titleLabel.setJustificationType(juce::Justification::centred);
+        addAndMakeVisible(titleLabel);
+
+        messageLabel.setFont(juce::FontOptions(15.0f));
+        messageLabel.setJustificationType(juce::Justification::centred);
+        messageLabel.setMinimumHorizontalScale(0.55f);
+        addAndMakeVisible(messageLabel);
+
+        style(restartButton, juce::Colour(0xff5da8a1));
+        style(shutdownButton, juce::Colour(0xffad496a));
+        style(cancelButton, juce::Colour(0xff6a7c91));
+        restartButton.onClick = [this] { arm(Action::restart); };
+        shutdownButton.onClick = [this] { arm(Action::shutdown); };
+        cancelButton.onClick = [this]
+        {
+            if (onCancel != nullptr)
+                onCancel();
+        };
+        addAndMakeVisible(restartButton);
+        addAndMakeVisible(shutdownButton);
+        addAndMakeVisible(cancelButton);
+        reset();
+    }
+
+    std::function<void()> onRestart;
+    std::function<void()> onShutdown;
+    std::function<void()> onCancel;
+
+    void reset()
+    {
+        armed = Action::none;
+        for (auto* button : { &restartButton, &shutdownButton, &cancelButton })
+            button->setEnabled(true);
+        refresh();
+    }
+
+    void showProgress(const juce::String& message)
+    {
+        armed = Action::none;
+        for (auto* button : { &restartButton, &shutdownButton, &cancelButton })
+            button->setEnabled(false);
+        refresh();
+        setMessage(message, juce::Colour(paleText));
+    }
+
+    void showFailure(const juce::String& message)
+    {
+        reset();
+        setMessage(message, juce::Colour(0xffff9f8e));
+    }
+
+    void paint(juce::Graphics& graphics) override
+    {
+        const auto area = getLocalBounds().toFloat().reduced(1.5f);
+        graphics.setColour(juce::Colour(0xff151c2b));
+        graphics.fillRoundedRectangle(area, 20.0f);
+        graphics.setColour(juce::Colour(0xffb5734f).withAlpha(0.42f));
+        graphics.drawRoundedRectangle(area, 20.0f, 1.8f);
+    }
+
+    void resized() override
+    {
+        auto area = getLocalBounds().reduced(18, 16);
+        titleLabel.setBounds(area.removeFromTop(30));
+        messageLabel.setBounds(area.removeFromTop(36));
+        area.removeFromTop(6);
+        cancelButton.setBounds(area.removeFromBottom(52).reduced(2));
+        area.removeFromBottom(12);
+        const auto buttonHeight = (area.getHeight() - 12) / 2;
+        restartButton.setBounds(area.removeFromTop(buttonHeight).reduced(2));
+        area.removeFromTop(12);
+        shutdownButton.setBounds(area.removeFromTop(buttonHeight).reduced(2));
+    }
+
+private:
+    enum class Action
+    {
+        none,
+        restart,
+        shutdown
+    };
+
+    static void style(juce::TextButton& button, juce::Colour colour)
+    {
+        button.setColour(juce::TextButton::buttonColourId, colour.withAlpha(0.18f));
+        button.setColour(juce::TextButton::buttonOnColourId, colour.withAlpha(0.62f));
+        button.setColour(juce::TextButton::textColourOffId, colour.brighter(0.7f));
+        button.setColour(juce::TextButton::textColourOnId, juce::Colours::white);
+    }
+
+    void arm(Action action)
+    {
+        if (armed == action)
+        {
+            const auto& callback = action == Action::restart
+                ? onRestart : onShutdown;
+            armed = Action::none;
+            if (callback != nullptr)
+                callback();
+            return;
+        }
+
+        armed = action;
+        refresh();
+    }
+
+    void setMessage(const juce::String& text, juce::Colour colour)
+    {
+        messageLabel.setColour(juce::Label::textColourId, colour);
+        messageLabel.setText(text, juce::dontSendNotification);
+    }
+
+    void refresh()
+    {
+        restartButton.setButtonText(armed == Action::restart
+            ? "CONFERMA RIAVVIO" : "RIAVVIA");
+        shutdownButton.setButtonText(armed == Action::shutdown
+            ? "CONFERMA SPEGNIMENTO" : "SPEGNI");
+        restartButton.setToggleState(armed == Action::restart,
+                                     juce::dontSendNotification);
+        shutdownButton.setToggleState(armed == Action::shutdown,
+                                      juce::dontSendNotification);
+        setMessage(armed == Action::none
+            ? "tocca l'azione e poi confermala"
+            : "tocca di nuovo per confermare",
+                   juce::Colour(armed == Action::none ? quietText : paleText));
+    }
+
+    juce::Label titleLabel;
+    juce::Label messageLabel;
+    juce::TextButton restartButton { "RIAVVIA" };
+    juce::TextButton shutdownButton { "SPEGNI" };
+    juce::TextButton cancelButton { "ANNULLA" };
+    Action armed = Action::none;
+};
+
 MainComponent::MainComponent()
 {
     interfaceLookAndFeel = std::make_unique<CommentoLookAndFeel>();
@@ -646,6 +835,7 @@ MainComponent::MainComponent()
     styleButton(clearButton, juce::Colour(0xffad496a));
     styleButton(settingsButton, juce::Colour(0xff6a7c91));
     styleButton(gesturesButton, juce::Colour(0xff9b7ed9));
+    styleButton(systemButton, juce::Colour(0xffb5734f));
     const auto persistentGestureColour = juce::Colour(0xffa996e8);
     const auto momentaryGestureColour = juce::Colour(0xff526173);
     styleButton(textureButton, persistentGestureColour);
@@ -681,6 +871,7 @@ MainComponent::MainComponent()
     addAndMakeVisible(clearButton);
     addAndMakeVisible(settingsButton);
     addAndMakeVisible(gesturesButton);
+    addAndMakeVisible(systemButton);
     addAndMakeVisible(textureButton);
     addAndMakeVisible(fuzzButton);
     addAndMakeVisible(evolutionButton);
@@ -785,6 +976,12 @@ MainComponent::MainComponent()
     makeChoice(saxPathChoice, "PERCORSO SAX");
     makeChoice(diagnosticToneChoice, "TEST 997 Hz");
 
+    systemMenu = std::make_unique<SystemMenu>();
+    systemMenu->onRestart = [this] { requestSystemPower(true); };
+    systemMenu->onShutdown = [this] { requestSystemPower(false); };
+    systemMenu->onCancel = [this] { closeSystemMenu(); };
+    addChildComponent(*systemMenu);
+
     recordButton.onClick = [this]
     {
         if (EcosystemEngine::isLiveBassLayer(selectedMemory))
@@ -808,6 +1005,7 @@ MainComponent::MainComponent()
     };
     settingsButton.onClick = [this] { toggleSettings(); };
     gesturesButton.onClick = [this] { toggleGestures(); };
+    systemButton.onClick = [this] { toggleSystemMenu(); };
     textureButton.onClick = [this] { cycleTexture(); };
     fuzzButton.onClick = [this]
     {
@@ -1351,7 +1549,10 @@ void MainComponent::handleSecondaryTouch(
     // Raw contacts are deliberately useful only on GESTI.  Everywhere else
     // JUCE's normal primary pointer remains the sole input path, so connection
     // choices and destructive hold actions retain their existing semantics.
-    if (! gesturesVisible || getWidth() <= 0 || getHeight() <= 0)
+    // Il menu di sistema copre i pad: finche' e' aperto nessun contatto grezzo
+    // deve raggiungere i gesti sottostanti.
+    if (! gesturesVisible || systemMenu->isVisible()
+        || getWidth() <= 0 || getHeight() <= 0)
         return;
     for (const auto& capture : secondaryTouchCaptures)
         if (capture.id == contactId)
@@ -3188,6 +3389,7 @@ void MainComponent::toggleSettings()
 {
     settingsVisible = ! settingsVisible;
     gesturesVisible = false;
+    closeSystemMenu();
     // Never leave a hidden learn or a held edge behind when crossing pages.
     releaseSecondaryTouchCaptures();
     engine.releaseSaxFootswitch();
@@ -3217,6 +3419,7 @@ void MainComponent::toggleGestures()
 {
     gesturesVisible = ! gesturesVisible;
     settingsVisible = false;
+    closeSystemMenu();
     // A hidden momentary pad must never remain held. The DSP performs the
     // release ramp after these ownership bits are cleared.
     releaseSecondaryTouchCaptures();
@@ -3230,6 +3433,59 @@ void MainComponent::toggleGestures()
     updateControls();
     resized();
     repaint();
+}
+
+void MainComponent::toggleSystemMenu()
+{
+    if (systemMenu->isVisible())
+    {
+        closeSystemMenu();
+        return;
+    }
+
+    systemMenu->reset();
+    systemMenu->setVisible(true);
+    systemMenu->toFront(false);
+    systemButton.setToggleState(true, juce::dontSendNotification);
+    resized();
+}
+
+void MainComponent::closeSystemMenu()
+{
+    if (! systemMenu->isVisible())
+        return;
+
+    systemMenu->setVisible(false);
+    systemMenu->reset();
+    systemButton.setToggleState(false, juce::dontSendNotification);
+}
+
+void MainComponent::requestSystemPower(bool restart)
+{
+    systemMenu->showProgress(restart ? "RIAVVIO IN CORSO..."
+                                     : "SPEGNIMENTO IN CORSO...");
+
+    // La richiesta blocca il thread dei messaggi finche' systemd non risponde:
+    // lasciamo prima ridisegnare la conferma, altrimenti il pannello resta sul
+    // testo precedente per tutta l'attesa.
+    juce::Component::SafePointer<MainComponent> safeThis(this);
+    juce::MessageManager::callAsync([safeThis, restart]() mutable
+    {
+        const auto accepted = requestSystemPowerAction(restart);
+        auto* self = safeThis.getComponent();
+        if (self == nullptr || accepted)
+            return;
+
+#if JUCE_LINUX
+        const auto reason = juce::String("COMANDO RIFIUTATO - reinstalla il "
+                                         "servizio kiosk o usa SSH");
+#else
+        const auto reason = juce::String("DISPONIBILE SOLO SU RASPBERRY PI");
+#endif
+        juce::Logger::writeToLog("Commento: richiesta di "
+            + juce::String(restart ? "riavvio" : "spegnimento") + " rifiutata");
+        self->systemMenu->showFailure(reason);
+    });
 }
 
 void MainComponent::updatePageVisibility()
@@ -3372,8 +3628,23 @@ void MainComponent::resized()
     settingsButton.setBounds(footer.removeFromLeft(210).reduced(4, 12));
     footer.removeFromLeft(10);
     gesturesButton.setBounds(footer.removeFromLeft(210).reduced(4, 12));
+    systemButton.setBounds(footer.removeFromRight(170).reduced(4, 12));
+    footer.removeFromRight(10);
     clearButton.setBounds(footer.removeFromRight(230).reduced(4, 12));
     recordButton.setBounds(completeFooter.withSizeKeepingCentre(400, 78));
+
+    if (systemMenu->isVisible())
+    {
+        // Il pannello sale dall'angolo in basso a destra, sopra il suo pulsante
+        // e sopra qualunque pagina sia aperta.
+        constexpr int menuWidth = 360;
+        constexpr int menuHeight = 320;
+        const auto menuBottom = systemButton.getY() - 12;
+        const auto menuTop = juce::jmax(8, menuBottom - menuHeight);
+        systemMenu->setBounds(systemButton.getRight() - menuWidth, menuTop,
+                              menuWidth, juce::jmax(200, menuBottom - menuTop));
+        systemMenu->toFront(false);
+    }
 
     if (settingsVisible)
     {
